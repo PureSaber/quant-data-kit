@@ -97,6 +97,10 @@ def load_manifest(path: Path) -> DataManifest:
     return DataManifest(**payload)
 
 
+def parse_date(value: str | pd.Timestamp) -> pd.Timestamp:
+    return pd.Timestamp(value).normalize()
+
+
 def cache_covers_range(
     df: pd.DataFrame,
     start_date: str,
@@ -107,6 +111,31 @@ def cache_covers_range(
     if df.empty or date_col not in df.columns:
         return False
     dates = pd.to_datetime(df[date_col])
-    start = pd.Timestamp(start_date).normalize()
-    end = pd.Timestamp(end_date).normalize()
+    start = parse_date(start_date)
+    end = parse_date(end_date)
     return dates.min() <= start and dates.max() >= end
+
+
+def should_refresh_cache(
+    path: Path,
+    start_date: str,
+    end_date: str,
+    *,
+    date_col: str = "date",
+) -> bool:
+    path = Path(path)
+    if not path.is_file():
+        return True
+    df = load_parquet(path)
+    return not cache_covers_range(df, start_date, end_date, date_col=date_col)
+
+
+def incremental_start_date(path: Path, default_start: str) -> str:
+    path = Path(path)
+    if not path.is_file():
+        return default_start
+    df = load_parquet(path)
+    if df.empty or "date" not in df.columns:
+        return default_start
+    next_day = pd.to_datetime(df["date"]).max() + pd.Timedelta(days=1)
+    return next_day.strftime("%Y-%m-%d")

@@ -15,10 +15,23 @@ pip install -e ".[akshare,dev]"
 
 | Module | Purpose |
 |--------|---------|
-| `storage` | Parquet I/O + `*.manifest.json` dataset metadata |
+| `storage` | Parquet I/O, manifest tracking, cache helpers |
 | `validate` | OHLCV schema / missing / duplicate checks |
 | `calendar` | SSE trading calendar helpers |
-| `providers.akshare` | HS300 constituents + daily price fetch with retry |
+| `panel` | PIT merge helpers for alt-data |
+| `providers.prices` | Daily OHLCV with thread pool + tx fallback |
+| `providers.fundamentals` | Valuation metrics (PE/PB/market cap) |
+| `providers.universe` | HS300 constituents + membership history |
+| `providers.benchmark` | HS300 index returns |
+| `providers.earnings_forecast` | Quarterly forecasts with effective_date (PIT) |
+| `providers.northbound` | Stock Connect holdings with disclosure lag |
+| `providers.industry` | Industry board returns |
+| `providers.akshare` | Backward-compatible re-exports |
+
+## PIT rules
+
+- **Earnings forecasts**: `effective_date = announce_date + 1 business day`
+- **Northbound holdings**: `shift(1)` on publish date to reflect T-1 disclosure
 
 ## CLI
 
@@ -30,8 +43,9 @@ qdk-manifest data/prices.manifest.json
 ## Python API
 
 ```python
-from quant_data_kit import save_parquet, write_manifest, validate_price_frame
-from quant_data_kit.providers.akshare import fetch_daily_prices, fetch_hs300_constituents
+from quant_data_kit import save_parquet, merge_earnings_to_panel, should_refresh_cache
+from quant_data_kit.providers import fetch_daily_prices, fetch_earnings_forecasts
+from quant_data_kit.providers.akshare import fetch_hs300_constituents
 ```
 
 ## Used by

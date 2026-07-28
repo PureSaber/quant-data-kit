@@ -42,3 +42,21 @@ def test_save_manifest(tmp_path):
     manifest = save_manifest(df, parquet, dataset="test")
     assert manifest.rows == 1
     assert build_manifest(df, "test", parquet).dataset == "test"
+
+
+def test_should_refresh_cache(tmp_path):
+    from quant_data_kit.storage import incremental_start_date, should_refresh_cache
+
+    df = pd.DataFrame(
+        {
+            "symbol": ["000001", "000001"],
+            "date": pd.to_datetime(["2020-01-02", "2020-01-03"]),
+            "close": [10.2, 10.3],
+        }
+    )
+    path = tmp_path / "prices.parquet"
+    df.to_parquet(path, index=False)
+    assert not should_refresh_cache(path, "2020-01-02", "2020-01-03")
+    assert should_refresh_cache(path, "2019-01-01", "2020-01-03")
+    assert incremental_start_date(path, "2019-01-01") == "2020-01-04"
+    assert incremental_start_date(tmp_path / "missing.parquet", "2019-01-01") == "2019-01-01"
