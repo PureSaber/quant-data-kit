@@ -1,0 +1,7 @@
+{
+  "name": "quant-data-kit",
+  "private": true,
+  "scripts": {
+    "lint": "ruff check src tests"
+  }
+}

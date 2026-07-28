@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quant-data-kit"
+version = "0.1.0"
+description = "Shared data providers, Parquet cache, and validation for quant research repos"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "pyarrow>=14.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+akshare = ["akshare>=1.12"]
+dev = ["pytest>=7.4", "ruff>=0.9.0"]
+
+[project.scripts]
+qdk-validate = "quant_data_kit.cli:main_validate"
+qdk-manifest = "quant_data_kit.cli:main_manifest"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

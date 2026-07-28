@@ -1,0 +1,10 @@
+# quant-data-kit
+
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.egg-info/
+data/
+dist/
+build/
