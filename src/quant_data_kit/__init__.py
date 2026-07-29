@@ -23,8 +23,8 @@ from quant_data_kit.storage import (
 from quant_data_kit.validate import validate_price_frame
 
 __all__ = [
-    "__version__",
     "DataManifest",
+    "__version__",
     "add_industry_relative_strength",
     "cache_covers_range",
     "incremental_start_date",
