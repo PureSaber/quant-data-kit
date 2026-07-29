@@ -30,5 +30,32 @@ def main_manifest(argv: list[str] | None = None) -> int:
     return 0
 
 
+def main_catalog(argv: list[str] | None = None) -> int:
+    from quant_data_kit.catalog import DataCatalog
+
+    parser = argparse.ArgumentParser(prog="qdk-catalog", description="Dataset catalog for quant-data-kit")
+    parser.add_argument("--catalog", default="data/catalog.yaml")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    reg = sub.add_parser("register", help="Register a parquet dataset")
+    reg.add_argument("dataset_id")
+    reg.add_argument("parquet", type=Path)
+    reg.add_argument("--manifest", type=Path, default=None)
+
+    sub.add_parser("list", help="List registered datasets")
+
+    args = parser.parse_args(argv)
+    catalog = DataCatalog(Path(args.catalog))
+
+    if args.command == "register":
+        record = catalog.register(args.dataset_id, args.parquet, args.manifest)
+        print(json.dumps(record.__dict__, indent=2, ensure_ascii=False))
+        return 0
+
+    rows = [r.__dict__ for r in catalog.list()]
+    print(json.dumps(rows, indent=2, ensure_ascii=False))
+    return 0
+
+
 if __name__ == "__main__":
     raise SystemExit(main_validate(sys.argv[1:]))

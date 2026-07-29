@@ -38,6 +38,8 @@ pip install -e ".[akshare,dev]"
 ```bash
 qdk-validate data/prices.parquet
 qdk-manifest data/prices.manifest.json
+qdk-catalog list
+qdk-catalog register hs300_prices data/prices.parquet
 ```
 
 ## Python API

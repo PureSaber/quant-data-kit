@@ -23,6 +23,7 @@ dev = ["pytest>=7.4", "ruff>=0.9.0"]
 [project.scripts]
 qdk-validate = "quant_data_kit.cli:main_validate"
 qdk-manifest = "quant_data_kit.cli:main_manifest"
+qdk-catalog = "quant_data_kit.cli:main_catalog"
 
 [tool.setuptools.packages.find]
 where = ["src"]
