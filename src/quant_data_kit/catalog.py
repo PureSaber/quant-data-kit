@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import ClassVar
 
 import yaml
 
@@ -22,17 +23,38 @@ class DatasetRecord:
 
 
 class DataCatalog:
+    DEFAULT_STACK: ClassVar[dict[str, str]] = {"quant-factors": "0.1.0"}
+
     def __init__(self, catalog_path: Path) -> None:
         self.catalog_path = Path(catalog_path)
         self.catalog_path.parent.mkdir(parents=True, exist_ok=True)
         if self.catalog_path.is_file():
             raw = yaml.safe_load(self.catalog_path.read_text(encoding="utf-8")) or {}
             self._records: dict[str, dict] = raw.get("datasets") or {}
+            self._stack: dict[str, str] = raw.get("stack_dependencies") or {}
         else:
             self._records = {}
+            self._stack = {}
+        self.ensure_default_stack()
+
+    def ensure_default_stack(self) -> None:
+        changed = False
+        for name, version in self.DEFAULT_STACK.items():
+            if name not in self._stack:
+                self._stack[name] = version
+                changed = True
+        if changed or not self.catalog_path.is_file():
+            self.save()
+
+    def list_stack_dependencies(self) -> dict[str, str]:
+        return dict(self._stack)
+
+    def register_stack_dependency(self, name: str, version: str) -> None:
+        self._stack[name] = version
+        self.save()
 
     def save(self) -> None:
-        payload = {"datasets": self._records}
+        payload = {"datasets": self._records, "stack_dependencies": self._stack}
         self.catalog_path.write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
 
     def register(self, dataset_id: str, parquet_path: Path, manifest_path: Path | None = None) -> DatasetRecord:

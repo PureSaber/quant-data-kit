@@ -5,10 +5,10 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 
+from quant_data_kit.providers._fetch import fetch_symbols_parallel, fetch_with_retries
 from quant_data_kit.providers._network import configure_network
 from quant_data_kit.providers._symbols import normalize_symbol, to_market_symbol
 
@@ -90,29 +90,18 @@ def fetch_daily_prices(
 ) -> pd.DataFrame:
     start = pd.Timestamp(start_date).strftime("%Y%m%d")
     end = pd.Timestamp(end_date).strftime("%Y%m%d")
-    frames: list[pd.DataFrame] = []
-
     def _task(symbol: str) -> pd.DataFrame:
-        last_error: Exception | None = None
-        for _ in range(max_retries):
-            try:
-                return _fetch_one_price(symbol, start, end, fetch_fn, sleep_seconds)
-            except Exception as exc:  # noqa: BLE001
-                last_error = exc
-                time.sleep(sleep_seconds * 2)
-        raise RuntimeError(f"Failed to fetch prices for {symbol}") from last_error
+        return fetch_with_retries(
+            lambda: _fetch_one_price(symbol, start, end, fetch_fn, sleep_seconds),
+            max_retries=max_retries,
+            sleep_seconds=sleep_seconds,
+            error_message=f"Failed to fetch prices for {symbol}",
+        )
 
-    if max_workers <= 1:
-        for symbol in symbols:
-            frames.append(_task(symbol))
-    else:
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(_task, symbol): symbol for symbol in symbols}
-            for future in as_completed(futures):
-                frames.append(future.result())
-
-    if not frames:
-        return pd.DataFrame(columns=PRICE_COLUMNS)
-
-    prices = pd.concat(frames, ignore_index=True)
-    return prices.sort_values(["symbol", "date"]).reset_index(drop=True)
+    return fetch_symbols_parallel(
+        symbols,
+        _task,
+        max_workers=max_workers,
+        empty_columns=PRICE_COLUMNS,
+        sort_columns=["symbol", "date"],
+    )

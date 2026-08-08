@@ -53,7 +53,11 @@ def main_catalog(argv: list[str] | None = None) -> int:
         return 0
 
     rows = [r.__dict__ for r in catalog.list()]
-    print(json.dumps(rows, indent=2, ensure_ascii=False))
+    payload = {
+        "datasets": rows,
+        "stack_dependencies": catalog.list_stack_dependencies(),
+    }
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0
 
 
