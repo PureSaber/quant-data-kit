@@ -41,6 +41,8 @@ def test_save_manifest(tmp_path):
     parquet = tmp_path / "x.parquet"
     manifest = save_manifest(df, parquet, dataset="test")
     assert manifest.rows == 1
+    assert manifest.content_sha256
+    assert manifest.schema_sha256
     assert build_manifest(df, "test", parquet).dataset == "test"
 
 

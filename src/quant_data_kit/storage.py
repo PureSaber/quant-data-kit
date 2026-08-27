@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,10 @@ class DataManifest:
     symbol_count: int | None = None
     updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     extra: dict[str, str | int | float | bool] = field(default_factory=dict)
+    content_sha256: str | None = None
+    schema_sha256: str | None = None
+    source: str | None = None
+    as_of: str | None = None
 
 
 def save_parquet(df: pd.DataFrame, path: Path) -> None:
@@ -51,9 +56,18 @@ def build_manifest(
     date_col: str = "date",
     symbol_col: str = "symbol",
     extra: dict[str, str | int | float | bool] | None = None,
+    source: str | None = None,
+    as_of: str | None = None,
 ) -> DataManifest:
     dmin, dmax = _date_bounds(df, date_col)
     sym_count = int(df[symbol_col].nunique()) if symbol_col in df.columns and not df.empty else None
+    canonical = df.reindex(sorted(df.columns), axis=1).to_csv(
+        index=False, date_format="%Y-%m-%dT%H:%M:%S.%f"
+    )
+    schema = json.dumps(
+        [(str(column), str(dtype)) for column, dtype in df.dtypes.items()],
+        separators=(",", ":"),
+    )
     return DataManifest(
         dataset=dataset,
         path=str(path),
@@ -63,6 +77,10 @@ def build_manifest(
         date_max=dmax,
         symbol_count=sym_count,
         extra=extra or {},
+        content_sha256=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        schema_sha256=hashlib.sha256(schema.encode("utf-8")).hexdigest(),
+        source=source,
+        as_of=as_of,
     )
 
 
@@ -81,10 +99,19 @@ def save_manifest(
     date_col: str = "date",
     symbol_col: str = "symbol",
     extra: dict[str, str | int | float | bool] | None = None,
+    source: str | None = None,
+    as_of: str | None = None,
 ) -> DataManifest:
     save_parquet(df, parquet_path)
     manifest = build_manifest(
-        df, dataset, parquet_path, date_col=date_col, symbol_col=symbol_col, extra=extra
+        df,
+        dataset,
+        parquet_path,
+        date_col=date_col,
+        symbol_col=symbol_col,
+        extra=extra,
+        source=source,
+        as_of=as_of,
     )
     target = manifest_path or parquet_path.with_suffix(".manifest.json")
     write_manifest(manifest, target)

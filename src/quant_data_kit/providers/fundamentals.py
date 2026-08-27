@@ -12,7 +12,15 @@ from quant_data_kit.providers._network import configure_network
 from quant_data_kit.providers._symbols import normalize_symbol
 from quant_data_kit.storage import parse_date
 
-FUNDAMENTAL_COLUMNS = ["symbol", "date", "report_date", "market_cap", "pe_ratio", "pb_ratio"]
+FUNDAMENTAL_COLUMNS = [
+    "symbol",
+    "date",
+    "report_date",
+    "available_at",
+    "market_cap",
+    "pe_ratio",
+    "pb_ratio",
+]
 FUNDAMENTAL_RENAME = {
     "数据日期": "date",
     "总市值": "market_cap",
@@ -49,6 +57,10 @@ def _fetch_one_fundamental(
         frame["report_date"] = frame["date"]
     else:
         frame["report_date"] = pd.to_datetime(frame["report_date"]).dt.normalize()
+    if "available_at" not in frame.columns:
+        frame["available_at"] = frame["date"]
+    else:
+        frame["available_at"] = pd.to_datetime(frame["available_at"]).dt.normalize()
     return frame[(frame["date"] >= start) & (frame["date"] <= end)]
 
 
