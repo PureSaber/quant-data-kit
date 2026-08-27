@@ -7,6 +7,7 @@ from collections.abc import Callable
 
 import pandas as pd
 
+from quant_data_kit.exceptions import ValidationError
 from quant_data_kit.providers._network import configure_network
 from quant_data_kit.providers._symbols import normalize_symbol
 from quant_data_kit.storage import parse_date
@@ -34,6 +35,8 @@ def fetch_hs300_constituents_history(
     end_date: str,
     fetch_fn: Callable[[], pd.DataFrame] | None = None,
     current_symbols: list[str] | None = None,
+    trade_dates: pd.DatetimeIndex | None = None,
+    allow_current_fallback: bool = False,
 ) -> pd.DataFrame:
     if fetch_fn is not None:
         adjustments = fetch_fn()
@@ -66,9 +69,21 @@ def fetch_hs300_constituents_history(
                 break
 
     if events.empty or "date" not in events.columns:
-        logger.warning("HS300 adjustment history unavailable; using current constituents only")
+        if not allow_current_fallback:
+            raise ValidationError(
+                "HS300 historical constituent events are unavailable; refusing current-universe "
+                "fallback because it creates survivorship bias"
+            )
+        logger.warning("HS300 adjustment history unavailable; explicitly using current constituents")
         current = current_symbols or fetch_hs300_constituents()
-        all_dates = pd.date_range(parse_date(start_date), parse_date(end_date), freq="B")
+        if trade_dates is None:
+            from quant_data_kit.calendar import load_sse_trade_dates
+
+            trade_dates = load_sse_trade_dates()
+        all_dates = pd.DatetimeIndex(trade_dates)
+        all_dates = all_dates[
+            (all_dates >= parse_date(start_date)) & (all_dates <= parse_date(end_date))
+        ]
         rows = [
             {"symbol": symbol, "date": date, "in_universe": 1}
             for date in all_dates
@@ -81,7 +96,12 @@ def fetch_hs300_constituents_history(
 
     start = parse_date(start_date)
     end = parse_date(end_date)
-    all_dates = pd.date_range(start, end, freq="B")
+    if trade_dates is None:
+        from quant_data_kit.calendar import load_sse_trade_dates
+
+        trade_dates = load_sse_trade_dates()
+    all_dates = pd.DatetimeIndex(trade_dates)
+    all_dates = all_dates[(all_dates >= start) & (all_dates <= end)]
 
     active = set(current_symbols or fetch_hs300_constituents())
     for _, row in events.sort_values("date", ascending=False).iterrows():
