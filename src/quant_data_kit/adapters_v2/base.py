@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -110,6 +111,18 @@ class BookSequenceNormalizer:
     def __init__(self) -> None:
         self._provider_sequence: dict[str, int] = {}
         self._emitted_sequence: dict[str, int] = {}
+
+    @contextmanager
+    def transaction(self) -> Iterable[None]:
+        """Roll sequence state back when any downstream conversion or validation fails."""
+        provider_before = dict(self._provider_sequence)
+        emitted_before = dict(self._emitted_sequence)
+        try:
+            yield
+        except Exception:
+            self._provider_sequence = provider_before
+            self._emitted_sequence = emitted_before
+            raise
 
     def snapshot(self, provider_symbol: str, provider_sequence: int) -> int:
         previous = self._provider_sequence.get(provider_symbol)

@@ -2,14 +2,19 @@
   "schema_version": "1.0.0",
   "certification_scope": "desensitized-fixture-only",
   "market_data_certified": false,
+  "provider_integrity": {
+    "binance": "U/u/pu continuity plus immutable Raw SHA-256; provider has no books checksum field",
+    "okx": "signed CRC32 books checksum plus immutable Raw SHA-256",
+    "cn_neutral": "desensitized replay fixture only; not market-data-certified"
+  },
   "l2_checkpoint_sha256": {
     "binance": "3330859181cb817bcc90c347982bb4b90a085fa4db9fca225259cdfd8ff9139c",
     "okx": "7f371cef6144aafc191d055b4500f3ef6a38df65349c72f3b9dd418f156e9d00",
     "cn_neutral": "62510f268ac112a4ed18c572026e90d8b07179e101bd1f36b904963fa8255b09"
   },
   "sha256": {
-    "binance/events.json": "4c57eaed08bae8d96e0afef27779940bcfcd7ef403cc1c5487f460d595a5dd73",
-    "okx/events.json": "aff1e3e2ef0003372da04a33c85292c78c47c3e0970b75b9664011c0af97fcc1",
+    "binance/events.json": "ec311cb64845a11402f1960337638ff87d9d9f53edba219821402e9121a04da0",
+    "okx/events.json": "2f2deaa174f59f2ba2b85a1757bd6cf40cf1908ea440534ff4a41ac1c3404802",
     "cn_neutral/events.json": "7325db3481db0192f21cf30bac602e50219e1fc6746e2105e359d48d9eed35d6"
   }
 }

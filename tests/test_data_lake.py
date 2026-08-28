@@ -53,6 +53,24 @@ def trade_record(
     }
 
 
+def admitted_raw(
+    root: Path,
+    *,
+    source: str = "binance",
+    key: str = "fixture-raw",
+    payload: bytes = b"trusted-raw",
+):
+    return write_raw_bytes(
+        root,
+        source=source,
+        request={"fixture": key},
+        collected_at="2026-01-02T00:00:00Z",
+        payload=payload,
+        idempotency_key=key,
+        policy=TEST_POLICY,
+    )
+
+
 def test_raw_bytes_are_immutable_idempotent_and_conflict_on_key_reuse(tmp_path: Path) -> None:
     collected_at = datetime(2026, 1, 2, tzinfo=UTC)
     first = write_raw_bytes(
@@ -61,7 +79,7 @@ def test_raw_bytes_are_immutable_idempotent_and_conflict_on_key_reuse(tmp_path: 
         request={"stream": "btcusdt@trade"},
         collected_at=collected_at,
         payload=b"exact-wire-bytes",
-        object_id="capture-1",
+        idempotency_key="capture-1",
         policy=TEST_POLICY,
     )
     second = write_raw_bytes(
@@ -70,43 +88,42 @@ def test_raw_bytes_are_immutable_idempotent_and_conflict_on_key_reuse(tmp_path: 
         request={"stream": "btcusdt@trade"},
         collected_at=collected_at,
         payload=b"exact-wire-bytes",
-        object_id="capture-1",
+        idempotency_key="capture-1",
         policy=TEST_POLICY,
     )
     assert first == second
     assert first.hot_retention_days == 30
     assert first.hot_until == "2026-02-01T00:00:00Z"
-    manifest_path = next(tmp_path.rglob("capture-1/manifest.json"))
-    loaded, payload = load_raw_object(manifest_path)
+    loaded, payload = load_raw_object(tmp_path, first.reference())
     assert loaded.content_sha256 == first.content_sha256
     assert payload == b"exact-wire-bytes"
 
-    with pytest.raises(ValidationError, match="Conflicting immutable Raw object"):
+    with pytest.raises(ValidationError, match="Conflicting immutable Raw idempotency key"):
         write_raw_bytes(
             tmp_path,
             source="binance",
             request={"stream": "btcusdt@trade"},
             collected_at=collected_at,
             payload=b"changed-wire-bytes",
-            object_id="capture-1",
+            idempotency_key="capture-1",
             policy=TEST_POLICY,
         )
 
 
 def test_raw_mutation_is_detected(tmp_path: Path) -> None:
-    write_raw_bytes(
+    raw = write_raw_bytes(
         tmp_path,
         source="okx",
         request={"channel": "trades"},
         collected_at="2026-01-02T00:00:00Z",
         payload=b"original",
-        object_id="capture-2",
+        idempotency_key="capture-2",
         policy=TEST_POLICY,
     )
-    manifest_path = next(tmp_path.rglob("capture-2/manifest.json"))
-    manifest_path.with_name("payload.bin").write_bytes(b"mutation")
+    object_dir = next(tmp_path.rglob(f"object={raw.object_id}"))
+    (object_dir / "payload.bin").write_bytes(b"mutation")
     with pytest.raises(ValidationError, match="hash changed"):
-        load_raw_object(manifest_path)
+        load_raw_object(tmp_path, raw.reference())
 
 
 def test_raw_request_metadata_must_be_canonical_json(tmp_path: Path) -> None:
@@ -152,51 +169,56 @@ def test_cleanup_requires_verified_archive_restore_and_explicit_confirmation(
         request={"channel": "l2"},
         collected_at="2026-01-02T01:00:00Z",
         payload=b"desensitized-l2",
-        object_id="capture-archive",
+        idempotency_key="capture-archive",
         policy=TEST_POLICY,
     )
-    manifest_path = next(tmp_path.rglob("capture-archive/manifest.json"))
+    archive_path = (tmp_path.parent / f"{tmp_path.name}-archive.bin").resolve()
+    archive_path.write_bytes(b"desensitized-l2")
     receipt = ArchiveReceipt(
         object_id=manifest.object_id,
-        archive_uri="s3://immutable-archive/capture-archive",
+        archive_uri=str(archive_path),
         source_sha256=manifest.content_sha256,
         archive_sha256=manifest.content_sha256,
         restored_sha256=manifest.content_sha256,
         verified_at="2026-01-03T00:00:00Z",
     )
     with pytest.raises(ValidationError, match="confirm=True"):
-        cleanup_archived_raw_object(manifest_path, receipt)
+        cleanup_archived_raw_object(tmp_path, manifest.reference(), receipt)
     bad = ArchiveReceipt(**{**receipt.__dict__, "restored_sha256": "0" * 64})
-    with pytest.raises(ValidationError, match="hash-verified restoration"):
+    with pytest.raises(ValidationError, match="hash validation"):
         cleanup_archived_raw_object(
-            manifest_path,
+            tmp_path,
+            manifest.reference(),
             bad,
             confirm=True,
             now="2026-02-02T00:00:00Z",
         )
     with pytest.raises(ValidationError, match="hot-retention window"):
         cleanup_archived_raw_object(
-            manifest_path,
+            tmp_path,
+            manifest.reference(),
             receipt,
             confirm=True,
             now="2026-01-31T00:00:00Z",
         )
     audit = cleanup_archived_raw_object(
-        manifest_path,
+        tmp_path,
+        manifest.reference(),
         receipt,
         confirm=True,
         now="2026-02-02T00:00:00Z",
     )
     assert audit.is_file()
-    assert not manifest_path.exists()
-    with pytest.raises(ValidationError, match="cannot be reused"):
+    with pytest.raises(ValidationError, match="unavailable"):
+        load_raw_object(tmp_path, manifest.reference())
+    with pytest.raises(ValidationError, match="already archived and cleaned"):
         write_raw_bytes(
             tmp_path,
             source="cn-fixture",
             request={"channel": "l2"},
             collected_at="2026-01-02T01:00:00Z",
             payload=b"desensitized-l2",
-            object_id="capture-archive",
+            idempotency_key="capture-archive",
             policy=TEST_POLICY,
         )
 
@@ -204,6 +226,7 @@ def test_cleanup_requires_verified_archive_restore_and_explicit_confirmation(
 def test_normalized_partitions_quarantine_bad_stream_and_pin_duckdb_snapshot(
     tmp_path: Path,
 ) -> None:
+    raw = admitted_raw(tmp_path)
     accepted = trade_record(event_id="trade-ok")
     duplicate_one = trade_record(event_id="duplicate", instrument_id="ETH-USDT-SPOT")
     duplicate_two = deepcopy(duplicate_one)
@@ -215,7 +238,8 @@ def test_normalized_partitions_quarantine_bad_stream_and_pin_duckdb_snapshot(
         [accepted, duplicate_one, duplicate_two],
         provider="binance",
         venue="BINANCE",
-        upstream_raw_ids=["capture-1"],
+        upstream_raw_references=[raw.reference()],
+        policy=TEST_POLICY,
     )
     assert result.snapshot is not None
     assert result.accepted_rows == 1
@@ -232,7 +256,8 @@ def test_normalized_partitions_quarantine_bad_stream_and_pin_duckdb_snapshot(
         [accepted],
         provider="binance",
         venue="BINANCE",
-        upstream_raw_ids=["capture-1"],
+        upstream_raw_references=[raw.reference()],
+        policy=TEST_POLICY,
     )
     assert repeated.snapshot is not None
     assert repeated.snapshot.snapshot_id == snapshot.snapshot_id
@@ -248,11 +273,14 @@ def test_normalized_partitions_quarantine_bad_stream_and_pin_duckdb_snapshot(
 
 
 def test_normalized_partition_mutation_fails_hash_validation(tmp_path: Path) -> None:
+    raw = admitted_raw(tmp_path)
     result = write_normalized_events(
         tmp_path,
         [trade_record(event_id="trade-hash")],
         provider="binance",
         venue="BINANCE",
+        upstream_raw_references=[raw.reference()],
+        policy=TEST_POLICY,
     )
     assert result.snapshot is not None
     snapshot_dir = tmp_path / "normalized" / "snapshots" / result.snapshot.snapshot_id
@@ -263,6 +291,7 @@ def test_normalized_partition_mutation_fails_hash_validation(tmp_path: Path) -> 
 
 
 def test_normalized_l2_cross_is_quarantined_before_research_layer(tmp_path: Path) -> None:
+    raw = admitted_raw(tmp_path)
     book_snapshot = {
         "event_type": "book_snapshot",
         "event_id": "snapshot-1",
@@ -311,6 +340,8 @@ def test_normalized_l2_cross_is_quarantined_before_research_layer(tmp_path: Path
         [book_snapshot, crossed_delta],
         provider="binance",
         venue="BINANCE",
+        upstream_raw_references=[raw.reference()],
+        policy=TEST_POLICY,
     )
     assert result.snapshot is None
     assert result.accepted_rows == 0
@@ -319,6 +350,7 @@ def test_normalized_l2_cross_is_quarantined_before_research_layer(tmp_path: Path
 
 
 def test_normalized_l2_checkpoint_mismatch_is_quarantined(tmp_path: Path) -> None:
+    raw = admitted_raw(tmp_path)
     book_snapshot = {
         "event_type": "book_snapshot",
         "event_id": "snapshot-checksum",
@@ -351,7 +383,9 @@ def test_normalized_l2_checkpoint_mismatch_is_quarantined(tmp_path: Path) -> Non
         [book_snapshot],
         provider="binance",
         venue="BINANCE",
+        upstream_raw_references=[raw.reference()],
         expected_l2_checkpoint_hashes={stream_key: {10: "0" * 64}},
+        policy=TEST_POLICY,
     )
     assert result.snapshot is None
     assert result.quarantined_rows == 1
@@ -364,6 +398,7 @@ def test_normalized_l2_checkpoint_mismatch_is_quarantined(tmp_path: Path) -> Non
 def test_provider_mismatch_and_non_finite_payload_are_quarantine_evidence(
     tmp_path: Path,
 ) -> None:
+    raw = admitted_raw(tmp_path)
     wrong_source = trade_record(event_id="wrong-source")
     wrong_source["source"] = "okx"
     non_finite = trade_record(event_id="non-finite", instrument_id="ETH-USDT-SPOT")
@@ -373,6 +408,8 @@ def test_provider_mismatch_and_non_finite_payload_are_quarantine_evidence(
         [wrong_source, non_finite],
         provider="binance",
         venue="BINANCE",
+        upstream_raw_references=[raw.reference()],
+        policy=TEST_POLICY,
     )
     assert result.snapshot is None
     assert result.quarantined_rows == 2

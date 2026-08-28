@@ -21,6 +21,7 @@ def crypto_context(provider: str) -> qdk.AdapterContext:
             "BTCUSDT": qdk.AdapterInstrument("CRYPTO:BTC-USDT:SPOT", 2, 3),
             "ETHUSDT": qdk.AdapterInstrument("CRYPTO:ETH-USDT:SPOT", 2, 3),
             "BTCUSDT_PERP": qdk.AdapterInstrument("CRYPTO:BTC-USDT:PERP", 2, 3),
+            "ETHUSDT_PERP": qdk.AdapterInstrument("CRYPTO:ETH-USDT:PERP", 2, 3),
         }
         venue = "BINANCE"
     else:
@@ -28,6 +29,7 @@ def crypto_context(provider: str) -> qdk.AdapterContext:
             "BTC-USDT": qdk.AdapterInstrument("CRYPTO:BTC-USDT:SPOT", 2, 3),
             "ETH-USDT": qdk.AdapterInstrument("CRYPTO:ETH-USDT:SPOT", 2, 3),
             "BTC-USDT-SWAP": qdk.AdapterInstrument("CRYPTO:BTC-USDT:PERP", 2, 3),
+            "ETH-USDT-SWAP": qdk.AdapterInstrument("CRYPTO:ETH-USDT:PERP", 2, 3),
         }
         venue = "OKX"
     return qdk.AdapterContext(provider=provider, venue=venue, instruments=instruments)
@@ -38,7 +40,7 @@ def test_public_m2_api_and_version_are_exposed() -> None:
     for name in (
         "write_raw_bytes",
         "write_normalized_events",
-        "write_curated_bars",
+        "curate_trade_bars_from_snapshot",
         "DuckDBCatalog",
         "replay_l2",
         "BinanceFixtureAdapter",
@@ -58,11 +60,10 @@ def test_raw_to_normalized_duckdb_l2_curated_chain_is_replayable(tmp_path: Path)
         request={"fixture": "events.json", "desensitized": True},
         collected_at="2026-01-02T00:01:00Z",
         payload=raw_bytes,
-        object_id="binance-m2-fixture",
+        idempotency_key="binance-m2-fixture",
         policy=TEST_POLICY,
     )
-    manifest_path = next(tmp_path.rglob("binance-m2-fixture/manifest.json"))
-    loaded_raw, loaded_bytes = qdk.load_raw_object(manifest_path)
+    loaded_raw, loaded_bytes = qdk.load_raw_object(tmp_path, raw.reference())
     assert loaded_raw == raw
     assert loaded_bytes == raw_bytes
 
@@ -73,7 +74,8 @@ def test_raw_to_normalized_duckdb_l2_curated_chain_is_replayable(tmp_path: Path)
         records,
         provider=provider,
         venue="BINANCE",
-        upstream_raw_ids=[raw.object_id],
+        upstream_raw_references=[raw.reference()],
+        policy=TEST_POLICY,
     )
     assert normalized_result.snapshot is not None
     assert normalized_result.quarantined_rows == 0
@@ -83,7 +85,8 @@ def test_raw_to_normalized_duckdb_l2_curated_chain_is_replayable(tmp_path: Path)
         records,
         provider=provider,
         venue="BINANCE",
-        upstream_raw_ids=[raw.object_id],
+        upstream_raw_references=[raw.reference()],
+        policy=TEST_POLICY,
     )
     assert repeated.snapshot is not None
     assert repeated.snapshot.snapshot_id == normalized.snapshot_id
@@ -107,19 +110,16 @@ def test_raw_to_normalized_duckdb_l2_curated_chain_is_replayable(tmp_path: Path)
     session_starts = {
         record["session_id"]: datetime(2026, 1, 2, tzinfo=UTC) for record in trades
     }
-    bars = qdk.build_session_bars(
-        trades,
-        interval=timedelta(minutes=1),
-        session_starts=session_starts,
-        source="curated-binance",
-    )
-    curated = qdk.write_curated_bars(
+    curated = qdk.curate_trade_bars_from_snapshot(
         tmp_path,
-        bars,
+        normalized_snapshot_id=normalized.snapshot_id,
         dataset="crypto-session-bars-1m",
         revision_id="fixture-revision-1",
         recipe_version="session-bars-v1",
-        lineage={"normalized_snapshot": normalized.snapshot_id},
+        interval=timedelta(minutes=1),
+        session_starts=session_starts,
+        source="curated-binance",
+        policy=TEST_POLICY,
     )
     assert curated.rows == 2
     assert qdk.load_curated_snapshot(
@@ -140,12 +140,22 @@ def test_domestic_fixture_chain_remains_fixture_only(tmp_path: Path) -> None:
         )
     )
     records = qdk.adapt_fixture_messages(adapter, messages)
+    raw = qdk.write_raw_bytes(
+        tmp_path,
+        source="cn-fixture",
+        request={"fixture": "cn-neutral/events.json"},
+        collected_at="2026-01-02T00:00:00Z",
+        payload=(FIXTURES / "cn_neutral" / "events.json").read_bytes(),
+        idempotency_key="domestic-desensitized-fixture",
+        policy=TEST_POLICY,
+    )
     result = qdk.write_normalized_events(
         tmp_path,
         records,
         provider="cn-fixture",
         venue="XSHG",
-        upstream_raw_ids=["domestic-desensitized-fixture"],
+        upstream_raw_references=[raw.reference()],
+        policy=TEST_POLICY,
     )
     assert adapter.certification_status == "fixture-certified-not-market-data-certified"
     assert result.snapshot is not None

@@ -42,16 +42,17 @@ pip install -e ".[akshare,dev]"
 
 ## M2 data-lake guarantees
 
-- Raw persists exact provider bytes with source, request, UTC collection time, SHA-256 and a 30-day hot-retention deadline. Reusing an object key is either byte-for-byte idempotent or an explicit conflict.
-- Normalized writes only frozen`standard/v2`Arrow schemas under`provider/venue/event_type/date/instrument`partitions. Invalid records, duplicate IDs, bad sequences and L2 reconstruction failures quarantine the complete affected stream.
-- Curated revisions include recipe and lineage in a content-addressed snapshot ID; corrected data creates a new snapshot and never overwrites an old one.
-- DuckDB requires an explicit`snapshot_id`, verifies manifest/partition hashes and schemas first, and exposes read-only query methods. There is no`latest`alias.
+- Raw persists exact provider bytes through lake-local staging and atomic rename. Its integrity anchor binds source, request, UTC collection time, object/key path identity, SHA-256 and the30-day retention policy. Every write, read and cleanup rejects path escapes and Windows reparse points below the lake root.
+- Normalized requires resolvable, hash-verified Raw references and writes only frozen`standard/v2`Arrow schemas under`provider/venue/event_type/date/instrument`partitions. Invalid records, globally duplicate event IDs, bad sequences and L2 reconstruction failures are quarantined before research access.
+- The certified Curated entry is`curate_trade_bars_from_snapshot`: it reads trades from one explicit verified Normalized snapshot, constructs session-aware bars and binds the exact lineage. One`dataset+revision_id`maps to one snapshot; corrected data requires a new revision and never overwrites history.
+- Normalized and Curated snapshot identities bind Arrow-canonical logical rows and physical Parquet hashes. DuckDB verifies the fixed snapshot, copies Arrow data into in-memory tables, then disables external access; user SQL cannot call file readers or resolve`latest`/`main`.
 - Collection stops with a visible`COLLECTION_STOPPED`error if hot data would exceed150GB or free space would fall below`max(volume*20%,100GB)`.
-- Raw cleanup requires all of: the30-day window elapsed, explicit confirmation, archive hash equality and a successful restore hash. No background or silent deletion path exists.
+- Raw cleanup requires all of: the30-day window elapsed, explicit confirmation, an accessible real local archive object, archive hash equality and a successful restore-hash exercise. Remote archives have no M2 verifier and therefore stop cleanup. No background or silent deletion path exists.
+- Normalized and Curated writers also apply the storage gate; they only consume Raw data that already passed acquisition admission. Without a verified archive, capacity pressure stops ingestion instead of deleting data.
 
 ## M2 fixture certification scope
 
-Binance and OKX fixtures cover Trade、BBO、BookSnapshot/Delta、FundingRate和MarkPrice for mapped BTC/ETH spot and BTC perpetual instruments. The domestic supplier-neutral L2 fixture is deliberately marked`fixture-certified-not-market-data-certified`; it must not be described as real domestic market-data certification.
+Binance and OKX fixtures cover Trade、BBO、BookSnapshot/Delta、FundingRate和MarkPrice for mapped BTC/ETH spot and BTC/ETH perpetual instruments. OKX books use the provider's signed CRC32 checksum; Binance has no equivalent field, so its gate is U/u/pu continuity plus immutable Raw SHA-256. The domestic supplier-neutral L2 fixture is deliberately marked`fixture-certified-not-market-data-certified`; it must not be described as real domestic market-data certification.
 
 ## PIT rules
 

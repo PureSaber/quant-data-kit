@@ -68,5 +68,22 @@
     "received_at": 1767312006001,
     "s": "BTCUSDT_PERP",
     "p": "1001.50"
+  },
+  {
+    "e": "fundingRate",
+    "E": 1767312007000,
+    "T": 1767312007000,
+    "received_at": 1767312007001,
+    "s": "ETHUSDT_PERP",
+    "r": "0.00008000",
+    "intervalStart": 1767283207000,
+    "intervalEnd": 1767312007000
+  },
+  {
+    "e": "markPriceUpdate",
+    "E": 1767312008000,
+    "received_at": 1767312008001,
+    "s": "ETHUSDT_PERP",
+    "p": "101.25"
   }
 ]

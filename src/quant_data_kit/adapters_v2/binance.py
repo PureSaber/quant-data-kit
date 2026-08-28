@@ -30,6 +30,10 @@ from quant_data_kit.market_events_v2 import (
 
 class BinanceFixtureAdapter:
     certification_status = "fixture-certified"
+    integrity_gate = (
+        "Binance U/u/pu continuity plus trusted Raw SHA-256; "
+        "Binance publishes no books checksum field"
+    )
 
     def __init__(self, context: AdapterContext) -> None:
         if context.provider != "binance":
@@ -78,71 +82,75 @@ class BinanceFixtureAdapter:
             )
             return [market_event_payload(event)]
         if kind == "depthSnapshot":
-            provider_sequence = int(message["lastUpdateId"])
-            sequence = self._book_sequences.snapshot(symbol, provider_sequence)
-            event = BookSnapshotEvent(
-                **event_identity(
-                    self.context,
-                    symbol,
-                    event_time=event_time,
-                    received_at=received_at,
-                    event_id=f"binance-book-snapshot-{symbol}-{provider_sequence}",
-                    sequence=sequence,
-                ),
-                bids=tuple(
-                    BookLevel(
-                        fixed(item[0], instrument.price_scale, "bid.price"),
-                        fixed(item[1], instrument.quantity_scale, "bid.quantity"),
-                    )
-                    for item in message["bids"]
-                ),
-                asks=tuple(
-                    BookLevel(
-                        fixed(item[0], instrument.price_scale, "ask.price"),
-                        fixed(item[1], instrument.quantity_scale, "ask.quantity"),
-                    )
-                    for item in message["asks"]
-                ),
-            )
-            return [market_event_payload(event)]
-        if kind == "depthUpdate":
-            provider_previous = int(message["pu"])
-            provider_sequence = int(message["u"])
-            first_sequence = int(message["U"])
-            if not first_sequence <= provider_previous + 1 <= provider_sequence:
-                raise ValidationError("Binance depthUpdate U/u range does not bridge prior sequence")
-            changes = [(BookSide.BID, item) for item in message["b"]] + [
-                (BookSide.ASK, item) for item in message["a"]
-            ]
-            pairs = self._book_sequences.delta(
-                symbol,
-                provider_previous_sequence=provider_previous,
-                provider_sequence=provider_sequence,
-                level_count=len(changes),
-            )
-            events: list[dict[str, Any]] = []
-            for index, ((side, item), (previous_sequence, sequence)) in enumerate(
-                zip(changes, pairs, strict=True), start=1
-            ):
-                quantity = fixed(item[1], instrument.quantity_scale, "depth.quantity")
-                action = BookAction.DELETE if quantity.units == 0 else BookAction.UPSERT
-                event = BookDeltaEvent(
+            with self._book_sequences.transaction():
+                provider_sequence = int(message["lastUpdateId"])
+                sequence = self._book_sequences.snapshot(symbol, provider_sequence)
+                event = BookSnapshotEvent(
                     **event_identity(
                         self.context,
                         symbol,
                         event_time=event_time,
                         received_at=received_at,
-                        event_id=f"binance-book-delta-{symbol}-{message['u']}-{index}",
+                        event_id=f"binance-book-snapshot-{symbol}-{provider_sequence}",
                         sequence=sequence,
                     ),
-                    side=side,
-                    action=action,
-                    price=fixed(item[0], instrument.price_scale, "depth.price"),
-                    quantity=quantity,
-                    previous_sequence=previous_sequence,
+                    bids=tuple(
+                        BookLevel(
+                            fixed(item[0], instrument.price_scale, "bid.price"),
+                            fixed(item[1], instrument.quantity_scale, "bid.quantity"),
+                        )
+                        for item in message["bids"]
+                    ),
+                    asks=tuple(
+                        BookLevel(
+                            fixed(item[0], instrument.price_scale, "ask.price"),
+                            fixed(item[1], instrument.quantity_scale, "ask.quantity"),
+                        )
+                        for item in message["asks"]
+                    ),
                 )
-                events.append(market_event_payload(event))
-            return events
+                return [market_event_payload(event)]
+        if kind == "depthUpdate":
+            with self._book_sequences.transaction():
+                provider_previous = int(message["pu"])
+                provider_sequence = int(message["u"])
+                first_sequence = int(message["U"])
+                if not first_sequence <= provider_previous + 1 <= provider_sequence:
+                    raise ValidationError(
+                        "Binance depthUpdate U/u range does not bridge prior sequence"
+                    )
+                changes = [(BookSide.BID, item) for item in message["b"]] + [
+                    (BookSide.ASK, item) for item in message["a"]
+                ]
+                pairs = self._book_sequences.delta(
+                    symbol,
+                    provider_previous_sequence=provider_previous,
+                    provider_sequence=provider_sequence,
+                    level_count=len(changes),
+                )
+                events: list[dict[str, Any]] = []
+                for index, ((side, item), (previous_sequence, sequence)) in enumerate(
+                    zip(changes, pairs, strict=True), start=1
+                ):
+                    quantity = fixed(item[1], instrument.quantity_scale, "depth.quantity")
+                    action = BookAction.DELETE if quantity.units == 0 else BookAction.UPSERT
+                    event = BookDeltaEvent(
+                        **event_identity(
+                            self.context,
+                            symbol,
+                            event_time=event_time,
+                            received_at=received_at,
+                            event_id=f"binance-book-delta-{symbol}-{message['u']}-{index}",
+                            sequence=sequence,
+                        ),
+                        side=side,
+                        action=action,
+                        price=fixed(item[0], instrument.price_scale, "depth.price"),
+                        quantity=quantity,
+                        previous_sequence=previous_sequence,
+                    )
+                    events.append(market_event_payload(event))
+                return events
         if kind == "fundingRate":
             event = FundingRateEvent(
                 **event_identity(

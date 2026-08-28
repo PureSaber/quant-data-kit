@@ -158,3 +158,36 @@ def test_resync_snapshot_cannot_switch_stream_identity() -> None:
     second["sequence"] = 200
     with pytest.raises(L2ReplayError, match="identity changed"):
         replay_l2([first, second])
+
+
+def test_uninitialized_unsupported_and_non_snapshot_entry_fail_closed() -> None:
+    reconstructor = L2BookReconstructor()
+    with pytest.raises(L2ReplayError, match="uninitialized"):
+        reconstructor.checkpoint()
+    with pytest.raises(L2ReplayError, match="Unsupported"):
+        reconstructor.apply({"event_type": "trade"})
+    with pytest.raises(L2ReplayError, match="start from a BookSnapshot"):
+        reconstructor.apply_delta(delta(101, 100))
+    with pytest.raises(L2ReplayError, match="at least one"):
+        replay_l2([])
+    with pytest.raises(L2ReplayError, match="begin with a BookSnapshot"):
+        replay_l2([delta(101, 100)])
+
+
+def test_snapshot_and_delta_time_and_sequence_must_strictly_advance() -> None:
+    reconstructor = L2BookReconstructor()
+    reconstructor.apply_snapshot(snapshot())
+    same_snapshot = snapshot()
+    same_snapshot["event_id"] = "snapshot-repeat"
+    with pytest.raises(L2ReplayError, match="Snapshot sequence must advance"):
+        reconstructor.apply_snapshot(same_snapshot)
+
+    non_advancing = delta(100, 100)
+    with pytest.raises((L2ReplayError, ValidationError), match="precede|strictly advance"):
+        reconstructor.apply_delta(non_advancing)
+    backwards = delta(101, 100)
+    backwards["event_time"] = "2026-01-01T23:59:59Z"
+    backwards["received_at"] = backwards["event_time"]
+    backwards["available_at"] = backwards["event_time"]
+    with pytest.raises(L2ReplayError, match="moved backwards"):
+        reconstructor.apply_delta(backwards)
