@@ -59,7 +59,7 @@ _COMMON_EVENT_FIELDS = [
     _field("source", pa.string()),
     _field("trading_day", pa.date32()),
     _field("session_id", pa.string()),
-    _field("sequence", pa.int64(), nullable=True),
+    _field("sequence", pa.int64()),
 ]
 _SEQUENCED_EVENT_FIELDS = [
     *_COMMON_EVENT_FIELDS[:-1],
@@ -228,7 +228,7 @@ _COMMON_EVENT_JSON = {
     "source": {"type": "string", "minLength": 1},
     "trading_day": {"type": "string", "format": "date"},
     "session_id": {"type": "string", "minLength": 1},
-    "sequence": {"type": ["integer", "null"], "minimum": 0},
+    "sequence": {"type": "integer", "minimum": 0},
 }
 
 _JSON_SCHEMAS: dict[str, dict[str, Any]] = {
@@ -582,7 +582,7 @@ def validate_event_stream(
     version: str = SCHEMA_VERSION_V2,
 ) -> None:
     """Validate event records in replay order, including sequence continuity."""
-    last_sequences: dict[tuple[str, str, str], int] = {}
+    last_sequences: dict[tuple[str, str, str, str], int] = {}
     event_ids: set[str] = set()
     for payload in records:
         event_type = payload.get("event_type")
@@ -595,13 +595,15 @@ def validate_event_stream(
         if event_id in event_ids:
             raise ValidationError(f"Duplicate event_id in stream: {event_id}")
         event_ids.add(event_id)
-        sequence = payload["sequence"]
-        if sequence is None:
-            continue
+        sequence = int(payload["sequence"])
+        sequence_domain = (
+            "book" if event_type in {"book_snapshot", "book_delta"} else str(event_type)
+        )
         key = (
             str(payload["source"]),
             str(payload["instrument_id"]),
             str(payload["session_id"]),
+            sequence_domain,
         )
         previous = last_sequences.get(key)
         if previous is not None and sequence <= previous:

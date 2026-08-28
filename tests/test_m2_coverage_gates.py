@@ -120,7 +120,8 @@ def test_schema_delete_delta_corporate_ratio_and_registry_fail_closed() -> None:
         validate_json_record(INSTRUMENT_SPEC_SCHEMA_ID, {}, version="1.0.0")
     with pytest.raises(ValidationError, match="Unknown market event_type"):
         validate_event_stream([{"event_type": "unknown"}])
-    validate_event_stream([_replace(GOLDEN["puresaber.trade-event"], "sequence", None)])
+    with pytest.raises(ValidationError, match="JSON schema validation failed"):
+        validate_event_stream([_replace(GOLDEN["puresaber.trade-event"], "sequence", None)])
     with pytest.raises(ValidationError, match="Arrow schema mismatch"):
         validate_arrow_table(INSTRUMENT_SPEC_SCHEMA_ID, pa.table({"wrong": [1]}))
 
