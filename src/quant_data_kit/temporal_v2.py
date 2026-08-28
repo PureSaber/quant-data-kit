@@ -186,4 +186,3 @@ def point_in_time_join_bitemporal(
             row["source_available_at"] = match[available_at]
         output_rows.append(row)
     return pd.DataFrame(output_rows)
-

@@ -55,4 +55,3 @@ class FixedPoint:
 
     def is_non_negative(self) -> bool:
         return self.units >= 0
-
