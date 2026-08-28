@@ -44,7 +44,9 @@ from quant_data_kit.schemas_v2 import (
     INSTRUMENT_SPEC_SCHEMA_ID,
     MARK_PRICE_EVENT_SCHEMA_ID,
     QUOTE_EVENT_SCHEMA_ID,
+    SYMBOL_MAPPING_SCHEMA_ID,
     TRADE_EVENT_SCHEMA_ID,
+    TRADING_SESSION_SCHEMA_ID,
     get_arrow_schema,
 )
 
@@ -220,6 +222,65 @@ def test_public_stream_validation_rejects_duplicate_and_out_of_order_records() -
     out_of_order["sequence"] = 9
     with pytest.raises(ValidationError, match="strictly increasing"):
         validate_event_stream([first, out_of_order])
+
+    quote = market_event_payload(
+        QuoteEvent(
+            **event_base(12),
+            bid_price=fp("99"),
+            bid_quantity=fp("1"),
+            ask_price=fp("101"),
+            ask_quantity=fp("1"),
+        )
+    )
+    trade_regression = deepcopy(second)
+    trade_regression["event_id"] = "trade-regression"
+    trade_regression["sequence"] = 11
+    with pytest.raises(ValidationError, match="strictly increasing"):
+        validate_event_stream([quote, trade_regression])
+
+
+def test_stream_validation_connects_l2_snapshot_to_first_delta() -> None:
+    snapshot = market_event_payload(
+        BookSnapshotEvent(
+            **event_base(100),
+            bids=(BookLevel(fp("99"), fp("1")),),
+            asks=(BookLevel(fp("101"), fp("1")),),
+        )
+    )
+    delta = market_event_payload(
+        BookDeltaEvent(
+            **event_base(101),
+            side=BookSide.BID,
+            action=BookAction.UPSERT,
+            price=fp("100"),
+            quantity=fp("1"),
+            previous_sequence=100,
+        )
+    )
+    validate_event_stream([snapshot, delta])
+    delta["previous_sequence"] = 7
+    with pytest.raises(ValidationError, match="prior stream sequence"):
+        validate_event_stream([snapshot, delta])
+
+
+def test_reference_json_validation_matches_dataclass_semantics() -> None:
+    golden_path = Path(__file__).parent / "golden" / "v2" / "records.json"
+    records = json.loads(golden_path.read_text(encoding="utf-8"))
+
+    instrument = deepcopy(records[INSTRUMENT_SPEC_SCHEMA_ID])
+    instrument["asset_class"] = "unsupported"
+    with pytest.raises(ValidationError, match="JSON schema validation failed"):
+        validate_json_record(INSTRUMENT_SPEC_SCHEMA_ID, instrument)
+
+    mapping = deepcopy(records[SYMBOL_MAPPING_SCHEMA_ID])
+    mapping["superseded_at"] = mapping["available_at"]
+    with pytest.raises(ValidationError, match="superseded_at"):
+        validate_json_record(SYMBOL_MAPPING_SCHEMA_ID, mapping)
+
+    session = deepcopy(records[TRADING_SESSION_SCHEMA_ID])
+    session["phase"] = "unsupported"
+    with pytest.raises(ValidationError, match="JSON schema validation failed"):
+        validate_json_record(TRADING_SESSION_SCHEMA_ID, session)
 
 
 def test_l2_arrow_schema_has_required_sequence_and_non_null_list_items() -> None:

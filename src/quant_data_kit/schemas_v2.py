@@ -12,6 +12,7 @@ from typing import Any
 import pyarrow as pa
 from jsonschema import Draft202012Validator, FormatChecker
 
+from quant_data_kit.domain_v2 import AssetClass, MarginMode, SessionPhase
 from quant_data_kit.exceptions import ValidationError
 
 SCHEMA_VERSION_V2 = "2.0.0"
@@ -236,7 +237,7 @@ _JSON_SCHEMAS: dict[str, dict[str, Any]] = {
     INSTRUMENT_SPEC_SCHEMA_ID: _object_schema(
         {
             "instrument_id": {"type": "string", "minLength": 1},
-            "asset_class": {"type": "string"},
+            "asset_class": {"enum": [item.value for item in AssetClass]},
             "product_type": {"type": "string", "minLength": 1},
             "venue": {"type": "string", "minLength": 1},
             "native_symbol": {"type": "string", "minLength": 1},
@@ -247,7 +248,7 @@ _JSON_SCHEMAS: dict[str, dict[str, Any]] = {
             "quantity_step": _FIXED_POINT_JSON,
             "contract_multiplier": _FIXED_POINT_JSON,
             "calendar_id": {"type": "string", "minLength": 1},
-            "margin_mode": {"type": "string"},
+            "margin_mode": {"enum": [item.value for item in MarginMode]},
             "inverse": {"type": "boolean"},
             "effective_from": _UTC_JSON,
             "effective_to": _NULLABLE_UTC_JSON,
@@ -279,7 +280,7 @@ _JSON_SCHEMAS: dict[str, dict[str, Any]] = {
             "calendar_id": {"type": "string", "minLength": 1},
             "venue": {"type": "string", "minLength": 1},
             "trading_day": {"type": "string", "format": "date"},
-            "phase": {"type": "string"},
+            "phase": {"enum": [item.value for item in SessionPhase]},
             "opens_at": _UTC_JSON,
             "closes_at": _UTC_JSON,
             "available_at": _UTC_JSON,
@@ -513,15 +514,26 @@ def _validate_record_semantics(schema_id: str, payload: Mapping[str, Any]) -> No
             payload, "effective_to"
         ) <= _timestamp(payload, "effective_from"):
             raise ValidationError("effective_to must be later than effective_from")
+        _validate_knowledge_interval(payload)
     elif schema_id == SYMBOL_MAPPING_SCHEMA_ID:
         if payload["effective_to"] is not None and _timestamp(
             payload, "effective_to"
         ) <= _timestamp(payload, "effective_from"):
             raise ValidationError("effective_to must be later than effective_from")
+        _validate_knowledge_interval(payload)
     elif schema_id == TRADING_SESSION_SCHEMA_ID and _timestamp(
         payload, "closes_at"
     ) <= _timestamp(payload, "opens_at"):
         raise ValidationError("closes_at must be later than opens_at")
+    elif schema_id == TRADING_SESSION_SCHEMA_ID:
+        _validate_knowledge_interval(payload)
+
+
+def _validate_knowledge_interval(payload: Mapping[str, Any]) -> None:
+    if payload["superseded_at"] is not None and _timestamp(
+        payload, "superseded_at"
+    ) <= _timestamp(payload, "available_at"):
+        raise ValidationError("superseded_at must be later than available_at")
 
 
 def get_arrow_schema(schema_id: str, version: str = SCHEMA_VERSION_V2) -> pa.Schema:
@@ -562,7 +574,7 @@ def validate_event_stream(
     version: str = SCHEMA_VERSION_V2,
 ) -> None:
     """Validate event records in replay order, including sequence continuity."""
-    last_sequences: dict[tuple[str, str, str, str], int] = {}
+    last_sequences: dict[tuple[str, str, str], int] = {}
     event_ids: set[str] = set()
     for payload in records:
         event_type = payload.get("event_type")
@@ -582,7 +594,6 @@ def validate_event_stream(
             str(payload["source"]),
             str(payload["instrument_id"]),
             str(payload["session_id"]),
-            str(event_type),
         )
         previous = last_sequences.get(key)
         if previous is not None and sequence <= previous:
