@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import json
 import shutil
-import sys
+import time
 from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pyarrow as pa
@@ -346,10 +345,7 @@ def test_empty_quarantine_and_unknown_event_helpers_are_closed(tmp_path: Path) -
     assert lake_module._stream_key({}, 7) == ("invalid-7", "invalid-7", "invalid-7")
 
 
-def test_process_lock_platform_dispatch_and_timeout_are_explicit(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_process_lock_platform_dispatch_and_timeout_are_explicit(tmp_path: Path) -> None:
     with (
         pytest.raises(ValidationError, match="positive"),
         lock_module.process_file_lock(tmp_path / "invalid.lock", timeout_seconds=0),
@@ -363,21 +359,28 @@ def test_process_lock_platform_dispatch_and_timeout_are_explicit(
         if len(windows_calls) == 1:
             raise OSError("contended")
 
-    fake_msvcrt = SimpleNamespace(LK_NBLCK=1, LK_UNLCK=2, locking=windows_lock)
-    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
-    with lock_module.process_file_lock(tmp_path / "windows.lock", timeout_seconds=1):
-        assert windows_calls == [1, 1]
+    lock_module._acquire_windows_lock(
+        11,
+        tmp_path / "windows.lock",
+        time.monotonic() + 1,
+        locking=windows_lock,
+        nonblocking_mode=1,
+    )
+    assert windows_calls == [1, 1]
+    lock_module._release_windows_lock(11, locking=windows_lock, unlock_mode=2)
     assert windows_calls[-1] == 2
 
     def always_contended(_fd: int, _mode: int, _length: int) -> None:
         raise OSError("still contended")
 
-    fake_msvcrt.locking = always_contended
-    with (
-        pytest.raises(TimeoutError, match="Timed out"),
-        lock_module.process_file_lock(tmp_path / "timeout.lock", timeout_seconds=0.001),
-    ):
-        pass
+    with pytest.raises(TimeoutError, match="Timed out"):
+        lock_module._acquire_windows_lock(
+            11,
+            tmp_path / "windows-timeout.lock",
+            0.0,
+            locking=always_contended,
+            nonblocking_mode=1,
+        )
 
     posix_calls: list[int] = []
 
@@ -386,12 +389,36 @@ def test_process_lock_platform_dispatch_and_timeout_are_explicit(
         if len(posix_calls) == 1:
             raise BlockingIOError("contended")
 
-    fake_fcntl = SimpleNamespace(LOCK_EX=1, LOCK_NB=2, LOCK_UN=4, flock=posix_lock)
-    monkeypatch.setitem(sys.modules, "fcntl", fake_fcntl)
-    monkeypatch.setattr(lock_module.os, "name", "posix")
-    with lock_module.process_file_lock(tmp_path / "posix.lock", timeout_seconds=1):
-        assert posix_calls == [3, 3]
+    lock_module._acquire_posix_lock(
+        12,
+        tmp_path / "posix.lock",
+        time.monotonic() + 1,
+        flock=posix_lock,
+        exclusive_nonblocking_operation=3,
+    )
+    assert posix_calls == [3, 3]
+    lock_module._release_posix_lock(12, flock=posix_lock, unlock_operation=4)
     assert posix_calls[-1] == 4
+
+    def posix_always_contended(_fd: int, _operation: int) -> None:
+        raise BlockingIOError("still contended")
+
+    with pytest.raises(TimeoutError, match="Timed out"):
+        lock_module._acquire_posix_lock(
+            12,
+            tmp_path / "posix-timeout.lock",
+            0.0,
+            flock=posix_always_contended,
+            exclusive_nonblocking_operation=3,
+        )
+
+    assert lock_module._platform_lock_backend("nt") is lock_module._windows_file_lock
+    assert lock_module._platform_lock_backend("posix") is lock_module._posix_file_lock
+    assert lock_module._platform_lock_backend("other") is lock_module._posix_file_lock
+    real_lock_path = tmp_path / "real-platform.lock"
+    with lock_module.process_file_lock(real_lock_path, timeout_seconds=1):
+        assert real_lock_path.is_file()
+    assert real_lock_path.read_bytes() == b"\0"
 
 
 def test_raw_claim_cleanup_and_deleting_state_tampering_fail_closed(tmp_path: Path) -> None:
