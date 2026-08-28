@@ -55,7 +55,7 @@ def trade(
         "source": source,
         "trading_day": "2026-01-02",
         "session_id": f"{source}-24x7-{instrument_id}",
-        "sequence": None,
+        "sequence": 1,
         "price": {"units": 100_000, "scale": 2},
         "quantity": {"units": 10, "scale": 3},
         "aggressor_side": "buy",
@@ -204,6 +204,19 @@ def test_raw_write_read_and_cleanup_reject_junction_escape(tmp_path: Path) -> No
             confirm=True,
             now="2026-02-02T00:00:01Z",
         )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symbolic-link regression")
+def test_raw_write_rejects_symbolic_link_escape(tmp_path: Path) -> None:
+    lake = tmp_path / "lake"
+    outside = tmp_path / "outside"
+    lake.mkdir()
+    outside.mkdir()
+    (lake / "raw").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValidationError, match="reparse point|escapes"):
+        raw(lake, key="symlink-write")
+    assert not list(outside.rglob("payload.bin"))
 
 
 def test_cleanup_rejects_fabricated_missing_and_remote_archives(tmp_path: Path) -> None:

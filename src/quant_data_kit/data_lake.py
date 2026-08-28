@@ -1579,7 +1579,7 @@ def write_normalized_events(
                 partitioned[(event_type, trading_date, instrument_id)],
                 key=lambda row: (
                     str(row["event_time"]),
-                    -1 if row["sequence"] is None else int(row["sequence"]),
+                    int(row["sequence"]),
                     str(row["event_id"]),
                 ),
             )

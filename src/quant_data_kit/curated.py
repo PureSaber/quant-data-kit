@@ -226,7 +226,8 @@ def build_session_bars(
             source=source,
             trading_day=datetime.fromisoformat(trading_day).date(),
             session_id=session_id,
-            sequence=None,
+            sequence=(bar_end - datetime(1970, 1, 1, tzinfo=timezone.utc))
+            // timedelta(microseconds=1),
             bar_start=bar_start,
             bar_end=bar_end,
             open_price=_fixed(prices[0], price_scale),

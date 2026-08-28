@@ -37,6 +37,7 @@ from quant_data_kit import (
 )
 from quant_data_kit.exceptions import ValidationError
 from quant_data_kit.schemas_v2 import (
+    BAR_EVENT_SCHEMA_ID,
     BOOK_DELTA_EVENT_SCHEMA_ID,
     BOOK_SNAPSHOT_EVENT_SCHEMA_ID,
     CORPORATE_ACTION_EVENT_SCHEMA_ID,
@@ -44,6 +45,7 @@ from quant_data_kit.schemas_v2 import (
     INSTRUMENT_SPEC_SCHEMA_ID,
     MARK_PRICE_EVENT_SCHEMA_ID,
     QUOTE_EVENT_SCHEMA_ID,
+    STATUS_EVENT_SCHEMA_ID,
     SYMBOL_MAPPING_SCHEMA_ID,
     TRADE_EVENT_SCHEMA_ID,
     TRADING_SESSION_SCHEMA_ID,
@@ -225,10 +227,15 @@ def test_public_stream_validation_rejects_duplicate_and_out_of_order_records() -
         )
     )
     trade_regression = deepcopy(second)
-    trade_regression["event_id"] = "trade-regression"
+    trade_regression["event_id"] = "trade-independent-domain"
     trade_regression["sequence"] = 11
+    validate_event_stream([quote, trade_regression])
+
+    quote_regression = deepcopy(quote)
+    quote_regression["event_id"] = "quote-regression"
+    quote_regression["sequence"] = 11
     with pytest.raises(ValidationError, match="strictly increasing"):
-        validate_event_stream([quote, trade_regression])
+        validate_event_stream([quote, quote_regression])
 
 
 def test_stream_validation_connects_l2_snapshot_to_first_delta() -> None:
@@ -275,12 +282,22 @@ def test_reference_json_validation_matches_dataclass_semantics() -> None:
         validate_json_record(TRADING_SESSION_SCHEMA_ID, session)
 
 
-def test_l2_arrow_schema_has_required_sequence_and_non_null_list_items() -> None:
+def test_all_event_arrow_schemas_require_sequence_and_l2_lists_require_items() -> None:
+    for schema_id in (
+        QUOTE_EVENT_SCHEMA_ID,
+        TRADE_EVENT_SCHEMA_ID,
+        BAR_EVENT_SCHEMA_ID,
+        BOOK_SNAPSHOT_EVENT_SCHEMA_ID,
+        BOOK_DELTA_EVENT_SCHEMA_ID,
+        FUNDING_RATE_EVENT_SCHEMA_ID,
+        MARK_PRICE_EVENT_SCHEMA_ID,
+        CORPORATE_ACTION_EVENT_SCHEMA_ID,
+        STATUS_EVENT_SCHEMA_ID,
+    ):
+        assert get_arrow_schema(schema_id).field("sequence").nullable is False
     snapshot_schema = get_arrow_schema(BOOK_SNAPSHOT_EVENT_SCHEMA_ID)
-    assert snapshot_schema.field("sequence").nullable is False
     assert snapshot_schema.field("bids").type.value_field.nullable is False
     assert snapshot_schema.field("asks").type.value_field.nullable is False
-    assert get_arrow_schema(BOOK_DELTA_EVENT_SCHEMA_ID).field("sequence").nullable is False
 
 
 def test_asset_specific_events_match_registered_schemas() -> None:
