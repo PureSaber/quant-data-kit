@@ -41,6 +41,7 @@ from quant_data_kit.schemas_v2 import (
     get_arrow_schema,
     get_json_schema,
     validate_arrow_table,
+    validate_event_stream,
     validate_json_record,
 )
 from quant_data_kit.snapshots import DatasetSnapshot, create_snapshot, load_snapshot
@@ -118,6 +119,7 @@ __all__ = [
     "trading_days_between",
     "validate_arrow_table",
     "validate_bitemporal_frame",
+    "validate_event_stream",
     "validate_json_record",
     "validate_price_frame",
     "write_manifest",

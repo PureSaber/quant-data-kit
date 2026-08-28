@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -31,6 +32,7 @@ from quant_data_kit import (
     ensure_utc_datetime,
     market_event_payload,
     point_in_time_join_bitemporal,
+    validate_event_stream,
     validate_json_record,
 )
 from quant_data_kit.exceptions import ValidationError
@@ -179,6 +181,53 @@ def test_l2_snapshot_and_delta_are_strictly_sequenced() -> None:
             quantity=fp("0.00"),
             previous_sequence=101,
         )
+
+
+def test_public_json_validation_enforces_event_semantics() -> None:
+    trade = TradeEvent(
+        **event_base(7),
+        price=fp("100.00"),
+        quantity=fp("2.00"),
+        aggressor_side=AggressorSide.BUY,
+    )
+    payload = market_event_payload(trade)
+    invalid_time = deepcopy(payload)
+    invalid_time["received_at"] = "2026-01-02T00:59:59Z"
+    with pytest.raises(ValidationError, match="received_at"):
+        validate_json_record(TRADE_EVENT_SCHEMA_ID, invalid_time)
+
+    invalid_price = deepcopy(payload)
+    invalid_price["price"]["units"] = -1
+    with pytest.raises(ValidationError, match="price must be positive"):
+        validate_json_record(TRADE_EVENT_SCHEMA_ID, invalid_price)
+
+
+def test_public_stream_validation_rejects_duplicate_and_out_of_order_records() -> None:
+    first = market_event_payload(
+        TradeEvent(**event_base(10), price=fp("100"), quantity=fp("1"))
+    )
+    second = market_event_payload(
+        TradeEvent(**event_base(11), price=fp("101"), quantity=fp("1"))
+    )
+    validate_event_stream([first, second])
+
+    duplicate = deepcopy(second)
+    duplicate["event_id"] = first["event_id"]
+    with pytest.raises(ValidationError, match="Duplicate event_id"):
+        validate_event_stream([first, duplicate])
+
+    out_of_order = deepcopy(second)
+    out_of_order["sequence"] = 9
+    with pytest.raises(ValidationError, match="strictly increasing"):
+        validate_event_stream([first, out_of_order])
+
+
+def test_l2_arrow_schema_has_required_sequence_and_non_null_list_items() -> None:
+    snapshot_schema = get_arrow_schema(BOOK_SNAPSHOT_EVENT_SCHEMA_ID)
+    assert snapshot_schema.field("sequence").nullable is False
+    assert snapshot_schema.field("bids").type.value_field.nullable is False
+    assert snapshot_schema.field("asks").type.value_field.nullable is False
+    assert get_arrow_schema(BOOK_DELTA_EVENT_SCHEMA_ID).field("sequence").nullable is False
 
 
 def test_asset_specific_events_match_registered_schemas() -> None:
