@@ -73,7 +73,7 @@ def test_fixed_point_is_exact_and_utc_is_strict() -> None:
     with pytest.raises(ValidationError, match="not exact"):
         FixedPoint.from_decimal("12.345", 2)
     with pytest.raises(ValidationError, match="timezone-aware UTC"):
-        ensure_utc_datetime(datetime(2026, 1, 1), field="event_time")
+        ensure_utc_datetime(T0.replace(tzinfo=None), field="event_time")
     with pytest.raises(ValidationError, match="must use UTC"):
         ensure_utc_datetime(
             datetime(2026, 1, 1, tzinfo=timezone(timedelta(hours=8))),

@@ -36,7 +36,7 @@ class FixedPoint:
         scale: int,
         *,
         rounding: str | None = None,
-    ) -> "FixedPoint":
+    ) -> FixedPoint:
         """Create a value without implicit rounding."""
         decimal_value = value if isinstance(value, Decimal) else Decimal(str(value))
         if not decimal_value.is_finite():

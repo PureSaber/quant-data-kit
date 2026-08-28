@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any
 
 from quant_data_kit.exceptions import ValidationError
 from quant_data_kit.fixed_point import FixedPoint
