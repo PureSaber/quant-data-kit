@@ -206,6 +206,19 @@ def test_raw_write_read_and_cleanup_reject_junction_escape(tmp_path: Path) -> No
         )
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symbolic-link regression")
+def test_raw_write_rejects_symbolic_link_escape(tmp_path: Path) -> None:
+    lake = tmp_path / "lake"
+    outside = tmp_path / "outside"
+    lake.mkdir()
+    outside.mkdir()
+    (lake / "raw").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValidationError, match="reparse point|escapes"):
+        raw(lake, key="symlink-write")
+    assert not list(outside.rglob("payload.bin"))
+
+
 def test_cleanup_rejects_fabricated_missing_and_remote_archives(tmp_path: Path) -> None:
     admitted = raw(tmp_path, key="archive-check")
     common = {
