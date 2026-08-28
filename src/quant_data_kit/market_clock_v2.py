@@ -60,4 +60,3 @@ class MarketClock:
             if session.phase in phases and session.opens_at >= moment:
                 return session.opens_at
         return None
-
