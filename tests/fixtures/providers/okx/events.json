@@ -1,0 +1,70 @@
+[
+  {
+    "channel": "trades",
+    "instId": "BTC-USDT",
+    "ts": "1767312001000",
+    "received_at": "1767312001001",
+    "tradeId": "8001",
+    "px": "1000.00",
+    "sz": "0.125",
+    "side": "buy"
+  },
+  {
+    "channel": "trades",
+    "instId": "ETH-USDT",
+    "ts": "1767312001500",
+    "received_at": "1767312001501",
+    "tradeId": "8002",
+    "px": "100.00",
+    "sz": "1.250",
+    "side": "sell"
+  },
+  {
+    "channel": "bbo-tbt",
+    "instId": "BTC-USDT",
+    "ts": "1767312002000",
+    "received_at": "1767312002001",
+    "seqId": "190",
+    "bidPx": "999.00",
+    "bidSz": "1.000",
+    "askPx": "1002.00",
+    "askSz": "1.500"
+  },
+  {
+    "channel": "books",
+    "action": "snapshot",
+    "instId": "BTC-USDT",
+    "ts": "1767312003000",
+    "received_at": "1767312003001",
+    "seqId": "200",
+    "bids": [["1000.00", "1.000", "0", "2"], ["999.00", "2.000", "0", "3"]],
+    "asks": [["1002.00", "1.500", "0", "1"], ["1003.00", "2.500", "0", "4"]]
+  },
+  {
+    "channel": "books",
+    "action": "update",
+    "instId": "BTC-USDT",
+    "ts": "1767312004000",
+    "received_at": "1767312004001",
+    "prevSeqId": "200",
+    "seqId": "201",
+    "bids": [["1001.00", "0.750", "0", "1"]],
+    "asks": [["1003.00", "3.000", "0", "4"]]
+  },
+  {
+    "channel": "funding-rate",
+    "instId": "BTC-USDT-SWAP",
+    "ts": "1767312005000",
+    "received_at": "1767312005001",
+    "fundingRate": "0.00010000",
+    "intervalStart": "1767283205000",
+    "fundingTime": "1767312005000"
+  },
+  {
+    "channel": "mark-price",
+    "instId": "BTC-USDT-SWAP",
+    "ts": "1767312006000",
+    "received_at": "1767312006001",
+    "markPx": "1001.50"
+  }
+]
