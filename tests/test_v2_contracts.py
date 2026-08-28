@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -225,3 +227,26 @@ def test_bitemporal_join_never_uses_future_knowledge() -> None:
     )
     assert pd.isna(joined.loc[0, "value"])
     assert joined.loc[1, "value"] == 7
+
+
+def test_all_frozen_v2_golden_records_match_json_and_arrow_field_contracts() -> None:
+    golden_path = Path(__file__).parent / "golden" / "v2" / "records.json"
+    records = json.loads(golden_path.read_text(encoding="utf-8"))
+    expected_schema_ids = {
+        INSTRUMENT_SPEC_SCHEMA_ID,
+        "puresaber.symbol-mapping",
+        "puresaber.trading-session",
+        QUOTE_EVENT_SCHEMA_ID,
+        TRADE_EVENT_SCHEMA_ID,
+        "puresaber.bar-event",
+        BOOK_SNAPSHOT_EVENT_SCHEMA_ID,
+        BOOK_DELTA_EVENT_SCHEMA_ID,
+        FUNDING_RATE_EVENT_SCHEMA_ID,
+        MARK_PRICE_EVENT_SCHEMA_ID,
+        CORPORATE_ACTION_EVENT_SCHEMA_ID,
+        "puresaber.status-event",
+    }
+    assert set(records) == expected_schema_ids
+    for schema_id, payload in records.items():
+        validate_json_record(schema_id, payload)
+        assert list(payload) == get_arrow_schema(schema_id).names
