@@ -130,6 +130,7 @@ def test_crypto_fixture_adapters_cover_required_events_and_replay_l2(
         if record["instrument_id"] == ETH_PERP.instrument_id
     } == {"funding_rate", "mark_price"}
     assert all(record["event_time"].endswith("Z") for record in records)
+    assert all(isinstance(record["sequence"], int) for record in records)
     l2 = [record for record in records if record["event_type"] in {"book_snapshot", "book_delta"}]
     result = replay_l2(l2)
     assert result.final_checkpoint.sequence > result.checkpoints[0].sequence
@@ -290,6 +291,15 @@ def test_adapter_context_time_and_sequence_primitives_fail_closed() -> None:
             received_at=event_time - timedelta(microseconds=1),
             event_id="invalid-time",
             sequence=None,
+        )
+    with pytest.raises(ValidationError, match="provider sequence"):
+        event_identity(
+            context,
+            "BTCUSDT",
+            event_time=event_time,
+            received_at=event_time,
+            event_id="invalid-sequence",
+            sequence=-1,
         )
 
     sequences = BookSequenceNormalizer()

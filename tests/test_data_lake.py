@@ -34,7 +34,7 @@ def trade_record(
     event_id: str,
     instrument_id: str = "BTC-USDT-SPOT",
     event_time: str = "2026-01-02T00:00:01Z",
-    sequence: int | None = None,
+    sequence: int = 1,
 ) -> dict:
     return {
         "event_type": "trade",

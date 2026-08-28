@@ -88,12 +88,14 @@ def event_identity(
     event_time: datetime,
     event_id: str,
     received_at: datetime,
-    sequence: int | None,
+    sequence: int,
     trading_day: date | None = None,
     session_id: str | None = None,
 ) -> dict[str, Any]:
     if received_at < event_time:
         raise ValidationError("provider received_at precedes event_time")
+    if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
+        raise ValidationError("provider sequence must be a non-negative integer")
     return {
         "event_id": event_id,
         "instrument_id": context.instrument(provider_symbol).instrument_id,

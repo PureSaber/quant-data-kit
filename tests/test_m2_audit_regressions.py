@@ -55,7 +55,7 @@ def trade(
         "source": source,
         "trading_day": "2026-01-02",
         "session_id": f"{source}-24x7-{instrument_id}",
-        "sequence": None,
+        "sequence": 1,
         "price": {"units": 100_000, "scale": 2},
         "quantity": {"units": 10, "scale": 3},
         "aggressor_side": "buy",
