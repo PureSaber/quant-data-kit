@@ -6,8 +6,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
-import tempfile
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
@@ -22,9 +20,10 @@ import pyarrow.parquet as pq
 
 from quant_data_kit.data_lake import (
     StoragePolicy,
-    _lake_lock,
+    _atomic_write_bytes,
     _mkdir_in_lake,
     _resolved_lake_root,
+    _stable_staging_directory,
     _validate_lake_path,
     load_normalized_snapshot,
     read_normalized_events,
@@ -280,6 +279,125 @@ def _snapshot_identity(
     }
 
 
+def _revision_record(snapshot: CuratedSnapshot) -> dict[str, str]:
+    record = {
+        "schema_version": SCHEMA_VERSION_V2,
+        "dataset": snapshot.dataset,
+        "revision_id": snapshot.revision_id,
+        "snapshot_id": snapshot.snapshot_id,
+        "logical_sha256": snapshot.logical_sha256,
+    }
+    record["anchor_sha256"] = _hash_bytes(_canonical(record))
+    return record
+
+
+def _validate_revision_record(
+    actual: Mapping[str, Any],
+    expected: Mapping[str, Any],
+) -> None:
+    actual_identity = dict(actual)
+    actual_anchor = actual_identity.pop("anchor_sha256", None)
+    if actual_anchor != _hash_bytes(_canonical(actual_identity)):
+        raise ValidationError("Curated revision registry integrity changed")
+    expected_identity = {key: value for key, value in expected.items() if key != "anchor_sha256"}
+    if actual_identity != expected_identity:
+        raise ValidationError(
+            "Curated revision maps to different content: "
+            f"{expected_identity['dataset']}/{expected_identity['revision_id']}"
+        )
+
+
+def _recover_missing_revision(
+    root: Path,
+    dataset: str,
+    expected: Mapping[str, str],
+    revision_path: Path,
+) -> bool:
+    """Recover a deleted revision accelerator from immutable snapshot manifests."""
+    snapshots_root = Path(root) / "curated" / dataset / "snapshots"
+    if not snapshots_root.exists():
+        return False
+    matched = False
+    for snapshot_dir in sorted(snapshots_root.glob("sha256-*")):
+        if not snapshot_dir.is_dir():
+            raise ValidationError(f"Curated snapshot entry is not a directory: {snapshot_dir}")
+        snapshot = _load_curated_snapshot(
+            root,
+            dataset,
+            snapshot_dir.name,
+            verify_revision_registry=False,
+        )
+        if snapshot.revision_id != expected["revision_id"]:
+            continue
+        _validate_revision_record(_revision_record(snapshot), expected)
+        matched = True
+    if not matched:
+        return False
+    _atomic_write_bytes(
+        root,
+        revision_path,
+        json.dumps(expected, indent=2, ensure_ascii=False).encode("utf-8"),
+    )
+    _validate_revision_record(
+        json.loads(revision_path.read_text(encoding="utf-8")),
+        expected,
+    )
+    return True
+
+
+def _publish_curated_snapshot(
+    lake_root: Path,
+    *,
+    stage: Path,
+    snapshot: CuratedSnapshot,
+    policy: StoragePolicy,
+) -> CuratedSnapshot:
+    """Publish one prepared snapshot while its dataset/revision lock is held."""
+    curated_root = Path(lake_root) / "curated" / snapshot.dataset
+    snapshot_dir = curated_root / "snapshots" / snapshot.snapshot_id
+    _mkdir_in_lake(lake_root, snapshot_dir.parent)
+    _validate_lake_path(lake_root, snapshot_dir, allow_missing=True)
+    revision_root = _mkdir_in_lake(lake_root, curated_root / "revisions")
+    revision_path = revision_root / f"{snapshot.revision_id}.json"
+    expected_revision = _revision_record(snapshot)
+    if revision_path.exists():
+        checked_revision = _validate_lake_path(
+            lake_root,
+            revision_path,
+            allow_missing=False,
+        )
+        _validate_revision_record(
+            json.loads(checked_revision.read_text(encoding="utf-8")),
+            expected_revision,
+        )
+    else:
+        _recover_missing_revision(
+            lake_root,
+            snapshot.dataset,
+            expected_revision,
+            revision_path,
+        )
+    if snapshot_dir.exists():
+        existing = _load_curated_snapshot(
+            lake_root,
+            snapshot.dataset,
+            snapshot.snapshot_id,
+            verify_revision_registry=False,
+        )
+        if existing != snapshot:
+            raise ValidationError(f"Curated snapshot collision: {snapshot_dir}")
+    else:
+        require_collection_capacity(lake_root, projected_write_bytes=0, policy=policy)
+        os.replace(stage, snapshot_dir)
+    if not revision_path.exists():
+        _atomic_write_bytes(
+            lake_root,
+            revision_path,
+            json.dumps(expected_revision, indent=2, ensure_ascii=False).encode("utf-8"),
+        )
+    return load_curated_snapshot(lake_root, snapshot.dataset, snapshot.snapshot_id)
+
+
 def _write_curated_bars(
     root: Path,
     bars: Iterable[Mapping[str, Any]],
@@ -317,10 +435,14 @@ def _write_curated_bars(
     )
     curated_root = _mkdir_in_lake(lake_root, lake_root / "curated" / dataset)
     staging_root = curated_root / "staging"
-    _mkdir_in_lake(lake_root, staging_root)
-    stage = Path(tempfile.mkdtemp(prefix="m2-", dir=staging_root))
     partition_items: list[CuratedPartition] = []
-    try:
+    revision_identity = {"dataset": dataset, "revision_id": revision_id}
+    with _stable_staging_directory(
+        lake_root,
+        staging_root,
+        namespace="curated-revision",
+        identity=revision_identity,
+    ) as stage:
         for (trading_date, instrument_id), group in sorted(groups.items()):
             ordered = sorted(group, key=lambda row: (row["event_time"], row["event_id"]))
             table = pa.Table.from_pylist(
@@ -377,57 +499,12 @@ def _write_curated_bars(
             json.dumps(asdict(snapshot), indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
-        snapshot_dir = curated_root / "snapshots" / snapshot_id
-        _mkdir_in_lake(lake_root, snapshot_dir.parent)
-        _validate_lake_path(lake_root, snapshot_dir, allow_missing=True)
-        revision_root = _mkdir_in_lake(lake_root, curated_root / "revisions")
-        revision_path = revision_root / f"{revision_id}.json"
-        revision_record = {
-            "schema_version": SCHEMA_VERSION_V2,
-            "dataset": dataset,
-            "revision_id": revision_id,
-            "snapshot_id": snapshot_id,
-            "logical_sha256": logical_sha256,
-        }
-        revision_record["anchor_sha256"] = _hash_bytes(_canonical(revision_record))
-        with _lake_lock(
+        return _publish_curated_snapshot(
             lake_root,
-            "curated-revision",
-            {"dataset": dataset, "revision_id": revision_id},
-        ):
-            if revision_path.exists():
-                _validate_lake_path(lake_root, revision_path, allow_missing=False)
-                existing_revision = json.loads(revision_path.read_text(encoding="utf-8"))
-                existing_anchor = existing_revision.pop("anchor_sha256", None)
-                if existing_anchor != _hash_bytes(_canonical(existing_revision)):
-                    raise ValidationError("Curated revision registry integrity changed")
-                if existing_revision != {
-                    key: value for key, value in revision_record.items() if key != "anchor_sha256"
-                }:
-                    raise ValidationError(
-                        f"Curated revision maps to different content: {dataset}/{revision_id}"
-                    )
-            if snapshot_dir.exists():
-                existing_manifest = json.loads(
-                    (snapshot_dir / "manifest.json").read_text(encoding="utf-8")
-                )
-                if _canonical(existing_manifest) != _canonical(asdict(snapshot)):
-                    raise ValidationError(f"Curated snapshot collision: {snapshot_dir}")
-            else:
-                require_collection_capacity(lake_root, projected_write_bytes=0, policy=policy)
-                os.replace(stage, snapshot_dir)
-                stage = snapshot_dir
-            if not revision_path.exists():
-                temporary_revision = revision_root / f".{revision_id}.{os.getpid()}.tmp"
-                temporary_revision.write_text(
-                    json.dumps(revision_record, indent=2, ensure_ascii=False),
-                    encoding="utf-8",
-                )
-                os.replace(temporary_revision, revision_path)
-            return load_curated_snapshot(lake_root, dataset, snapshot_id)
-    finally:
-        if stage.exists() and stage.parent == staging_root:
-            shutil.rmtree(stage)
+            stage=stage,
+            snapshot=snapshot,
+            policy=policy,
+        )
 
 
 def curate_trade_bars_from_snapshot(
@@ -466,7 +543,13 @@ def curate_trade_bars_from_snapshot(
     )
 
 
-def load_curated_snapshot(root: Path, dataset: str, snapshot_id: str) -> CuratedSnapshot:
+def _load_curated_snapshot(
+    root: Path,
+    dataset: str,
+    snapshot_id: str,
+    *,
+    verify_revision_registry: bool,
+) -> CuratedSnapshot:
     lake_root = _resolved_lake_root(root, create=False)
     dataset = _dataset_segment(dataset)
     if not re.fullmatch(r"sha256-[0-9a-f]{64}", snapshot_id):
@@ -555,21 +638,23 @@ def load_curated_snapshot(root: Path, dataset: str, snapshot_id: str) -> Curated
     }
     if actual_files != expected_files:
         raise ValidationError("Curated snapshot contains an unexpected or missing file")
-    revision_path = _validate_lake_path(
-        lake_root,
-        lake_root / "curated" / dataset / "revisions" / f"{snapshot.revision_id}.json",
-        allow_missing=False,
-    )
-    revision_record = json.loads(revision_path.read_text(encoding="utf-8"))
-    anchor = revision_record.pop("anchor_sha256", None)
-    if anchor != _hash_bytes(_canonical(revision_record)):
-        raise ValidationError("Curated revision registry integrity changed")
-    if revision_record != {
-        "schema_version": SCHEMA_VERSION_V2,
-        "dataset": dataset,
-        "revision_id": snapshot.revision_id,
-        "snapshot_id": snapshot.snapshot_id,
-        "logical_sha256": snapshot.logical_sha256,
-    }:
-        raise ValidationError("Curated revision registry does not match its snapshot")
+    if verify_revision_registry:
+        revision_path = _validate_lake_path(
+            lake_root,
+            lake_root / "curated" / dataset / "revisions" / f"{snapshot.revision_id}.json",
+            allow_missing=False,
+        )
+        _validate_revision_record(
+            json.loads(revision_path.read_text(encoding="utf-8")),
+            _revision_record(snapshot),
+        )
     return snapshot
+
+
+def load_curated_snapshot(root: Path, dataset: str, snapshot_id: str) -> CuratedSnapshot:
+    return _load_curated_snapshot(
+        root,
+        dataset,
+        snapshot_id,
+        verify_revision_registry=True,
+    )

@@ -21,7 +21,7 @@ dependencies = [
 
 [project.optional-dependencies]
 akshare = ["akshare>=1.12"]
-dev = ["pytest>=7.4", "ruff>=0.9.0"]
+dev = ["coverage>=7.6", "pytest>=7.4", "ruff>=0.9.0"]
 
 [project.scripts]
 qdk-validate = "quant_data_kit.cli:main_validate"
