@@ -191,10 +191,16 @@ class L2BookReconstructor:
         raise L2ReplayError(f"Unsupported L2 event_type: {event_type!r}")
 
     def _assert_identity(self, payload: Mapping[str, Any]) -> None:
-        identity = (str(payload["source"]), str(payload["instrument_id"]), str(payload["session_id"]))
+        identity = (
+            str(payload["source"]),
+            str(payload["instrument_id"]),
+            str(payload["session_id"]),
+        )
         expected = (self._source, self._instrument_id, self._session_id)
         if identity != expected:
-            raise L2ReplayError(f"L2 stream identity changed: expected={expected}, actual={identity}")
+            raise L2ReplayError(
+                f"L2 stream identity changed: expected={expected}, actual={identity}"
+            )
 
     def _assert_time_advances(self, event_time: str) -> None:
         if self._event_time is None:
@@ -263,9 +269,7 @@ def replay_l2(
         reconstructor._apply_without_checkpoint(record)
         sequence = reconstructor.sequence
         should_checkpoint = (
-            capture_all_checkpoints
-            or sequence in expected
-            or index == len(records) - 1
+            capture_all_checkpoints or sequence in expected or index == len(records) - 1
         )
         if should_checkpoint:
             checkpoint = reconstructor.checkpoint()
@@ -278,5 +282,7 @@ def replay_l2(
             checkpoints.append(checkpoint)
     missing_checkpoints = set(expected).difference(item.sequence for item in checkpoints)
     if missing_checkpoints:
-        raise L2ReplayError(f"Expected L2 checkpoints were not reached: {sorted(missing_checkpoints)}")
+        raise L2ReplayError(
+            f"Expected L2 checkpoints were not reached: {sorted(missing_checkpoints)}"
+        )
     return L2ReplayResult(final_checkpoint=checkpoints[-1], checkpoints=tuple(checkpoints))

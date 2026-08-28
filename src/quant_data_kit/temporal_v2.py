@@ -20,9 +20,7 @@ def ensure_utc_datetime(value: datetime | pd.Timestamp, *, field: str) -> dateti
         raise ValidationError(f"{field} must be a datetime")
     if timestamp.tzinfo is None or timestamp.utcoffset() is None:
         raise ValidationError(f"{field} must be timezone-aware UTC")
-    zone_name = getattr(timestamp.tzinfo, "key", None) or getattr(
-        timestamp.tzinfo, "zone", None
-    )
+    zone_name = getattr(timestamp.tzinfo, "key", None) or getattr(timestamp.tzinfo, "zone", None)
     if zone_name is not None:
         if str(zone_name) not in _UTC_ZONE_NAMES:
             raise ValidationError(f"{field} must use UTC, got {zone_name}")
@@ -69,22 +67,16 @@ def validate_bitemporal_frame(
     work[effective_to] = _utc_series(work, effective_to, nullable=True)
     work[available_at] = _utc_series(work, available_at)
     work[superseded_at] = _utc_series(work, superseded_at, nullable=True)
-    invalid_effective = work[effective_to].notna() & (
-        work[effective_to] <= work[effective_from]
-    )
+    invalid_effective = work[effective_to].notna() & (work[effective_to] <= work[effective_from])
     if invalid_effective.any():
         raise ValidationError("effective_to must be later than effective_from")
-    invalid_knowledge = work[superseded_at].notna() & (
-        work[superseded_at] <= work[available_at]
-    )
+    invalid_knowledge = work[superseded_at].notna() & (work[superseded_at] <= work[available_at])
     if invalid_knowledge.any():
         raise ValidationError("superseded_at must be later than available_at")
 
     far_future = pd.Timestamp.max.tz_localize("UTC")
     ambiguous = 0
-    group_key: str | list[str] = (
-        key_columns[0] if len(key_columns) == 1 else list(key_columns)
-    )
+    group_key: str | list[str] = key_columns[0] if len(key_columns) == 1 else list(key_columns)
     for _, group in work.groupby(group_key, dropna=False, sort=False):
         rows = list(group.itertuples(index=False))
         names = {name: position for position, name in enumerate(work.columns)}
@@ -149,11 +141,15 @@ def point_in_time_join_bitemporal(
     right[effective_to] = _utc_series(right, effective_to, nullable=True)
     right[available_at] = _utc_series(right, available_at)
     right[superseded_at] = _utc_series(right, superseded_at, nullable=True)
-    selected = list(fact_columns) if fact_columns is not None else [
-        column
-        for column in right.columns
-        if column not in {*by, effective_from, effective_to, available_at, superseded_at}
-    ]
+    selected = (
+        list(fact_columns)
+        if fact_columns is not None
+        else [
+            column
+            for column in right.columns
+            if column not in {*by, effective_from, effective_to, available_at, superseded_at}
+        ]
+    )
     missing_facts = [column for column in selected if column not in right.columns]
     if missing_facts:
         raise ValidationError(f"Missing fact columns: {missing_facts}")
@@ -164,13 +160,9 @@ def point_in_time_join_bitemporal(
         for column in by:
             mask &= right[column].eq(observation[column])
         mask &= right[effective_from].le(observation[observation_time])
-        mask &= right[effective_to].isna() | right[effective_to].gt(
-            observation[observation_time]
-        )
+        mask &= right[effective_to].isna() | right[effective_to].gt(observation[observation_time])
         mask &= right[available_at].le(observation[as_of_time])
-        mask &= right[superseded_at].isna() | right[superseded_at].gt(
-            observation[as_of_time]
-        )
+        mask &= right[superseded_at].isna() | right[superseded_at].gt(observation[as_of_time])
         matches = right.loc[mask]
         if len(matches) > 1:
             raise ValidationError("Point-in-time join found ambiguous facts")

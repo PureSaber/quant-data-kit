@@ -22,6 +22,7 @@ import pyarrow.parquet as pq
 
 from quant_data_kit.data_lake import (
     StoragePolicy,
+    _lake_lock,
     _mkdir_in_lake,
     _resolved_lake_root,
     _validate_lake_path,
@@ -115,7 +116,14 @@ def _dataset_segment(dataset: str) -> str:
         dataset in {".", "..", "latest", "main"}
         or dataset.rstrip(". ") != dataset
         or dataset.split(".", 1)[0].upper()
-        in {"AUX", "CON", "NUL", "PRN", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+        in {
+            "AUX",
+            "CON",
+            "NUL",
+            "PRN",
+            *(f"COM{i}" for i in range(1, 10)),
+            *(f"LPT{i}" for i in range(1, 10)),
+        }
     ):
         raise ValidationError("dataset name is reserved")
     return dataset
@@ -160,9 +168,7 @@ def build_session_bars(
     recipe_version: str = "session-bars-v1",
 ) -> list[dict[str, Any]]:
     """Aggregate trades without crossing session boundaries or trading-day identities."""
-    interval_us = (
-        (interval.days * 86_400 + interval.seconds) * 1_000_000 + interval.microseconds
-    )
+    interval_us = (interval.days * 86_400 + interval.seconds) * 1_000_000 + interval.microseconds
     if interval_us <= 0:
         raise ValidationError("bar interval must be positive")
     grouped: dict[tuple[str, str, str, str, datetime], list[dict[str, Any]]] = defaultdict(list)
@@ -243,7 +249,9 @@ def _arrow_ready_bar(record: Mapping[str, Any]) -> dict[str, Any]:
     schema = get_arrow_schema(BAR_EVENT_SCHEMA_ID)
     for field_definition in schema:
         if pa.types.is_timestamp(field_definition.type):
-            result[field_definition.name] = _utc(str(result[field_definition.name]), field_definition.name)
+            result[field_definition.name] = _utc(
+                str(result[field_definition.name]), field_definition.name
+            )
         elif pa.types.is_date32(field_definition.type):
             result[field_definition.name] = datetime.fromisoformat(
                 str(result[field_definition.name])
@@ -382,34 +390,41 @@ def _write_curated_bars(
             "logical_sha256": logical_sha256,
         }
         revision_record["anchor_sha256"] = _hash_bytes(_canonical(revision_record))
-        if revision_path.exists():
-            _validate_lake_path(lake_root, revision_path, allow_missing=False)
-            existing_revision = json.loads(revision_path.read_text(encoding="utf-8"))
-            existing_anchor = existing_revision.pop("anchor_sha256", None)
-            if existing_anchor != _hash_bytes(_canonical(existing_revision)):
-                raise ValidationError("Curated revision registry integrity changed")
-            if existing_revision != {key: value for key, value in revision_record.items() if key != "anchor_sha256"}:
-                raise ValidationError(
-                    f"Curated revision maps to different content: {dataset}/{revision_id}"
+        with _lake_lock(
+            lake_root,
+            "curated-revision",
+            {"dataset": dataset, "revision_id": revision_id},
+        ):
+            if revision_path.exists():
+                _validate_lake_path(lake_root, revision_path, allow_missing=False)
+                existing_revision = json.loads(revision_path.read_text(encoding="utf-8"))
+                existing_anchor = existing_revision.pop("anchor_sha256", None)
+                if existing_anchor != _hash_bytes(_canonical(existing_revision)):
+                    raise ValidationError("Curated revision registry integrity changed")
+                if existing_revision != {
+                    key: value for key, value in revision_record.items() if key != "anchor_sha256"
+                }:
+                    raise ValidationError(
+                        f"Curated revision maps to different content: {dataset}/{revision_id}"
+                    )
+            if snapshot_dir.exists():
+                existing_manifest = json.loads(
+                    (snapshot_dir / "manifest.json").read_text(encoding="utf-8")
                 )
-        if snapshot_dir.exists():
-            existing_manifest = json.loads(
-                (snapshot_dir / "manifest.json").read_text(encoding="utf-8")
-            )
-            if _canonical(existing_manifest) != _canonical(asdict(snapshot)):
-                raise ValidationError(f"Curated snapshot collision: {snapshot_dir}")
-        else:
-            require_collection_capacity(lake_root, projected_write_bytes=0, policy=policy)
-            os.replace(stage, snapshot_dir)
-            stage = snapshot_dir
-        if not revision_path.exists():
-            temporary_revision = revision_root / f".{revision_id}.{os.getpid()}.tmp"
-            temporary_revision.write_text(
-                json.dumps(revision_record, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-            os.replace(temporary_revision, revision_path)
-        return load_curated_snapshot(lake_root, dataset, snapshot_id)
+                if _canonical(existing_manifest) != _canonical(asdict(snapshot)):
+                    raise ValidationError(f"Curated snapshot collision: {snapshot_dir}")
+            else:
+                require_collection_capacity(lake_root, projected_write_bytes=0, policy=policy)
+                os.replace(stage, snapshot_dir)
+                stage = snapshot_dir
+            if not revision_path.exists():
+                temporary_revision = revision_root / f".{revision_id}.{os.getpid()}.tmp"
+                temporary_revision.write_text(
+                    json.dumps(revision_record, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                os.replace(temporary_revision, revision_path)
+            return load_curated_snapshot(lake_root, dataset, snapshot_id)
     finally:
         if stage.exists() and stage.parent == staging_root:
             shutil.rmtree(stage)
@@ -536,9 +551,7 @@ def load_curated_snapshot(root: Path, dataset: str, snapshot_id: str) -> Curated
     if rows != snapshot.rows:
         raise ValidationError("Curated snapshot row count changed")
     actual_files = {
-        path.relative_to(snapshot_dir)
-        for path in snapshot_dir.rglob("*")
-        if path.is_file()
+        path.relative_to(snapshot_dir) for path in snapshot_dir.rglob("*") if path.is_file()
     }
     if actual_files != expected_files:
         raise ValidationError("Curated snapshot contains an unexpected or missing file")

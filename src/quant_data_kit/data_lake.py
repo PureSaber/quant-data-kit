@@ -13,6 +13,7 @@ import tempfile
 import uuid
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -27,6 +28,7 @@ from typing_extensions import Self
 
 from quant_data_kit.exceptions import ValidationError
 from quant_data_kit.l2_replay import replay_l2
+from quant_data_kit.process_lock import process_file_lock
 from quant_data_kit.schemas_v2 import (
     BAR_EVENT_SCHEMA_ID,
     BOOK_DELTA_EVENT_SCHEMA_ID,
@@ -141,6 +143,18 @@ class RawObjectReference:
 
 
 @dataclass(frozen=True)
+class RawKeyClaim:
+    schema_version: str
+    layer: str
+    source: str
+    collection_date: str
+    idempotency_key: str
+    object_id: str
+    manifest_sha256: str
+    claim_sha256: str
+
+
+@dataclass(frozen=True)
 class ArchiveReceipt:
     object_id: str
     archive_uri: str
@@ -165,6 +179,15 @@ class PartitionManifest:
 
 
 @dataclass(frozen=True)
+class EventClaimReference:
+    event_id_hash: str
+    event_id: str
+    schema_id: str
+    event_sha256: str
+    claim_sha256: str
+
+
+@dataclass(frozen=True)
 class NormalizedSnapshot:
     schema_version: str
     layer: str
@@ -175,6 +198,7 @@ class NormalizedSnapshot:
     logical_sha256: str
     rows: int
     upstream_raw_references: tuple[RawObjectReference, ...]
+    event_claims: tuple[EventClaimReference, ...]
     partitions: tuple[PartitionManifest, ...]
 
 
@@ -219,7 +243,11 @@ def _json_evidence(value: Any) -> Any:
         return {"bytes": len(value), "sha256": _sha256_bytes(value)}
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
-    return {"invalid_type": type(value).__name__, "repr": repr(value)}
+    value_type = type(value)
+    return {
+        "invalid_type": value_type.__qualname__,
+        "type_module": value_type.__module__,
+    }
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -320,9 +348,42 @@ def _validate_lake_path(root: Path, candidate: Path, *, allow_missing: bool) -> 
 
 
 def _mkdir_in_lake(root: Path, path: Path) -> Path:
-    checked = _validate_lake_path(root, path, allow_missing=True)
-    checked.mkdir(parents=True, exist_ok=True)
-    return _validate_lake_path(root, checked, allow_missing=False)
+    bootstrap_path = _validate_lake_path(
+        root,
+        Path(root) / ".lock-bootstrap",
+        allow_missing=True,
+    )
+    with process_file_lock(bootstrap_path):
+        _validate_lake_path(root, bootstrap_path, allow_missing=False)
+        checked = _validate_lake_path(root, path, allow_missing=True)
+        checked.mkdir(parents=True, exist_ok=True)
+        return _validate_lake_path(root, checked, allow_missing=False)
+
+
+def _atomic_write_bytes(root: Path, target: Path, body: bytes) -> None:
+    parent = _mkdir_in_lake(root, target.parent)
+    checked_target = _validate_lake_path(root, target, allow_missing=True)
+    temporary = parent / f".{target.name}.{uuid.uuid4().hex}.tmp"
+    _validate_lake_path(root, temporary, allow_missing=True)
+    try:
+        with temporary.open("xb") as stream:
+            stream.write(body)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, checked_target)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+@contextmanager
+def _lake_lock(root: Path, namespace: str, identity: Mapping[str, Any]) -> Iterable[None]:
+    namespace = _segment(namespace, "lock_namespace")
+    lock_id = _sha256_bytes(_canonical_json_bytes(dict(identity)))
+    lock_root = _mkdir_in_lake(root, Path(root) / ".locks" / namespace)
+    lock_path = _validate_lake_path(root, lock_root / f"{lock_id}.lock", allow_missing=True)
+    with process_file_lock(lock_path):
+        yield
 
 
 def _tree_size(root: Path) -> int:
@@ -371,9 +432,7 @@ def evaluate_capacity(
             f"hot quota exceeded: projected={projected_hot}, quota={policy.hot_quota_bytes}"
         )
     if free_after < minimum_free:
-        reasons.append(
-            f"free-space floor breached: projected={free_after}, minimum={minimum_free}"
-        )
+        reasons.append(f"free-space floor breached: projected={free_after}, minimum={minimum_free}")
     alert = None
     if reasons:
         alert = "COLLECTION_STOPPED: " + "; ".join(reasons)
@@ -444,21 +503,107 @@ def _raw_key_dir(
 
 
 def _raw_object_dir(root: Path, reference: RawObjectReference) -> Path:
-    return _raw_key_dir(
-        root,
-        reference.source,
-        reference.collection_date,
-        reference.idempotency_key,
-    ) / f"object={_segment(reference.object_id, 'object_id')}"
+    return (
+        _raw_key_dir(
+            root,
+            reference.source,
+            reference.collection_date,
+            reference.idempotency_key,
+        )
+        / f"object={_segment(reference.object_id, 'object_id')}"
+    )
 
 
 def _raw_tombstone_path(root: Path, reference: RawObjectReference) -> Path:
-    return _raw_key_dir(
+    return (
+        _raw_key_dir(
+            root,
+            reference.source,
+            reference.collection_date,
+            reference.idempotency_key,
+        )
+        / f"object={_segment(reference.object_id, 'object_id')}.cleanup.json"
+    )
+
+
+def _raw_deleting_dir(root: Path, reference: RawObjectReference) -> Path:
+    return (
+        _raw_key_dir(
+            root,
+            reference.source,
+            reference.collection_date,
+            reference.idempotency_key,
+        )
+        / f"deleting={_segment(reference.object_id, 'object_id')}"
+    )
+
+
+def _raw_claim_path(root: Path, reference: RawObjectReference) -> Path:
+    return (
+        Path(root)
+        / "raw"
+        / "key-claims"
+        / f"source={_segment(reference.source, 'source')}"
+        / f"key-sha256={_sha256_bytes(reference.idempotency_key.encode('utf-8'))}.json"
+    )
+
+
+def _raw_lock_identity(reference: RawObjectReference) -> dict[str, str]:
+    return {
+        "source": reference.source,
+        "idempotency_key": reference.idempotency_key,
+    }
+
+
+def _raw_key_claim(reference: RawObjectReference) -> RawKeyClaim:
+    identity = {
+        "schema_version": "2.0.0",
+        "layer": "raw-key-claim",
+        **_raw_lock_identity(reference),
+        "collection_date": reference.collection_date,
+        "object_id": reference.object_id,
+        "manifest_sha256": reference.manifest_sha256,
+    }
+    return RawKeyClaim(
+        **identity,
+        claim_sha256=_sha256_bytes(_canonical_json_bytes(identity)),
+    )
+
+
+def _load_raw_key_claim(root: Path, reference: RawObjectReference) -> RawKeyClaim:
+    claim_path = _validate_lake_path(root, _raw_claim_path(root, reference), allow_missing=False)
+    try:
+        claim = RawKeyClaim(**json.loads(claim_path.read_text(encoding="utf-8")))
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError) as exc:
+        raise ValidationError("Raw idempotency-key claim is unreadable or malformed") from exc
+    identity = asdict(claim)
+    anchor = identity.pop("claim_sha256")
+    if anchor != _sha256_bytes(_canonical_json_bytes(identity)):
+        raise ValidationError("Raw idempotency-key claim integrity changed")
+    expected = _raw_key_claim(reference)
+    if claim != expected:
+        raise ValidationError(
+            f"Conflicting immutable Raw idempotency key: {reference.idempotency_key}"
+        )
+    return claim
+
+
+def _ensure_raw_key_claim(root: Path, reference: RawObjectReference) -> RawKeyClaim:
+    claim_path = _raw_claim_path(root, reference)
+    if claim_path.exists():
+        return _load_raw_key_claim(root, reference)
+    claim = _raw_key_claim(reference)
+    _atomic_write_bytes(
         root,
-        reference.source,
-        reference.collection_date,
-        reference.idempotency_key,
-    ) / f"object={_segment(reference.object_id, 'object_id')}.cleanup.json"
+        claim_path,
+        json.dumps(asdict(claim), indent=2, ensure_ascii=False).encode("utf-8"),
+    )
+    return _load_raw_key_claim(root, reference)
+
+
+def _raw_stage_prefix(reference: RawObjectReference) -> str:
+    lock_id = _sha256_bytes(_canonical_json_bytes(_raw_lock_identity(reference)))
+    return f"raw-{lock_id}-"
 
 
 def _validate_raw_manifest(manifest: RawObjectManifest) -> None:
@@ -551,6 +696,41 @@ def _remove_staging_directory(root: Path, stage: Path) -> None:
     shutil.rmtree(checked)
 
 
+def _recover_raw_staging(
+    root: Path,
+    reference: RawObjectReference,
+    manifest: RawObjectManifest,
+) -> RawObjectManifest | None:
+    staging_root = _mkdir_in_lake(root, Path(root) / "raw" / ".staging")
+    object_dir = _raw_object_dir(root, reference)
+    recovered: RawObjectManifest | None = None
+    for stage in sorted(staging_root.glob(f"{_raw_stage_prefix(reference)}*")):
+        if not stage.is_dir():
+            continue
+        try:
+            staged = _load_raw_from_dir(
+                root,
+                stage,
+                expected=reference,
+                enforce_directory_identity=False,
+            )
+            if staged != manifest:
+                raise ValidationError("Raw staging content differs from its immutable key claim")
+        except ValidationError as exc:
+            _relocate_invalid_raw(root, stage, reason=f"stale_raw_staging: {exc}")
+            continue
+        if object_dir.exists():
+            existing = _load_raw_from_dir(root, object_dir, expected=reference)
+            if existing != manifest:
+                raise ValidationError(f"Conflicting immutable Raw object: {object_dir}")
+            _remove_staging_directory(root, stage)
+            recovered = existing
+            continue
+        os.replace(stage, object_dir)
+        recovered = _load_raw_from_dir(root, object_dir, expected=reference)
+    return recovered
+
+
 def write_raw_bytes(
     root: Path,
     *,
@@ -612,59 +792,64 @@ def write_raw_bytes(
         }
     )
     reference = manifest.reference()
-    key_dir = _raw_key_dir(lake_root, source, collection_date, resolved_key)
-    _mkdir_in_lake(lake_root, key_dir)
-    tombstones = list(key_dir.glob("object=*.cleanup.json"))
-    if tombstones:
-        raise ValidationError(f"Raw idempotency key was already archived and cleaned: {resolved_key}")
-    object_dir = _raw_object_dir(lake_root, reference)
-    for existing_dir in key_dir.glob("object=*"):
-        if not existing_dir.is_dir():
-            continue
-        try:
-            existing = _load_raw_from_dir(lake_root, existing_dir)
-        except ValidationError as exc:
-            _relocate_invalid_raw(lake_root, existing_dir, reason=str(exc))
-            continue
-        if existing.reference() == reference and existing == manifest:
-            return existing
-        raise ValidationError(f"Conflicting immutable Raw idempotency key: {resolved_key}")
-
     manifest_bytes = json.dumps(asdict(manifest), indent=2, ensure_ascii=False).encode("utf-8")
-    require_collection_capacity(
-        lake_root,
-        projected_write_bytes=len(payload) + len(manifest_bytes),
-        policy=policy,
-    )
-    staging_root = _mkdir_in_lake(lake_root, lake_root / "raw" / ".staging")
-    stage = staging_root / uuid.uuid4().hex
-    stage.mkdir(exist_ok=False)
-    try:
-        with (stage / manifest.data_path).open("wb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        with (stage / "manifest.json").open("wb") as stream:
-            stream.write(manifest_bytes)
-            stream.flush()
-            os.fsync(stream.fileno())
-        _load_raw_from_dir(
+    with _lake_lock(lake_root, "raw-key", _raw_lock_identity(reference)):
+        key_dir = _mkdir_in_lake(
             lake_root,
-            stage,
-            expected=reference,
-            enforce_directory_identity=False,
+            _raw_key_dir(lake_root, source, collection_date, resolved_key),
         )
-        _validate_lake_path(lake_root, object_dir, allow_missing=True)
-        if object_dir.exists():
-            existing = _load_raw_from_dir(lake_root, object_dir, expected=reference)
-            if existing != manifest:
-                raise ValidationError(f"Conflicting immutable Raw object: {object_dir}")
-            return existing
-        os.replace(stage, object_dir)
-        return _load_raw_from_dir(lake_root, object_dir, expected=reference)
-    finally:
-        if stage.exists():
-            _remove_staging_directory(lake_root, stage)
+        _ensure_raw_key_claim(lake_root, reference)
+        if list(key_dir.glob("object=*.cleanup.json")):
+            raise ValidationError(
+                f"Raw idempotency key was already archived and cleaned: {resolved_key}"
+            )
+        if list(key_dir.glob("deleting=*")):
+            raise ValidationError(f"Raw idempotency key cleanup is in progress: {resolved_key}")
+        object_dir = _raw_object_dir(lake_root, reference)
+        recovered = _recover_raw_staging(lake_root, reference, manifest)
+        if recovered is not None:
+            return recovered
+        for existing_dir in key_dir.glob("object=*"):
+            if not existing_dir.is_dir():
+                continue
+            try:
+                existing = _load_raw_from_dir(lake_root, existing_dir)
+            except ValidationError as exc:
+                _relocate_invalid_raw(lake_root, existing_dir, reason=str(exc))
+                continue
+            if existing.reference() == reference and existing == manifest:
+                return existing
+            raise ValidationError(f"Conflicting immutable Raw idempotency key: {resolved_key}")
+
+        require_collection_capacity(
+            lake_root,
+            projected_write_bytes=len(payload) + len(manifest_bytes),
+            policy=policy,
+        )
+        staging_root = _mkdir_in_lake(lake_root, lake_root / "raw" / ".staging")
+        stage = staging_root / f"{_raw_stage_prefix(reference)}{uuid.uuid4().hex}"
+        stage.mkdir(exist_ok=False)
+        try:
+            with (stage / manifest.data_path).open("wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            with (stage / "manifest.json").open("wb") as stream:
+                stream.write(manifest_bytes)
+                stream.flush()
+                os.fsync(stream.fileno())
+            _load_raw_from_dir(
+                lake_root,
+                stage,
+                expected=reference,
+                enforce_directory_identity=False,
+            )
+            _validate_lake_path(lake_root, object_dir, allow_missing=True)
+            os.replace(stage, object_dir)
+            return _load_raw_from_dir(lake_root, object_dir, expected=reference)
+        finally:
+            if stage.exists():
+                _remove_staging_directory(lake_root, stage)
 
 
 def _local_archive_path(archive_uri: str) -> Path:
@@ -710,7 +895,7 @@ def _verify_archive_restore(root: Path, archive_path: Path) -> tuple[str, str]:
             restore_path.unlink()
 
 
-def _load_archived_raw_reference(root: Path, reference: RawObjectReference) -> RawObjectManifest:
+def _read_cleanup_audit(root: Path, reference: RawObjectReference) -> dict[str, Any]:
     tombstone = _validate_lake_path(root, _raw_tombstone_path(root, reference), allow_missing=False)
     try:
         audit = json.loads(tombstone.read_text(encoding="utf-8"))
@@ -719,6 +904,11 @@ def _load_archived_raw_reference(root: Path, reference: RawObjectReference) -> R
     audit_hash = audit.pop("audit_sha256", None)
     if audit_hash != _sha256_bytes(_canonical_json_bytes(audit)):
         raise ValidationError("Raw cleanup audit integrity changed")
+    return audit
+
+
+def _load_archived_raw_reference(root: Path, reference: RawObjectReference) -> RawObjectManifest:
+    audit = _read_cleanup_audit(root, reference)
     try:
         manifest = RawObjectManifest(**audit["raw_manifest"])
     except (KeyError, TypeError) as exc:
@@ -738,6 +928,68 @@ def _load_archived_raw_reference(root: Path, reference: RawObjectReference) -> R
     return manifest
 
 
+def _validate_cleanup_receipt(
+    root: Path,
+    manifest: RawObjectManifest,
+    receipt: ArchiveReceipt,
+    *,
+    current_time: datetime,
+) -> tuple[str, str]:
+    if current_time < _utc_datetime(manifest.hot_until, "hot_until"):
+        raise ValidationError(
+            f"Raw object is still inside its {manifest.hot_retention_days}-day hot-retention window"
+        )
+    verified_at = _utc_datetime(receipt.verified_at, "verified_at")
+    collected_at = _utc_datetime(manifest.collected_at, "collected_at")
+    if verified_at < collected_at or verified_at > current_time:
+        raise ValidationError("Archive verification time is outside the valid cleanup interval")
+    if receipt.object_id != manifest.object_id or receipt.source_sha256 != manifest.content_sha256:
+        raise ValidationError("Archive receipt does not identify the trusted Raw object")
+    archive_path = _local_archive_path(receipt.archive_uri)
+    archive_hash, restored_hash = _verify_archive_restore(root, archive_path)
+    if {
+        archive_hash,
+        restored_hash,
+        receipt.archive_sha256,
+        receipt.restored_sha256,
+    } != {manifest.content_sha256}:
+        raise ValidationError("Real archive read/restore hash validation failed")
+    return archive_hash, restored_hash
+
+
+def _finalize_raw_deleting(
+    root: Path,
+    deleting_dir: Path,
+    manifest: RawObjectManifest,
+) -> None:
+    deleting_dir = _validate_lake_path(root, deleting_dir, allow_missing=False)
+    actual_names = {path.name for path in deleting_dir.iterdir()}
+    expected_names = {manifest.data_path, "manifest.json"}
+    if not actual_names <= expected_names:
+        raise ValidationError("Raw deleting state contains unexpected files")
+    payload_path = deleting_dir / manifest.data_path
+    if payload_path.exists():
+        payload_path = _validate_lake_path(root, payload_path, allow_missing=False)
+        if payload_path.stat().st_size != manifest.byte_length:
+            raise ValidationError("Raw deleting payload length changed")
+        if _sha256_file(payload_path) != manifest.content_sha256:
+            raise ValidationError("Raw deleting payload hash changed")
+        payload_path.unlink()
+    manifest_path = deleting_dir / "manifest.json"
+    if manifest_path.exists():
+        manifest_path = _validate_lake_path(root, manifest_path, allow_missing=False)
+        try:
+            remaining_manifest = RawObjectManifest(
+                **json.loads(manifest_path.read_text(encoding="utf-8"))
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError) as exc:
+            raise ValidationError("Raw deleting manifest is unreadable or malformed") from exc
+        if remaining_manifest != manifest:
+            raise ValidationError("Raw deleting manifest changed")
+        manifest_path.unlink()
+    deleting_dir.rmdir()
+
+
 def validate_raw_reference(
     root: Path,
     reference: RawObjectReference,
@@ -745,11 +997,20 @@ def validate_raw_reference(
     allow_archived: bool,
 ) -> RawObjectManifest:
     lake_root = _resolved_lake_root(root, create=False)
+    _load_raw_key_claim(lake_root, reference)
     object_dir = _raw_object_dir(lake_root, reference)
     if object_dir.exists():
         return _load_raw_from_dir(lake_root, object_dir, expected=reference)
     if allow_archived and _raw_tombstone_path(lake_root, reference).exists():
         return _load_archived_raw_reference(lake_root, reference)
+    deleting_dir = _raw_deleting_dir(lake_root, reference)
+    if allow_archived and deleting_dir.exists():
+        return _load_raw_from_dir(
+            lake_root,
+            deleting_dir,
+            expected=reference,
+            enforce_directory_identity=False,
+        )
     raise ValidationError(f"Trusted Raw object is unavailable: {reference.object_id}")
 
 
@@ -772,55 +1033,82 @@ def cleanup_archived_raw_object(
     confirm: bool = False,
     now: datetime | str | None = None,
 ) -> Path:
-    """Remove one Raw object only after reading and restoring a real local archive."""
+    """Resume or complete one locked, auditable Raw cleanup transaction."""
     if not confirm:
         raise ValidationError("Raw cleanup requires explicit confirm=True")
     lake_root = _resolved_lake_root(root, create=False)
-    manifest = validate_raw_reference(lake_root, reference, allow_archived=False)
-    object_dir = _raw_object_dir(lake_root, reference)
     current_time = _utc_datetime(now or datetime.now(timezone.utc), "now")
-    if current_time < _utc_datetime(manifest.hot_until, "hot_until"):
-        raise ValidationError(
-            f"Raw object is still inside its {manifest.hot_retention_days}-day hot-retention window"
+    with _lake_lock(lake_root, "raw-key", _raw_lock_identity(reference)):
+        _load_raw_key_claim(lake_root, reference)
+        object_dir = _raw_object_dir(lake_root, reference)
+        deleting_dir = _raw_deleting_dir(lake_root, reference)
+        tombstone = _raw_tombstone_path(lake_root, reference)
+
+        if tombstone.exists():
+            audit = _read_cleanup_audit(lake_root, reference)
+            try:
+                manifest = RawObjectManifest(**audit["raw_manifest"])
+            except (KeyError, TypeError) as exc:
+                raise ValidationError("Raw cleanup audit has malformed manifest evidence") from exc
+            _validate_raw_manifest(manifest)
+            if manifest.reference() != reference:
+                raise ValidationError("Archived Raw reference does not match cleanup audit")
+            if audit.get("archive_receipt") != asdict(receipt):
+                raise ValidationError("Cleanup retry receipt differs from immutable audit")
+            _validate_cleanup_receipt(
+                lake_root,
+                manifest,
+                receipt,
+                current_time=current_time,
+            )
+            if object_dir.exists():
+                if deleting_dir.exists():
+                    raise ValidationError("Raw cleanup has both live and deleting states")
+                os.replace(object_dir, deleting_dir)
+            if deleting_dir.exists():
+                _finalize_raw_deleting(lake_root, deleting_dir, manifest)
+            return tombstone
+
+        if deleting_dir.exists():
+            manifest = _load_raw_from_dir(
+                lake_root,
+                deleting_dir,
+                expected=reference,
+                enforce_directory_identity=False,
+            )
+            should_rename = False
+        elif object_dir.exists():
+            manifest = _load_raw_from_dir(lake_root, object_dir, expected=reference)
+            should_rename = True
+        else:
+            raise ValidationError(f"Trusted Raw object is unavailable: {reference.object_id}")
+
+        archive_hash, restored_hash = _validate_cleanup_receipt(
+            lake_root,
+            manifest,
+            receipt,
+            current_time=current_time,
         )
-    verified_at = _utc_datetime(receipt.verified_at, "verified_at")
-    collected_at = _utc_datetime(manifest.collected_at, "collected_at")
-    if verified_at < collected_at or verified_at > current_time:
-        raise ValidationError("Archive verification time is outside the valid cleanup interval")
-    if receipt.object_id != manifest.object_id or receipt.source_sha256 != manifest.content_sha256:
-        raise ValidationError("Archive receipt does not identify the trusted Raw object")
-    archive_path = _local_archive_path(receipt.archive_uri)
-    archive_hash, restored_hash = _verify_archive_restore(lake_root, archive_path)
-    if {
-        archive_hash,
-        restored_hash,
-        receipt.archive_sha256,
-        receipt.restored_sha256,
-    } != {manifest.content_sha256}:
-        raise ValidationError("Real archive read/restore hash validation failed")
-    tombstone = _raw_tombstone_path(lake_root, reference)
-    if tombstone.exists():
-        raise ValidationError(f"Cleanup audit already exists: {tombstone}")
-    audit = {
-        "schema_version": "2.0.0",
-        "action": "verified_local_archive_cleanup",
-        "raw_reference": asdict(reference),
-        "raw_manifest": asdict(manifest),
-        "archive_receipt": asdict(receipt),
-        "archive_actual_sha256": archive_hash,
-        "restore_actual_sha256": restored_hash,
-        "cleaned_at": _utc_text(current_time, "cleaned_at"),
-    }
-    audit["audit_sha256"] = _sha256_bytes(_canonical_json_bytes(audit))
-    temporary_audit = tombstone.with_name(f".{tombstone.name}.{uuid.uuid4().hex}.tmp")
-    _validate_lake_path(lake_root, temporary_audit, allow_missing=True)
-    temporary_audit.write_text(json.dumps(audit, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(temporary_audit, tombstone)
-    _load_raw_from_dir(lake_root, object_dir, expected=reference)
-    _validate_lake_path(lake_root, object_dir / manifest.data_path, allow_missing=False).unlink()
-    _validate_lake_path(lake_root, object_dir / "manifest.json", allow_missing=False).unlink()
-    object_dir.rmdir()
-    return tombstone
+        if should_rename:
+            os.replace(object_dir, deleting_dir)
+        audit = {
+            "schema_version": "2.0.0",
+            "action": "verified_local_archive_cleanup",
+            "raw_reference": asdict(reference),
+            "raw_manifest": asdict(manifest),
+            "archive_receipt": asdict(receipt),
+            "archive_actual_sha256": archive_hash,
+            "restore_actual_sha256": restored_hash,
+            "cleaned_at": _utc_text(current_time, "cleaned_at"),
+        }
+        audit["audit_sha256"] = _sha256_bytes(_canonical_json_bytes(audit))
+        _atomic_write_bytes(
+            lake_root,
+            tombstone,
+            json.dumps(audit, indent=2, ensure_ascii=False).encode("utf-8"),
+        )
+        _finalize_raw_deleting(lake_root, deleting_dir, manifest)
+        return tombstone
 
 
 def _event_schema_id(record: Mapping[str, Any]) -> str:
@@ -856,7 +1144,9 @@ def _arrow_ready(record: Mapping[str, Any], schema: pa.Schema) -> dict[str, Any]
 
 def _validated_table(schema_id: str, records: list[dict[str, Any]]) -> pa.Table:
     schema = get_arrow_schema(schema_id)
-    table = pa.Table.from_pylist([_arrow_ready(record, schema) for record in records], schema=schema)
+    table = pa.Table.from_pylist(
+        [_arrow_ready(record, schema) for record in records], schema=schema
+    )
     validate_arrow_table(schema_id, table)
     return table
 
@@ -867,6 +1157,7 @@ def _normalized_snapshot_payload(
     venue: str,
     created_at: str,
     upstream_raw_references: tuple[RawObjectReference, ...],
+    event_claims: tuple[EventClaimReference, ...],
     partitions: tuple[PartitionManifest, ...],
 ) -> dict[str, Any]:
     return {
@@ -876,8 +1167,133 @@ def _normalized_snapshot_payload(
         "venue": venue,
         "created_at": created_at,
         "upstream_raw_references": [asdict(item) for item in upstream_raw_references],
+        "event_claims": [asdict(item) for item in event_claims],
         "partitions": [asdict(item) for item in partitions],
     }
+
+
+def _validate_quarantine_batch(
+    root: Path,
+    batch_dir: Path,
+    manifest: Mapping[str, Any],
+) -> Path:
+    batch_dir = _validate_lake_path(root, batch_dir, allow_missing=False)
+    records_path = _validate_lake_path(root, batch_dir / "records.jsonl", allow_missing=False)
+    manifest_path = _validate_lake_path(root, batch_dir / "manifest.json", allow_missing=False)
+    if not records_path.is_file() or _sha256_file(records_path) != manifest["content_sha256"]:
+        raise ValidationError(f"Quarantine batch changed: {batch_dir}")
+    try:
+        stored_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValidationError(f"Quarantine manifest is unreadable: {batch_dir}") from exc
+    if stored_manifest != manifest:
+        raise ValidationError(f"Quarantine manifest changed: {batch_dir}")
+    actual_files = {path.name for path in batch_dir.iterdir()}
+    if actual_files != {"records.jsonl", "manifest.json"}:
+        raise ValidationError(f"Quarantine batch has unexpected files: {batch_dir}")
+    return manifest_path
+
+
+def _event_claim_reference(schema_id: str, canonical_row: Mapping[str, Any]) -> EventClaimReference:
+    event_id = str(canonical_row["event_id"])
+    event_id_hash = _sha256_bytes(event_id.encode("utf-8"))
+    event_sha256 = _sha256_bytes(
+        _canonical_json_bytes({"schema_id": schema_id, "record": dict(canonical_row)})
+    )
+    identity = {
+        "schema_version": "2.0.0",
+        "layer": "normalized-event-claim",
+        "event_id_hash": event_id_hash,
+        "event_id": event_id,
+        "schema_id": schema_id,
+        "event_sha256": event_sha256,
+    }
+    return EventClaimReference(
+        event_id_hash=event_id_hash,
+        event_id=event_id,
+        schema_id=schema_id,
+        event_sha256=event_sha256,
+        claim_sha256=_sha256_bytes(_canonical_json_bytes(identity)),
+    )
+
+
+def _event_claim_path(root: Path, claim: EventClaimReference) -> Path:
+    return (
+        Path(root)
+        / "normalized"
+        / "event-claims"
+        / f"shard={claim.event_id_hash[:2]}"
+        / f"{claim.event_id_hash}.json"
+    )
+
+
+def _event_claim_payload(claim: EventClaimReference) -> dict[str, Any]:
+    return {
+        "schema_version": "2.0.0",
+        "layer": "normalized-event-claim",
+        **asdict(claim),
+    }
+
+
+def _validate_event_claim(
+    root: Path,
+    expected: EventClaimReference,
+) -> EventClaimReference:
+    path = _validate_lake_path(root, _event_claim_path(root, expected), allow_missing=False)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValidationError(f"Normalized event claim is unreadable: {expected.event_id}") from exc
+    if payload.pop("schema_version", None) != "2.0.0" or payload.pop("layer", None) != (
+        "normalized-event-claim"
+    ):
+        raise ValidationError(f"Normalized event claim schema changed: {expected.event_id}")
+    try:
+        actual = EventClaimReference(**payload)
+    except TypeError as exc:
+        raise ValidationError(f"Normalized event claim is malformed: {expected.event_id}") from exc
+    identity = {
+        "schema_version": "2.0.0",
+        "layer": "normalized-event-claim",
+        "event_id_hash": actual.event_id_hash,
+        "event_id": actual.event_id,
+        "schema_id": actual.schema_id,
+        "event_sha256": actual.event_sha256,
+    }
+    if actual.event_id_hash != _sha256_bytes(
+        actual.event_id.encode("utf-8")
+    ) or actual.claim_sha256 != _sha256_bytes(_canonical_json_bytes(identity)):
+        raise ValidationError(f"Normalized event claim integrity changed: {expected.event_id}")
+    if actual != expected:
+        raise ValidationError(f"Conflicting lake event_id claim: {expected.event_id}")
+    return actual
+
+
+def _publish_event_claims(
+    root: Path,
+    claims: tuple[EventClaimReference, ...],
+) -> None:
+    shards = sorted({claim.event_id_hash[:2] for claim in claims})
+    with ExitStack() as stack:
+        for shard in shards:
+            stack.enter_context(_lake_lock(root, "event-claim-shard", {"shard": shard}))
+        missing: list[EventClaimReference] = []
+        for claim in claims:
+            path = _event_claim_path(root, claim)
+            if path.exists():
+                _validate_event_claim(root, claim)
+            else:
+                missing.append(claim)
+        for claim in missing:
+            _atomic_write_bytes(
+                root,
+                _event_claim_path(root, claim),
+                json.dumps(_event_claim_payload(claim), indent=2, ensure_ascii=False).encode(
+                    "utf-8"
+                ),
+            )
+        for claim in claims:
+            _validate_event_claim(root, claim)
 
 
 def _write_quarantine(
@@ -894,11 +1310,9 @@ def _write_quarantine(
         b"\n".join(_canonical_json_bytes(_json_evidence(asdict(entry))) for entry in entries)
         + b"\n"
     )
-    batch_id = f"sha256-{_sha256_bytes(body)[:24]}"
+    batch_id = f"sha256-{_sha256_bytes(body)}"
     lake_root = _resolved_lake_root(root, create=True)
     batch_dir = lake_root / "quarantine" / batch_id
-    records_path = batch_dir / "records.jsonl"
-    manifest_path = batch_dir / "manifest.json"
     manifest = {
         "schema_version": "2.0.0",
         "layer": "quarantine",
@@ -909,27 +1323,39 @@ def _write_quarantine(
         "content_sha256": _sha256_bytes(body),
         "data_path": "records.jsonl",
     }
-    if batch_dir.exists():
-        _validate_lake_path(lake_root, batch_dir, allow_missing=False)
-        if not records_path.is_file() or _sha256_file(records_path) != manifest["content_sha256"]:
-            raise ValidationError(f"Quarantine batch changed: {batch_dir}")
-        if not manifest_path.is_file() or json.loads(
-            manifest_path.read_text(encoding="utf-8")
-        ) != manifest:
-            raise ValidationError(f"Quarantine manifest changed: {batch_dir}")
-        return manifest_path
     manifest_bytes = json.dumps(manifest, indent=2, ensure_ascii=False).encode("utf-8")
-    require_collection_capacity(
-        lake_root,
-        projected_write_bytes=len(body) + len(manifest_bytes),
-        policy=policy,
-    )
-    _mkdir_in_lake(lake_root, batch_dir.parent)
-    _validate_lake_path(lake_root, batch_dir, allow_missing=True)
-    batch_dir.mkdir(exist_ok=False)
-    records_path.write_bytes(body)
-    manifest_path.write_bytes(manifest_bytes)
-    return manifest_path
+    with _lake_lock(lake_root, "quarantine-batch", {"batch_id": batch_id}):
+        if batch_dir.exists():
+            return _validate_quarantine_batch(lake_root, batch_dir, manifest)
+        staging_root = _mkdir_in_lake(lake_root, lake_root / "quarantine" / ".staging")
+        for stale in staging_root.glob(f"{batch_id}-*"):
+            if stale.is_dir():
+                checked = _validate_lake_path(lake_root, stale, allow_missing=False)
+                shutil.rmtree(checked)
+        require_collection_capacity(
+            lake_root,
+            projected_write_bytes=len(body) + len(manifest_bytes),
+            policy=policy,
+        )
+        _mkdir_in_lake(lake_root, batch_dir.parent)
+        _validate_lake_path(lake_root, batch_dir, allow_missing=True)
+        stage = staging_root / f"{batch_id}-{uuid.uuid4().hex}"
+        stage.mkdir(exist_ok=False)
+        try:
+            with (stage / "records.jsonl").open("wb") as stream:
+                stream.write(body)
+                stream.flush()
+                os.fsync(stream.fileno())
+            with (stage / "manifest.json").open("wb") as stream:
+                stream.write(manifest_bytes)
+                stream.flush()
+                os.fsync(stream.fileno())
+            _validate_quarantine_batch(lake_root, stage, manifest)
+            os.replace(stage, batch_dir)
+            return _validate_quarantine_batch(lake_root, batch_dir, manifest)
+        finally:
+            if stage.exists():
+                shutil.rmtree(stage)
 
 
 def write_normalized_events(
@@ -939,9 +1365,7 @@ def write_normalized_events(
     provider: str,
     venue: str,
     upstream_raw_references: Iterable[RawObjectReference],
-    expected_l2_checkpoint_hashes: Mapping[
-        tuple[str, str, str], Mapping[int, str]
-    ] | None = None,
+    expected_l2_checkpoint_hashes: Mapping[tuple[str, str, str], Mapping[int, str]] | None = None,
     policy: StoragePolicy = _DEFAULT_STORAGE_POLICY,
 ) -> NormalizationResult:
     """Validate full streams, quarantine failures, then immutably partition strict v2 Parquet."""
@@ -975,10 +1399,7 @@ def write_normalized_events(
         if isinstance(event_id, str):
             event_id_indices[event_id].append(index)
     duplicate_indices = {
-        index
-        for indices in event_id_indices.values()
-        if len(indices) > 1
-        for index in indices
+        index for indices in event_id_indices.values() if len(indices) > 1 for index in indices
     }
     streams: dict[tuple[str, str, str], list[tuple[int, dict[str, Any]]]] = defaultdict(list)
     for index, record in indexed:
@@ -1055,6 +1476,7 @@ def write_normalized_events(
     _mkdir_in_lake(lake_root, staging_root)
     stage = Path(tempfile.mkdtemp(prefix="m2-", dir=staging_root))
     partition_manifests: list[PartitionManifest] = []
+    event_claim_items: list[EventClaimReference] = []
     try:
         for event_type, trading_date, instrument_id in sorted(partitioned):
             rows = sorted(
@@ -1080,6 +1502,9 @@ def write_normalized_events(
             _mkdir_in_lake(lake_root, target.parent)
             pq.write_table(table, target, compression="zstd", use_dictionary=False)
             logical_rows = [_json_evidence(item) for item in table.to_pylist()]
+            event_claim_items.extend(
+                _event_claim_reference(schema_id, logical_row) for logical_row in logical_rows
+            )
             partition_manifests.append(
                 PartitionManifest(
                     relative_path=relative.as_posix(),
@@ -1095,6 +1520,11 @@ def write_normalized_events(
                 )
             )
         partitions = tuple(partition_manifests)
+        event_claims = tuple(
+            sorted(event_claim_items, key=lambda item: (item.event_id_hash, item.event_id))
+        )
+        if len({item.event_id_hash for item in event_claims}) != len(event_claims):
+            raise ValidationError("Normalized batch contains colliding event_id hashes")
         created_at = _utc_text(
             max(_utc_datetime(row["available_at"], "available_at") for _, row in accepted),
             "available_at",
@@ -1104,6 +1534,7 @@ def write_normalized_events(
             venue=venue,
             created_at=created_at,
             upstream_raw_references=raw_references,
+            event_claims=event_claims,
             partitions=partitions,
         )
         logical_sha256 = _sha256_bytes(_canonical_json_bytes(identity))
@@ -1118,6 +1549,7 @@ def write_normalized_events(
             logical_sha256=logical_sha256,
             rows=sum(item.rows for item in partitions),
             upstream_raw_references=raw_references,
+            event_claims=event_claims,
             partitions=partitions,
         )
         (stage / "manifest.json").write_text(
@@ -1127,26 +1559,28 @@ def write_normalized_events(
         snapshot_dir = normalized_root / "snapshots" / snapshot_id
         _mkdir_in_lake(lake_root, snapshot_dir.parent)
         _validate_lake_path(lake_root, snapshot_dir, allow_missing=True)
-        if snapshot_dir.exists():
-            existing = load_normalized_snapshot(root, snapshot_id)
-            if existing.logical_sha256 != logical_sha256:
-                raise ValidationError(f"Normalized snapshot collision: {snapshot_dir}")
+        _publish_event_claims(lake_root, event_claims)
+        with _lake_lock(lake_root, "normalized-snapshot", {"snapshot_id": snapshot_id}):
+            if snapshot_dir.exists():
+                existing = load_normalized_snapshot(root, snapshot_id)
+                if existing.logical_sha256 != logical_sha256:
+                    raise ValidationError(f"Normalized snapshot collision: {snapshot_dir}")
+                return NormalizationResult(
+                    snapshot=existing,
+                    accepted_rows=existing.rows,
+                    quarantined_rows=len(quarantined),
+                    quarantine_manifest=quarantine_manifest,
+                )
+            require_collection_capacity(lake_root, projected_write_bytes=0, policy=policy)
+            os.replace(stage, snapshot_dir)
+            stage = snapshot_dir
+            verified = load_normalized_snapshot(root, snapshot_id)
             return NormalizationResult(
-                snapshot=existing,
-                accepted_rows=existing.rows,
+                snapshot=verified,
+                accepted_rows=verified.rows,
                 quarantined_rows=len(quarantined),
                 quarantine_manifest=quarantine_manifest,
             )
-        require_collection_capacity(lake_root, projected_write_bytes=0, policy=policy)
-        os.replace(stage, snapshot_dir)
-        stage = snapshot_dir
-        verified = load_normalized_snapshot(root, snapshot_id)
-        return NormalizationResult(
-            snapshot=verified,
-            accepted_rows=verified.rows,
-            quarantined_rows=len(quarantined),
-            quarantine_manifest=quarantine_manifest,
-        )
     finally:
         if stage.exists() and stage.parent == staging_root:
             shutil.rmtree(stage)
@@ -1183,6 +1617,7 @@ def load_normalized_snapshot(root: Path, snapshot_id: str) -> NormalizedSnapshot
     payload["upstream_raw_references"] = tuple(
         RawObjectReference(**item) for item in payload["upstream_raw_references"]
     )
+    payload["event_claims"] = tuple(EventClaimReference(**item) for item in payload["event_claims"])
     payload["partitions"] = tuple(PartitionManifest(**item) for item in payload["partitions"])
     snapshot = NormalizedSnapshot(**payload)
     if (
@@ -1196,11 +1631,14 @@ def load_normalized_snapshot(root: Path, snapshot_id: str) -> NormalizedSnapshot
         if reference.source != snapshot.provider:
             raise ValidationError("Normalized provider does not match its Raw source")
         validate_raw_reference(lake_root, reference, allow_archived=True)
+    for claim in snapshot.event_claims:
+        _validate_event_claim(lake_root, claim)
     identity = _normalized_snapshot_payload(
         provider=snapshot.provider,
         venue=snapshot.venue,
         created_at=snapshot.created_at,
         upstream_raw_references=snapshot.upstream_raw_references,
+        event_claims=snapshot.event_claims,
         partitions=snapshot.partitions,
     )
     logical_sha256 = _sha256_bytes(_canonical_json_bytes(identity))
@@ -1209,6 +1647,7 @@ def load_normalized_snapshot(root: Path, snapshot_id: str) -> NormalizedSnapshot
     rows = 0
     expected_files = {Path("manifest.json")}
     seen_paths: set[str] = set()
+    actual_event_claims: list[EventClaimReference] = []
     for partition in snapshot.partitions:
         if partition.relative_path in seen_paths:
             raise ValidationError("Normalized snapshot contains duplicate partition paths")
@@ -1236,13 +1675,19 @@ def load_normalized_snapshot(root: Path, snapshot_id: str) -> NormalizedSnapshot
         logical_rows = [_json_evidence(item) for item in table.to_pylist()]
         if _sha256_bytes(_canonical_json_bytes(logical_rows)) != partition.logical_sha256:
             raise ValidationError(f"Normalized partition logical content changed: {path}")
+        actual_event_claims.extend(
+            _event_claim_reference(partition.schema_id, logical_row) for logical_row in logical_rows
+        )
         rows += table.num_rows
     if rows != snapshot.rows:
         raise ValidationError("Normalized snapshot total row count changed")
+    if (
+        tuple(sorted(actual_event_claims, key=lambda item: (item.event_id_hash, item.event_id)))
+        != snapshot.event_claims
+    ):
+        raise ValidationError("Normalized snapshot event claims changed")
     actual_files = {
-        path.relative_to(snapshot_dir)
-        for path in snapshot_dir.rglob("*")
-        if path.is_file()
+        path.relative_to(snapshot_dir) for path in snapshot_dir.rglob("*") if path.is_file()
     }
     if actual_files != expected_files:
         raise ValidationError("Normalized snapshot contains an unexpected or missing file")

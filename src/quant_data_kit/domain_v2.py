@@ -126,12 +126,9 @@ class InstrumentSpec:
         )
         if effective_to is not None and effective_to <= effective_from:
             raise ValidationError("effective_to must be later than effective_from")
-        available, superseded = _validate_knowledge_interval(
-            self.available_at, self.superseded_at
-        )
+        available, superseded = _validate_knowledge_interval(self.available_at, self.superseded_at)
         if not isinstance(self.metadata, Mapping) or not all(
-            isinstance(key, str) and isinstance(value, str)
-            for key, value in self.metadata.items()
+            isinstance(key, str) and isinstance(value, str) for key, value in self.metadata.items()
         ):
             raise ValidationError("metadata must be a string-to-string mapping")
         object.__setattr__(
@@ -175,9 +172,7 @@ class SymbolMapping:
         )
         if effective_to is not None and effective_to <= effective_from:
             raise ValidationError("effective_to must be later than effective_from")
-        available, superseded = _validate_knowledge_interval(
-            self.available_at, self.superseded_at
-        )
+        available, superseded = _validate_knowledge_interval(self.available_at, self.superseded_at)
         object.__setattr__(self, "effective_from", effective_from)
         object.__setattr__(self, "effective_to", effective_to)
         object.__setattr__(self, "available_at", available)
@@ -211,9 +206,7 @@ class TradingSession:
         closes_at = ensure_utc_datetime(self.closes_at, field="closes_at")
         if closes_at <= opens_at:
             raise ValidationError("closes_at must be later than opens_at")
-        available, superseded = _validate_knowledge_interval(
-            self.available_at, self.superseded_at
-        )
+        available, superseded = _validate_knowledge_interval(self.available_at, self.superseded_at)
         object.__setattr__(self, "opens_at", opens_at)
         object.__setattr__(self, "closes_at", closes_at)
         object.__setattr__(self, "available_at", available)

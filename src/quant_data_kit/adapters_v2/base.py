@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -47,6 +47,8 @@ class AdapterContext:
 
 class ProviderAdapter(Protocol):
     certification_status: str
+
+    def transaction(self) -> AbstractContextManager[None]: ...
 
     def adapt(self, message: Mapping[str, Any]) -> list[dict[str, Any]]: ...
 
@@ -168,6 +170,7 @@ def adapt_fixture_messages(
     adapter: ProviderAdapter,
     messages: Iterable[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    records = [record for message in messages for record in adapter.adapt(message)]
-    validate_event_stream(records)
-    return records
+    with adapter.transaction():
+        records = [record for message in messages for record in adapter.adapt(message)]
+        validate_event_stream(records)
+        return records

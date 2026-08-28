@@ -69,9 +69,7 @@ def curate(root: Path, normalized_snapshot_id: str, *, revision_id: str, dataset
         revision_id=revision_id,
         recipe_version="session-bars-v1",
         interval=timedelta(minutes=1),
-        session_starts={
-            "CFFEX-IF-2026-01-05-DAY": datetime(2026, 1, 5, 1, 30, tzinfo=UTC)
-        },
+        session_starts={"CFFEX-IF-2026-01-05-DAY": datetime(2026, 1, 5, 1, 30, tzinfo=UTC)},
         policy=TEST_POLICY,
     )
 
@@ -113,9 +111,7 @@ def test_session_bar_refuses_missing_or_future_session_start() -> None:
         build_session_bars(
             [record],
             interval=timedelta(minutes=1),
-            session_starts={
-                record["session_id"]: datetime(2026, 1, 5, 1, 31, tzinfo=UTC)
-            },
+            session_starts={record["session_id"]: datetime(2026, 1, 5, 1, 31, tzinfo=UTC)},
         )
 
 
@@ -154,9 +150,12 @@ def test_curated_revision_is_immutable_and_lineage_changes_snapshot(tmp_path: Pa
     )
     assert repeated.snapshot_id == first.snapshot_id
     assert revised.snapshot_id != first.snapshot_id
-    assert load_curated_snapshot(
-        tmp_path, "session-bars-1m", revised.snapshot_id
-    ).lineage["normalized_snapshot_id"] == second_normalized.snapshot_id
+    assert (
+        load_curated_snapshot(tmp_path, "session-bars-1m", revised.snapshot_id).lineage[
+            "normalized_snapshot_id"
+        ]
+        == second_normalized.snapshot_id
+    )
     with pytest.raises(ValidationError, match="explicit content-addressed"):
         load_curated_snapshot(tmp_path, "session-bars-1m", "latest")
 

@@ -168,9 +168,7 @@ _ARROW_SCHEMAS: dict[str, pa.Schema] = {
             _field("interval_end", _UTC),
         ]
     ),
-    MARK_PRICE_EVENT_SCHEMA_ID: pa.schema(
-        _COMMON_EVENT_FIELDS + [_field("price", _FIXED_POINT)]
-    ),
+    MARK_PRICE_EVENT_SCHEMA_ID: pa.schema(_COMMON_EVENT_FIELDS + [_field("price", _FIXED_POINT)]),
     CORPORATE_ACTION_EVENT_SCHEMA_ID: pa.schema(
         _COMMON_EVENT_FIELDS
         + [
@@ -182,8 +180,7 @@ _ARROW_SCHEMAS: dict[str, pa.Schema] = {
         ]
     ),
     STATUS_EVENT_SCHEMA_ID: pa.schema(
-        _COMMON_EVENT_FIELDS
-        + [_field("status", pa.string()), _field("reason", pa.string())]
+        _COMMON_EVENT_FIELDS + [_field("status", pa.string()), _field("reason", pa.string())]
     ),
 }
 
@@ -256,9 +253,7 @@ _JSON_SCHEMAS: dict[str, dict[str, Any]] = {
             "available_at": _UTC_JSON,
             "superseded_at": _NULLABLE_UTC_JSON,
             "underlying_id": _NULLABLE_STRING,
-            "expiry_date": {
-                "oneOf": [{"type": "string", "format": "date"}, {"type": "null"}]
-            },
+            "expiry_date": {"oneOf": [{"type": "string", "format": "date"}, {"type": "null"}]},
             "metadata": {"type": "object", "additionalProperties": {"type": "string"}},
         },
         list(_ARROW_SCHEMAS[INSTRUMENT_SPEC_SCHEMA_ID].names),
@@ -522,18 +517,18 @@ def _validate_record_semantics(schema_id: str, payload: Mapping[str, Any]) -> No
         ) <= _timestamp(payload, "effective_from"):
             raise ValidationError("effective_to must be later than effective_from")
         _validate_knowledge_interval(payload)
-    elif schema_id == TRADING_SESSION_SCHEMA_ID and _timestamp(
-        payload, "closes_at"
-    ) <= _timestamp(payload, "opens_at"):
+    elif schema_id == TRADING_SESSION_SCHEMA_ID and _timestamp(payload, "closes_at") <= _timestamp(
+        payload, "opens_at"
+    ):
         raise ValidationError("closes_at must be later than opens_at")
     elif schema_id == TRADING_SESSION_SCHEMA_ID:
         _validate_knowledge_interval(payload)
 
 
 def _validate_knowledge_interval(payload: Mapping[str, Any]) -> None:
-    if payload["superseded_at"] is not None and _timestamp(
-        payload, "superseded_at"
-    ) <= _timestamp(payload, "available_at"):
+    if payload["superseded_at"] is not None and _timestamp(payload, "superseded_at") <= _timestamp(
+        payload, "available_at"
+    ):
         raise ValidationError("superseded_at must be later than available_at")
 
 

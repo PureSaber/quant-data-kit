@@ -97,9 +97,7 @@ def test_raw_to_normalized_duckdb_l2_curated_chain_is_replayable(tmp_path: Path)
         ]
 
     l2_records = [
-        record
-        for record in records
-        if record["event_type"] in {"book_snapshot", "book_delta"}
+        record for record in records if record["event_type"] in {"book_snapshot", "book_delta"}
     ]
     first_replay = qdk.replay_l2(l2_records)
     assert qdk.replay_l2(l2_records).final_checkpoint.state_sha256 == (
@@ -107,9 +105,7 @@ def test_raw_to_normalized_duckdb_l2_curated_chain_is_replayable(tmp_path: Path)
     )
 
     trades = [record for record in records if record["event_type"] == "trade"]
-    session_starts = {
-        record["session_id"]: datetime(2026, 1, 2, tzinfo=UTC) for record in trades
-    }
+    session_starts = {record["session_id"]: datetime(2026, 1, 2, tzinfo=UTC) for record in trades}
     curated = qdk.curate_trade_bars_from_snapshot(
         tmp_path,
         normalized_snapshot_id=normalized.snapshot_id,
@@ -122,9 +118,10 @@ def test_raw_to_normalized_duckdb_l2_curated_chain_is_replayable(tmp_path: Path)
         policy=TEST_POLICY,
     )
     assert curated.rows == 2
-    assert qdk.load_curated_snapshot(
-        tmp_path, "crypto-session-bars-1m", curated.snapshot_id
-    ) == curated
+    assert (
+        qdk.load_curated_snapshot(tmp_path, "crypto-session-bars-1m", curated.snapshot_id)
+        == curated
+    )
 
 
 def test_domestic_fixture_chain_remains_fixture_only(tmp_path: Path) -> None:
@@ -133,9 +130,7 @@ def test_domestic_fixture_chain_remains_fixture_only(tmp_path: Path) -> None:
         qdk.AdapterContext(
             provider="cn-fixture",
             venue="XSHG",
-            instruments={
-                "510300": qdk.AdapterInstrument("CN:XSHG:510300:ETF", 3, 0)
-            },
+            instruments={"510300": qdk.AdapterInstrument("CN:XSHG:510300:ETF", 3, 0)},
             session_kind="exchange",
         )
     )

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
+from contextlib import contextmanager
 from datetime import date
 from typing import Any
 
@@ -32,6 +33,11 @@ class CNNeutralFixtureAdapter:
             raise ValidationError("Domestic fixture adapter requires an exchange-session context")
         self.context = context
         self._book_sequences = BookSequenceNormalizer()
+
+    @contextmanager
+    def transaction(self) -> Iterable[None]:
+        with self._book_sequences.transaction():
+            yield
 
     def adapt(self, message: Mapping[str, Any]) -> list[dict[str, Any]]:
         if message.get("certification_scope") != "fixture-only":

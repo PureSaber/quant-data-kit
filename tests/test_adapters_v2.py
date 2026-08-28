@@ -78,9 +78,7 @@ def cn_adapter() -> CNNeutralFixtureAdapter:
             provider="cn-fixture",
             venue="XSHG",
             instruments={
-                "510300": AdapterInstrument(
-                    "CN:XSHG:510300:ETF", price_scale=3, quantity_scale=0
-                )
+                "510300": AdapterInstrument("CN:XSHG:510300:ETF", price_scale=3, quantity_scale=0)
             },
             session_kind="exchange",
         )
@@ -132,11 +130,7 @@ def test_crypto_fixture_adapters_cover_required_events_and_replay_l2(
         if record["instrument_id"] == ETH_PERP.instrument_id
     } == {"funding_rate", "mark_price"}
     assert all(record["event_time"].endswith("Z") for record in records)
-    l2 = [
-        record
-        for record in records
-        if record["event_type"] in {"book_snapshot", "book_delta"}
-    ]
+    l2 = [record for record in records if record["event_type"] in {"book_snapshot", "book_delta"}]
     result = replay_l2(l2)
     assert result.final_checkpoint.sequence > result.checkpoints[0].sequence
     assert len(result.final_checkpoint.state_sha256) == 64
@@ -148,9 +142,12 @@ def test_binance_and_okx_map_to_same_stable_instrument_ids() -> None:
     okx = adapt_fixture_messages(okx_adapter(), load_messages("okx"))
     binance_symbols = {record["instrument_id"] for record in binance}
     okx_symbols = {record["instrument_id"] for record in okx}
-    assert {SPOT.instrument_id, ETH_SPOT.instrument_id, PERP.instrument_id, ETH_PERP.instrument_id} <= (
-        binance_symbols & okx_symbols
-    )
+    assert {
+        SPOT.instrument_id,
+        ETH_SPOT.instrument_id,
+        PERP.instrument_id,
+        ETH_PERP.instrument_id,
+    } <= (binance_symbols & okx_symbols)
 
 
 def test_crypto_fixtures_enter_normalized_layer_without_quarantine(tmp_path: Path) -> None:

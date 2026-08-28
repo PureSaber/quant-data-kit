@@ -90,6 +90,7 @@ def fetch_daily_prices(
 ) -> pd.DataFrame:
     start = pd.Timestamp(start_date).strftime("%Y%m%d")
     end = pd.Timestamp(end_date).strftime("%Y%m%d")
+
     def _task(symbol: str) -> pd.DataFrame:
         return fetch_with_retries(
             lambda: _fetch_one_price(symbol, start, end, fetch_fn, sleep_seconds),

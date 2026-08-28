@@ -161,14 +161,17 @@ class BarEvent(_MarketEventBase):
         for field_name in ("open_price", "high_price", "low_price", "close_price"):
             _positive(getattr(self, field_name), field_name)
         _non_negative(self.volume, "volume")
-        if len(
-            {
-                self.open_price.scale,
-                self.high_price.scale,
-                self.low_price.scale,
-                self.close_price.scale,
-            }
-        ) != 1:
+        if (
+            len(
+                {
+                    self.open_price.scale,
+                    self.high_price.scale,
+                    self.low_price.scale,
+                    self.close_price.scale,
+                }
+            )
+            != 1
+        ):
             raise ValidationError("bar OHLC values must use one price scale")
         if self.high_price.units < max(
             self.open_price.units, self.low_price.units, self.close_price.units
@@ -226,9 +229,7 @@ class BookDeltaEvent(_MarketEventBase):
         super().__post_init__()
         if self.sequence is None:
             raise ValidationError("book delta sequence is required")
-        if not isinstance(self.previous_sequence, int) or isinstance(
-            self.previous_sequence, bool
-        ):
+        if not isinstance(self.previous_sequence, int) or isinstance(self.previous_sequence, bool):
             raise ValidationError("previous_sequence must be an integer")
         if self.previous_sequence < 0 or self.previous_sequence >= self.sequence:
             raise ValidationError("previous_sequence must precede sequence")
@@ -287,12 +288,8 @@ class CorporateActionEvent(_MarketEventBase):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        object.__setattr__(
-            self, "action_type", _required_text(self.action_type, "action_type")
-        )
-        if not isinstance(self.effective_date, date) or isinstance(
-            self.effective_date, datetime
-        ):
+        object.__setattr__(self, "action_type", _required_text(self.action_type, "action_type"))
+        if not isinstance(self.effective_date, date) or isinstance(self.effective_date, datetime):
             raise ValidationError("effective_date must be a date")
         if self.ratio is None and self.cash_amount is None:
             raise ValidationError("corporate action requires ratio or cash_amount")
@@ -300,9 +297,7 @@ class CorporateActionEvent(_MarketEventBase):
             _non_negative(self.ratio, "ratio")
         if self.cash_amount is not None:
             _non_negative(self.cash_amount, "cash_amount")
-            object.__setattr__(
-                self, "currency", _required_text(self.currency, "currency")
-            )
+            object.__setattr__(self, "currency", _required_text(self.currency, "currency"))
         elif self.currency is not None:
             raise ValidationError("currency requires cash_amount")
 
@@ -412,9 +407,7 @@ def market_event_payload(event: MarketEvent) -> dict[str, Any]:
             action_type=event.action_type,
             effective_date=event.effective_date.isoformat(),
             ratio=fixed_point_payload(event.ratio) if event.ratio else None,
-            cash_amount=(
-                fixed_point_payload(event.cash_amount) if event.cash_amount else None
-            ),
+            cash_amount=(fixed_point_payload(event.cash_amount) if event.cash_amount else None),
             currency=event.currency,
         )
     elif isinstance(event, StatusEvent):
