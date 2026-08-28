@@ -30,7 +30,11 @@ def validate_price_frame(
     if missing_ratio > max_missing_ratio:
         raise ValidationError(f"Missing ratio {missing_ratio:.2%} exceeds {max_missing_ratio:.2%}")
 
-    dup = df.duplicated(subset=["symbol", "date"]).sum() if {"symbol", "date"}.issubset(df.columns) else 0
+    dup = (
+        df.duplicated(subset=["symbol", "date"]).sum()
+        if {"symbol", "date"}.issubset(df.columns)
+        else 0
+    )
     if dup:
         raise ValidationError(f"Found {dup} duplicate symbol-date rows")
 

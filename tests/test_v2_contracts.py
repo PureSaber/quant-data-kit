@@ -123,9 +123,7 @@ def test_market_clock_uses_explicit_trading_day() -> None:
         available_at=datetime(2025, 12, 1, tzinfo=UTC),
     )
     clock = MarketClock("cn-futures-v1", [session])
-    assert clock.trading_day_at(datetime(2026, 1, 4, 14, 0, tzinfo=UTC)) == date(
-        2026, 1, 5
-    )
+    assert clock.trading_day_at(datetime(2026, 1, 4, 14, 0, tzinfo=UTC)) == date(2026, 1, 5)
     with pytest.raises(ValidationError, match="overlap"):
         MarketClock("cn-futures-v1", [session, session])
 
@@ -162,9 +160,7 @@ def test_l2_snapshot_and_delta_are_strictly_sequenced() -> None:
         bids=(BookLevel(fp("99.99"), fp("2")), BookLevel(fp("99.98"), fp("3"))),
         asks=(BookLevel(fp("100.01"), fp("2")), BookLevel(fp("100.02"), fp("4"))),
     )
-    validate_json_record(
-        BOOK_SNAPSHOT_EVENT_SCHEMA_ID, market_event_payload(snapshot)
-    )
+    validate_json_record(BOOK_SNAPSHOT_EVENT_SCHEMA_ID, market_event_payload(snapshot))
     delta = BookDeltaEvent(
         **event_base(101),
         side=BookSide.BID,
@@ -205,12 +201,8 @@ def test_public_json_validation_enforces_event_semantics() -> None:
 
 
 def test_public_stream_validation_rejects_duplicate_and_out_of_order_records() -> None:
-    first = market_event_payload(
-        TradeEvent(**event_base(10), price=fp("100"), quantity=fp("1"))
-    )
-    second = market_event_payload(
-        TradeEvent(**event_base(11), price=fp("101"), quantity=fp("1"))
-    )
+    first = market_event_payload(TradeEvent(**event_base(10), price=fp("100"), quantity=fp("1")))
+    second = market_event_payload(TradeEvent(**event_base(11), price=fp("101"), quantity=fp("1")))
     validate_event_stream([first, second])
 
     duplicate = deepcopy(second)
@@ -332,9 +324,7 @@ def test_bitemporal_join_never_uses_future_knowledge() -> None:
             "value": [7],
         }
     )
-    joined = point_in_time_join_bitemporal(
-        observations, facts, fact_columns=["value"]
-    )
+    joined = point_in_time_join_bitemporal(observations, facts, fact_columns=["value"])
     assert pd.isna(joined.loc[0, "value"])
     assert joined.loc[1, "value"] == 7
 
