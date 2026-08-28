@@ -247,9 +247,7 @@ def test_normalized_partitions_quarantine_bad_stream_and_pin_duckdb_snapshot(
     assert result.quarantine_manifest is not None and result.quarantine_manifest.is_file()
     snapshot = load_normalized_snapshot(tmp_path, result.snapshot.snapshot_id)
     assert snapshot.rows == 1
-    assert "provider=binance/venue=BINANCE/event_type=trade" in snapshot.partitions[
-        0
-    ].relative_path
+    assert "provider=binance/venue=BINANCE/event_type=trade" in snapshot.partitions[0].relative_path
 
     repeated = write_normalized_events(
         tmp_path,

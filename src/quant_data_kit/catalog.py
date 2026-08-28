@@ -55,9 +55,13 @@ class DataCatalog:
 
     def save(self) -> None:
         payload = {"datasets": self._records, "stack_dependencies": self._stack}
-        self.catalog_path.write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
+        self.catalog_path.write_text(
+            yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8"
+        )
 
-    def register(self, dataset_id: str, parquet_path: Path, manifest_path: Path | None = None) -> DatasetRecord:
+    def register(
+        self, dataset_id: str, parquet_path: Path, manifest_path: Path | None = None
+    ) -> DatasetRecord:
         parquet_path = Path(parquet_path)
         df = load_parquet(parquet_path)
         manifest_path = manifest_path or parquet_path.with_suffix(".manifest.json")

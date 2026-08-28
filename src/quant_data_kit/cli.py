@@ -12,7 +12,9 @@ from quant_data_kit.validate import validate_price_frame
 
 
 def main_validate(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="qdk-validate", description="Validate a Parquet price dataset")
+    parser = argparse.ArgumentParser(
+        prog="qdk-validate", description="Validate a Parquet price dataset"
+    )
     parser.add_argument("parquet", type=Path, help="Path to Parquet file")
     args = parser.parse_args(argv)
     df = load_parquet(args.parquet)
@@ -33,7 +35,9 @@ def main_manifest(argv: list[str] | None = None) -> int:
 def main_catalog(argv: list[str] | None = None) -> int:
     from quant_data_kit.catalog import DataCatalog
 
-    parser = argparse.ArgumentParser(prog="qdk-catalog", description="Dataset catalog for quant-data-kit")
+    parser = argparse.ArgumentParser(
+        prog="qdk-catalog", description="Dataset catalog for quant-data-kit"
+    )
     parser.add_argument("--catalog", default="data/catalog.yaml")
     sub = parser.add_subparsers(dest="command", required=True)
 

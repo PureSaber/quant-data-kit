@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import zlib
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from decimal import Decimal
 from typing import Any
@@ -42,6 +42,16 @@ class OKXFixtureAdapter:
         self.context = context
         self._book_sequences = BookSequenceNormalizer()
         self._books: dict[str, dict[str, dict[str, str]]] = {}
+
+    @contextmanager
+    def transaction(self) -> Iterable[None]:
+        books_before = copy.deepcopy(self._books)
+        with self._book_sequences.transaction():
+            try:
+                yield
+            except Exception:
+                self._books = books_before
+                raise
 
     @contextmanager
     def _book_transaction(self, symbol: str) -> Any:
@@ -103,7 +113,9 @@ class OKXFixtureAdapter:
         symbol = str(message.get("instId", ""))
         instrument = self.context.instrument(symbol)
         event_time = utc_from_milliseconds(message["ts"], "ts")
-        received_at = utc_from_milliseconds(message.get("received_at", message["ts"]), "received_at")
+        received_at = utc_from_milliseconds(
+            message.get("received_at", message["ts"]), "received_at"
+        )
         if channel == "trades":
             if message["side"] not in {"buy", "sell"}:
                 raise ValidationError("OKX trade side must be buy or sell")

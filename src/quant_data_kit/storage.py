@@ -87,7 +87,9 @@ def build_manifest(
 def write_manifest(manifest: DataManifest, manifest_path: Path) -> None:
     manifest_path = Path(manifest_path)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(json.dumps(asdict(manifest), indent=2, ensure_ascii=False), encoding="utf-8")
+    manifest_path.write_text(
+        json.dumps(asdict(manifest), indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
 
 def save_manifest(

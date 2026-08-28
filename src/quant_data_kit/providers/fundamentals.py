@@ -75,6 +75,7 @@ def fetch_fundamentals(
 ) -> pd.DataFrame:
     start = parse_date(start_date)
     end = parse_date(end_date)
+
     def _task(symbol: str) -> pd.DataFrame:
         return fetch_with_retries(
             lambda: _fetch_one_fundamental(symbol, start, end, fetch_fn, sleep_seconds),

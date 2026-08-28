@@ -51,7 +51,9 @@ def fetch_hs300_constituents_history(
         "成分券代码": "symbol",
         "操作": "action",
     }
-    events = adjustments.rename(columns={k: v for k, v in rename_map.items() if k in adjustments.columns})
+    events = adjustments.rename(
+        columns={k: v for k, v in rename_map.items() if k in adjustments.columns}
+    )
     if "date" not in events.columns:
         for col in events.columns:
             if "日期" in str(col) or col.lower() == "date":
@@ -74,7 +76,9 @@ def fetch_hs300_constituents_history(
                 "HS300 historical constituent events are unavailable; refusing current-universe "
                 "fallback because it creates survivorship bias"
             )
-        logger.warning("HS300 adjustment history unavailable; explicitly using current constituents")
+        logger.warning(
+            "HS300 adjustment history unavailable; explicitly using current constituents"
+        )
         current = current_symbols or fetch_hs300_constituents()
         if trade_dates is None:
             from quant_data_kit.calendar import load_sse_trade_dates

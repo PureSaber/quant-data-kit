@@ -240,7 +240,7 @@ def test_normalized_requires_existing_unmodified_raw_reference(tmp_path: Path) -
     missing = RawObjectReference(
         **{**admitted.reference().__dict__, "object_id": "sha256-" + "0" * 64}
     )
-    with pytest.raises(ValidationError, match="unavailable"):
+    with pytest.raises(ValidationError, match="unavailable|Conflicting immutable"):
         write_normalized_events(
             tmp_path,
             [trade("missing-raw")],

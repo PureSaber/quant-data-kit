@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
+from contextlib import contextmanager
 from typing import Any
 
 from quant_data_kit.adapters_v2.base import (
@@ -41,12 +42,19 @@ class BinanceFixtureAdapter:
         self.context = context
         self._book_sequences = BookSequenceNormalizer()
 
+    @contextmanager
+    def transaction(self) -> Iterable[None]:
+        with self._book_sequences.transaction():
+            yield
+
     def adapt(self, message: Mapping[str, Any]) -> list[dict[str, Any]]:
         kind = message.get("e")
         symbol = str(message.get("s", ""))
         instrument = self.context.instrument(symbol)
         event_time = utc_from_milliseconds(message.get("T", message.get("E")), "event_time")
-        received_at = utc_from_milliseconds(message.get("received_at", message.get("E")), "received_at")
+        received_at = utc_from_milliseconds(
+            message.get("received_at", message.get("E")), "received_at"
+        )
         if kind == "trade":
             if not isinstance(message["m"], bool):
                 raise ValidationError("Binance trade maker flag m must be boolean")
