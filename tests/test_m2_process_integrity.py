@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 import quant_data_kit.adapters_v2.base as adapter_base
+import quant_data_kit.curated as curated_module
 import quant_data_kit.data_lake as lake_module
 from quant_data_kit.adapters_v2 import adapt_fixture_messages
 from quant_data_kit.curated import curate_trade_bars_from_snapshot
@@ -133,6 +134,44 @@ def _normalized_process(
         results.put(("error", f"{type(exc).__name__}: {exc}"))
 
 
+def _atomic_hard_exit_process(root: str, target_name: str, body: bytes) -> None:
+    lake_root = lake_module._resolved_lake_root(Path(root), create=True)
+    target = lake_root / target_name
+    real_replace = lake_module.os.replace
+
+    def crash_before_replace(source: Path, destination: Path) -> None:
+        if Path(destination) == target:
+            os._exit(71)
+        real_replace(source, destination)
+
+    lake_module.os.replace = crash_before_replace
+    with lake_module._lake_lock(lake_root, "atomic-test", {"target": target_name}):
+        lake_module._atomic_write_bytes(lake_root, target, body)
+
+
+def _normalized_hard_exit_process(
+    root: str,
+    raw_reference: dict[str, str],
+    record: dict[str, Any],
+) -> None:
+    real_replace = lake_module.os.replace
+
+    def crash_before_publish(source: Path, destination: Path) -> None:
+        if Path(destination).parent.name == "snapshots":
+            os._exit(72)
+        real_replace(source, destination)
+
+    lake_module.os.replace = crash_before_publish
+    write_normalized_events(
+        Path(root),
+        [record],
+        provider="binance",
+        venue="BINANCE",
+        upstream_raw_references=[RawObjectReference(**raw_reference)],
+        policy=TEST_POLICY,
+    )
+
+
 def _curated_process(
     root: str,
     normalized_snapshot_id: str,
@@ -156,6 +195,49 @@ def _curated_process(
         results.put(("ok", snapshot.snapshot_id))
     except WORKER_ERRORS as exc:
         results.put(("error", f"{type(exc).__name__}: {exc}"))
+
+
+def _curated_hard_exit_process(root: str, normalized_snapshot_id: str) -> None:
+    real_replace = curated_module.os.replace
+
+    def crash_before_publish(source: Path, destination: Path) -> None:
+        if Path(destination).parent.name == "snapshots":
+            os._exit(73)
+        real_replace(source, destination)
+
+    curated_module.os.replace = crash_before_publish
+    curate_trade_bars_from_snapshot(
+        Path(root),
+        normalized_snapshot_id=normalized_snapshot_id,
+        dataset="crash-bars",
+        revision_id="revision-1",
+        recipe_version="session-bars-v1",
+        interval=timedelta(minutes=1),
+        session_starts={"binance-24x7-BTC-USDT-SPOT": datetime(2026, 1, 2, tzinfo=timezone.utc)},
+        policy=TEST_POLICY,
+    )
+
+
+def _hold_staging_process(
+    root: str,
+    staging_relative: str,
+    namespace: str,
+    identity: dict[str, str],
+    ready: Any,
+    release: Any,
+    result: Any,
+) -> None:
+    lake_root = lake_module._resolved_lake_root(Path(root), create=True)
+    with lake_module._stable_staging_directory(
+        lake_root,
+        lake_root / staging_relative,
+        namespace=namespace,
+        identity=identity,
+    ) as stage:
+        (stage / "active.marker").write_text("active", encoding="utf-8")
+        result.put(str(stage))
+        ready.set()
+        release.wait(20)
 
 
 def _run_pair(target: Any, args: list[tuple[Any, ...]]) -> tuple[list[tuple[str, str]], list[int]]:
@@ -546,6 +628,261 @@ def test_event_claim_and_curated_revision_are_process_safe(tmp_path: Path) -> No
     assert exit_codes == [0, 0]
     assert [status for status, _ in results] == ["ok", "ok"], results
     assert len({value for _, value in results}) == 1
+
+
+def test_deleted_event_claim_recovers_from_snapshot_and_preserves_binding(tmp_path: Path) -> None:
+    root = tmp_path / "event-claim-recovery"
+    record = trade("recover-global-id")
+    original = _normalized(root, key="original", record=record)
+    claim_path = next((root / "normalized" / "event-claims").rglob("*.json"))
+    claim_path.unlink()
+
+    repeated = _normalized(root, key="repeated", record=deepcopy(record))
+    assert repeated.snapshot_id != original.snapshot_id
+    assert load_normalized_snapshot(root, original.snapshot_id) == original
+    assert claim_path.is_file()
+
+    claim_path.unlink()
+    changed = deepcopy(record)
+    changed["price"]["units"] += 1
+    with pytest.raises(ValidationError, match="Conflicting lake event_id claim"):
+        _normalized(root, key="changed", record=changed)
+    assert not claim_path.exists()
+
+
+def test_deleted_event_claim_recovery_is_process_safe(tmp_path: Path) -> None:
+    root = tmp_path / "event-claim-process-recovery"
+    record = trade("recover-process-id")
+    original = _normalized(root, key="original", record=record)
+    claim_path = next((root / "normalized" / "event-claims").rglob("*.json"))
+    claim_path.unlink()
+    admitted = _raw(root, key="same", payload=b"same")
+    results, exit_codes = _run_pair(
+        _normalized_process,
+        [
+            (str(root), asdict(admitted.reference()), deepcopy(record)),
+            (str(root), asdict(admitted.reference()), deepcopy(record)),
+        ],
+    )
+    assert exit_codes == [0, 0]
+    assert [status for status, _ in results] == ["ok", "ok"], results
+    assert claim_path.is_file()
+    assert load_normalized_snapshot(root, original.snapshot_id) == original
+
+    claim_path.unlink()
+    changed_raw = _raw(root, key="changed", payload=b"changed")
+    changed = deepcopy(record)
+    changed["price"]["units"] += 1
+    results, exit_codes = _run_pair(
+        _normalized_process,
+        [
+            (str(root), asdict(admitted.reference()), deepcopy(record)),
+            (str(root), asdict(changed_raw.reference()), changed),
+        ],
+    )
+    assert exit_codes == [0, 0]
+    assert len([1 for status, _ in results if status == "ok"]) == 1
+    errors = [value for status, value in results if status == "error"]
+    assert len(errors) == 1 and "Conflicting lake event_id claim" in errors[0]
+
+
+def test_deleted_curated_revision_recovers_and_preserves_binding(tmp_path: Path) -> None:
+    root = tmp_path / "curated-revision-recovery"
+    original_normalized = _normalized(root, key="original", record=trade("curated-original"))
+    original = curated_module.curate_trade_bars_from_snapshot(
+        root,
+        normalized_snapshot_id=original_normalized.snapshot_id,
+        dataset="recovery-bars",
+        revision_id="revision-1",
+        recipe_version="session-bars-v1",
+        interval=timedelta(minutes=1),
+        session_starts={"binance-24x7-BTC-USDT-SPOT": datetime(2026, 1, 2, tzinfo=timezone.utc)},
+        policy=TEST_POLICY,
+    )
+    registry = root / "curated" / "recovery-bars" / "revisions" / "revision-1.json"
+    registry.unlink()
+    repeated = curated_module.curate_trade_bars_from_snapshot(
+        root,
+        normalized_snapshot_id=original_normalized.snapshot_id,
+        dataset="recovery-bars",
+        revision_id="revision-1",
+        recipe_version="session-bars-v1",
+        interval=timedelta(minutes=1),
+        session_starts={"binance-24x7-BTC-USDT-SPOT": datetime(2026, 1, 2, tzinfo=timezone.utc)},
+        policy=TEST_POLICY,
+    )
+    assert repeated == original
+    assert (
+        curated_module.load_curated_snapshot(root, "recovery-bars", original.snapshot_id)
+        == original
+    )
+
+    registry.unlink()
+    changed_normalized = _normalized(root, key="changed", record=trade("curated-changed"))
+    with pytest.raises(ValidationError, match="maps to different content"):
+        curated_module.curate_trade_bars_from_snapshot(
+            root,
+            normalized_snapshot_id=changed_normalized.snapshot_id,
+            dataset="recovery-bars",
+            revision_id="revision-1",
+            recipe_version="session-bars-v1",
+            interval=timedelta(minutes=1),
+            session_starts={
+                "binance-24x7-BTC-USDT-SPOT": datetime(2026, 1, 2, tzinfo=timezone.utc)
+            },
+            policy=TEST_POLICY,
+        )
+
+
+def test_deleted_curated_revision_recovery_is_process_safe(tmp_path: Path) -> None:
+    root = tmp_path / "curated-revision-process-recovery"
+    original_normalized = _normalized(root, key="original", record=trade("curated-original"))
+    changed_normalized = _normalized(root, key="changed", record=trade("curated-changed"))
+    original = _curated_process_once(root, original_normalized.snapshot_id)
+    registry = root / "curated" / "concurrent-bars" / "revisions" / "revision-1.json"
+    registry.unlink()
+    results, exit_codes = _run_pair(
+        _curated_process,
+        [
+            (str(root), original_normalized.snapshot_id),
+            (str(root), changed_normalized.snapshot_id),
+        ],
+    )
+    assert exit_codes == [0, 0]
+    assert len([1 for status, _ in results if status == "ok"]) == 1
+    errors = [value for status, value in results if status == "error"]
+    assert len(errors) == 1 and "maps to different content" in errors[0]
+    assert (
+        curated_module.load_curated_snapshot(root, "concurrent-bars", original.snapshot_id)
+        == original
+    )
+
+
+def _curated_process_once(root: Path, normalized_snapshot_id: str):
+    return curate_trade_bars_from_snapshot(
+        root,
+        normalized_snapshot_id=normalized_snapshot_id,
+        dataset="concurrent-bars",
+        revision_id="revision-1",
+        recipe_version="session-bars-v1",
+        interval=timedelta(minutes=1),
+        session_starts={"binance-24x7-BTC-USDT-SPOT": datetime(2026, 1, 2, tzinfo=timezone.utc)},
+        policy=TEST_POLICY,
+    )
+
+
+def test_atomic_normalized_and_curated_staging_recover_after_hard_exit(tmp_path: Path) -> None:
+    root = tmp_path / "staging-hard-exit"
+    root.mkdir()
+    context = multiprocessing.get_context("spawn")
+    for target_name in ("first.json", "second.json"):
+        process = context.Process(
+            target=_atomic_hard_exit_process,
+            args=(str(root), target_name, target_name.encode()),
+        )
+        process.start()
+        process.join(30)
+        assert process.exitcode == 71
+    assert len(list(root.glob(".atomic-*.tmp"))) == 2
+    with lake_module._lake_lock(root, "atomic-test", {"target": "first.json"}):
+        lake_module._atomic_write_bytes(root, root / "first.json", b"first.json")
+    assert (root / "first.json").read_bytes() == b"first.json"
+    assert len(list(root.glob(".atomic-*.tmp"))) == 1
+    with lake_module._lake_lock(root, "atomic-test", {"target": "second.json"}):
+        lake_module._atomic_write_bytes(root, root / "second.json", b"second.json")
+    assert not list(root.glob(".atomic-*.tmp"))
+
+    raw = _raw(root, key="normalized-crash", payload=b"normalized-crash")
+    record = trade("normalized-crash")
+    process = context.Process(
+        target=_normalized_hard_exit_process,
+        args=(str(root), asdict(raw.reference()), record),
+    )
+    process.start()
+    process.join(30)
+    assert process.exitcode == 72
+    normalized_staging = root / "normalized" / "staging"
+    crashed_stage = list(normalized_staging.glob("normalized-batch-*-*"))
+    assert len(crashed_stage) == 1
+    active_ready = context.Event()
+    active_release = context.Event()
+    active_result = context.Queue()
+    active_process = context.Process(
+        target=_hold_staging_process,
+        args=(
+            str(root),
+            "normalized/staging",
+            "normalized-batch",
+            {"batch": "different-active-batch"},
+            active_ready,
+            active_release,
+            active_result,
+        ),
+    )
+    active_process.start()
+    assert active_ready.wait(20)
+    unrelated_stage = Path(active_result.get(timeout=5))
+    recovered = write_normalized_events(
+        root,
+        [record],
+        provider="binance",
+        venue="BINANCE",
+        upstream_raw_references=[raw.reference()],
+        policy=TEST_POLICY,
+    )
+    assert recovered.snapshot is not None
+    assert unrelated_stage.is_dir()
+    assert not crashed_stage[0].exists()
+    active_release.set()
+    active_process.join(30)
+    assert active_process.exitcode == 0
+    assert not unrelated_stage.exists()
+
+    process = context.Process(
+        target=_curated_hard_exit_process,
+        args=(str(root), recovered.snapshot.snapshot_id),
+    )
+    process.start()
+    process.join(30)
+    assert process.exitcode == 73
+    curated_staging = root / "curated" / "crash-bars" / "staging"
+    crashed_stage = list(curated_staging.glob("curated-revision-*-*"))
+    assert len(crashed_stage) == 1
+    active_ready = context.Event()
+    active_release = context.Event()
+    active_result = context.Queue()
+    active_process = context.Process(
+        target=_hold_staging_process,
+        args=(
+            str(root),
+            "curated/crash-bars/staging",
+            "curated-revision",
+            {"dataset": "crash-bars", "revision_id": "revision-2"},
+            active_ready,
+            active_release,
+            active_result,
+        ),
+    )
+    active_process.start()
+    assert active_ready.wait(20)
+    unrelated_stage = Path(active_result.get(timeout=5))
+    recovered_curated = curated_module.curate_trade_bars_from_snapshot(
+        root,
+        normalized_snapshot_id=recovered.snapshot.snapshot_id,
+        dataset="crash-bars",
+        revision_id="revision-1",
+        recipe_version="session-bars-v1",
+        interval=timedelta(minutes=1),
+        session_starts={"binance-24x7-BTC-USDT-SPOT": datetime(2026, 1, 2, tzinfo=timezone.utc)},
+        policy=TEST_POLICY,
+    )
+    assert recovered_curated.snapshot_id.startswith("sha256-")
+    assert unrelated_stage.is_dir()
+    assert not crashed_stage[0].exists()
+    active_release.set()
+    active_process.join(30)
+    assert active_process.exitcode == 0
+    assert not unrelated_stage.exists()
 
     curated_root = tmp_path / "curated-lake"
     first_snapshot = _normalized(

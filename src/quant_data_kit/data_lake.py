@@ -9,7 +9,6 @@ import os
 import re
 import shutil
 import stat
-import tempfile
 import uuid
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
@@ -361,15 +360,25 @@ def _mkdir_in_lake(root: Path, path: Path) -> Path:
 
 
 def _atomic_write_bytes(root: Path, target: Path, body: bytes) -> None:
+    """Atomically replace one file while its target-specific caller lock is held."""
     parent = _mkdir_in_lake(root, target.parent)
     checked_target = _validate_lake_path(root, target, allow_missing=True)
-    temporary = parent / f".{target.name}.{uuid.uuid4().hex}.tmp"
+    target_identity = checked_target.relative_to(Path(root).absolute()).as_posix()
+    temporary_prefix = f".atomic-{_sha256_bytes(target_identity.encode('utf-8'))}-"
+    for stale in parent.glob(f"{temporary_prefix}*.tmp"):
+        checked_stale = _validate_lake_path(root, stale, allow_missing=False)
+        if not checked_stale.is_file():
+            raise ValidationError(f"Atomic staging entry is not a file: {checked_stale}")
+        checked_stale.unlink()
+    temporary = parent / f"{temporary_prefix}{uuid.uuid4().hex}.tmp"
     _validate_lake_path(root, temporary, allow_missing=True)
     try:
         with temporary.open("xb") as stream:
             stream.write(body)
             stream.flush()
             os.fsync(stream.fileno())
+        if _sha256_file(temporary) != _sha256_bytes(body):
+            raise ValidationError(f"Atomic staging verification failed: {temporary}")
         os.replace(temporary, checked_target)
     finally:
         if temporary.exists():
@@ -384,6 +393,34 @@ def _lake_lock(root: Path, namespace: str, identity: Mapping[str, Any]) -> Itera
     lock_path = _validate_lake_path(root, lock_root / f"{lock_id}.lock", allow_missing=True)
     with process_file_lock(lock_path):
         yield
+
+
+@contextmanager
+def _stable_staging_directory(
+    root: Path,
+    staging_root: Path,
+    *,
+    namespace: str,
+    identity: Mapping[str, Any],
+) -> Iterable[Path]:
+    """Own and recover staging for one stable operation identity."""
+    operation_id = _sha256_bytes(_canonical_json_bytes(dict(identity)))
+    prefix = f"{_segment(namespace, 'staging_namespace')}-{operation_id}-"
+    checked_root = _mkdir_in_lake(root, staging_root)
+    with _lake_lock(root, namespace, identity):
+        for stale in sorted(checked_root.glob(f"{prefix}*")):
+            checked_stale = _validate_lake_path(root, stale, allow_missing=False)
+            if not checked_stale.is_dir():
+                raise ValidationError(f"Stable staging entry is not a directory: {checked_stale}")
+            shutil.rmtree(checked_stale)
+        stage = checked_root / f"{prefix}{uuid.uuid4().hex}"
+        _validate_lake_path(root, stage, allow_missing=True)
+        stage.mkdir(exist_ok=False)
+        try:
+            yield stage
+        finally:
+            if stage.exists() and stage.parent == checked_root:
+                shutil.rmtree(stage)
 
 
 def _tree_size(root: Path) -> int:
@@ -1235,23 +1272,10 @@ def _event_claim_payload(claim: EventClaimReference) -> dict[str, Any]:
     }
 
 
-def _validate_event_claim(
-    root: Path,
+def _validate_event_claim_reference(
+    actual: EventClaimReference,
     expected: EventClaimReference,
 ) -> EventClaimReference:
-    path = _validate_lake_path(root, _event_claim_path(root, expected), allow_missing=False)
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ValidationError(f"Normalized event claim is unreadable: {expected.event_id}") from exc
-    if payload.pop("schema_version", None) != "2.0.0" or payload.pop("layer", None) != (
-        "normalized-event-claim"
-    ):
-        raise ValidationError(f"Normalized event claim schema changed: {expected.event_id}")
-    try:
-        actual = EventClaimReference(**payload)
-    except TypeError as exc:
-        raise ValidationError(f"Normalized event claim is malformed: {expected.event_id}") from exc
     identity = {
         "schema_version": "2.0.0",
         "layer": "normalized-event-claim",
@@ -1269,6 +1293,59 @@ def _validate_event_claim(
     return actual
 
 
+def _validate_event_claim(
+    root: Path,
+    expected: EventClaimReference,
+) -> EventClaimReference:
+    path = _validate_lake_path(root, _event_claim_path(root, expected), allow_missing=False)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValidationError(f"Normalized event claim is unreadable: {expected.event_id}") from exc
+    if payload.pop("schema_version", None) != "2.0.0" or payload.pop("layer", None) != (
+        "normalized-event-claim"
+    ):
+        raise ValidationError(f"Normalized event claim schema changed: {expected.event_id}")
+    try:
+        actual = EventClaimReference(**payload)
+    except TypeError as exc:
+        raise ValidationError(f"Normalized event claim is malformed: {expected.event_id}") from exc
+    return _validate_event_claim_reference(actual, expected)
+
+
+def _recover_missing_event_claim(
+    root: Path,
+    expected: EventClaimReference,
+) -> bool:
+    """Recover a missing acceleration index from validated immutable snapshots."""
+    snapshots_root = Path(root) / "normalized" / "snapshots"
+    if not snapshots_root.exists():
+        return False
+    matching_snapshot_ids: list[str] = []
+    for snapshot_dir in sorted(snapshots_root.glob("sha256-*")):
+        if not snapshot_dir.is_dir():
+            raise ValidationError(f"Normalized snapshot entry is not a directory: {snapshot_dir}")
+        snapshot = _load_normalized_snapshot(
+            root,
+            snapshot_dir.name,
+            verify_event_claim_files=False,
+        )
+        for actual in snapshot.event_claims:
+            if actual.event_id_hash != expected.event_id_hash:
+                continue
+            _validate_event_claim_reference(actual, expected)
+            matching_snapshot_ids.append(snapshot.snapshot_id)
+    if not matching_snapshot_ids:
+        return False
+    _atomic_write_bytes(
+        root,
+        _event_claim_path(root, expected),
+        json.dumps(_event_claim_payload(expected), indent=2, ensure_ascii=False).encode("utf-8"),
+    )
+    _validate_event_claim(root, expected)
+    return True
+
+
 def _publish_event_claims(
     root: Path,
     claims: tuple[EventClaimReference, ...],
@@ -1282,7 +1359,7 @@ def _publish_event_claims(
             path = _event_claim_path(root, claim)
             if path.exists():
                 _validate_event_claim(root, claim)
-            else:
+            elif not _recover_missing_event_claim(root, claim):
                 missing.append(claim)
         for claim in missing:
             _atomic_write_bytes(
@@ -1473,11 +1550,30 @@ def write_normalized_events(
     )
     normalized_root = _mkdir_in_lake(lake_root, lake_root / "normalized")
     staging_root = normalized_root / "staging"
-    _mkdir_in_lake(lake_root, staging_root)
-    stage = Path(tempfile.mkdtemp(prefix="m2-", dir=staging_root))
     partition_manifests: list[PartitionManifest] = []
     event_claim_items: list[EventClaimReference] = []
-    try:
+    batch_identity = {
+        "provider": provider,
+        "venue": venue,
+        "raw_references": [asdict(item) for item in raw_references],
+        "records": [_json_evidence(record) for _, record in accepted],
+        "expected_l2_checkpoint_hashes": [
+            {
+                "stream": list(stream),
+                "checkpoints": {
+                    str(sequence): checkpoint_hash
+                    for sequence, checkpoint_hash in sorted(checkpoints.items())
+                },
+            }
+            for stream, checkpoints in sorted(expected_l2.items())
+        ],
+    }
+    with _stable_staging_directory(
+        lake_root,
+        staging_root,
+        namespace="normalized-batch",
+        identity=batch_identity,
+    ) as stage:
         for event_type, trading_date, instrument_id in sorted(partitioned):
             rows = sorted(
                 partitioned[(event_type, trading_date, instrument_id)],
@@ -1581,9 +1677,6 @@ def write_normalized_events(
                 quarantined_rows=len(quarantined),
                 quarantine_manifest=quarantine_manifest,
             )
-    finally:
-        if stage.exists() and stage.parent == staging_root:
-            shutil.rmtree(stage)
 
 
 def _safe_snapshot_partition(root: Path, snapshot_dir: Path, relative_path: str) -> Path:
@@ -1598,7 +1691,12 @@ def _safe_snapshot_partition(root: Path, snapshot_dir: Path, relative_path: str)
     return candidate
 
 
-def load_normalized_snapshot(root: Path, snapshot_id: str) -> NormalizedSnapshot:
+def _load_normalized_snapshot(
+    root: Path,
+    snapshot_id: str,
+    *,
+    verify_event_claim_files: bool,
+) -> NormalizedSnapshot:
     lake_root = _resolved_lake_root(root, create=False)
     snapshot_id = _segment(snapshot_id, "snapshot_id")
     snapshot_dir = _validate_lake_path(
@@ -1631,8 +1729,9 @@ def load_normalized_snapshot(root: Path, snapshot_id: str) -> NormalizedSnapshot
         if reference.source != snapshot.provider:
             raise ValidationError("Normalized provider does not match its Raw source")
         validate_raw_reference(lake_root, reference, allow_archived=True)
-    for claim in snapshot.event_claims:
-        _validate_event_claim(lake_root, claim)
+    if verify_event_claim_files:
+        for claim in snapshot.event_claims:
+            _validate_event_claim(lake_root, claim)
     identity = _normalized_snapshot_payload(
         provider=snapshot.provider,
         venue=snapshot.venue,
@@ -1692,6 +1791,10 @@ def load_normalized_snapshot(root: Path, snapshot_id: str) -> NormalizedSnapshot
     if actual_files != expected_files:
         raise ValidationError("Normalized snapshot contains an unexpected or missing file")
     return snapshot
+
+
+def load_normalized_snapshot(root: Path, snapshot_id: str) -> NormalizedSnapshot:
+    return _load_normalized_snapshot(root, snapshot_id, verify_event_claim_files=True)
 
 
 def read_normalized_events(
