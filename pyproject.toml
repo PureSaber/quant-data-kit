@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quant-data-kit"
-version = "0.3.0"
+version = "0.4.0"
 description = "Shared data providers, Parquet cache, and validation for quant research repos"
 readme = "README.md"
 license = { text = "MIT" }
@@ -14,6 +14,7 @@ dependencies = [
     "numpy>=1.24",
     "pyarrow>=14.0",
     "pyyaml>=6.0",
+    "jsonschema>=4.20",
 ]
 
 [project.optional-dependencies]

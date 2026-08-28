@@ -29,6 +29,12 @@ pip install -e ".[akshare,dev]"
 | `providers.northbound` | Stock Connect holdings with disclosure lag |
 | `providers.industry` | Industry board returns |
 | `providers.akshare` | Backward-compatible re-exports |
+| `domain_v2` | Stable instrument IDs, PIT symbol mappings and versioned sessions |
+| `market_clock_v2` | Explicit UTC-aware session and trading-day resolution |
+| `market_events_v2` | Bars, trades, quotes, L2, funding, marks, actions and status events |
+| `fixed_point` | Exact integer-unit prices, quantities, cash and fees |
+| `schemas_v2` | Frozen JSON Schema and Arrow registry for v2 contracts |
+| `temporal_v2` | Strict bitemporal validation and PIT joins without silent fallback |
 
 ## PIT rules
 
