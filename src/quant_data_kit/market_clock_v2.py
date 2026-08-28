@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Iterable
 from datetime import date, datetime
+from itertools import pairwise
 
 from quant_data_kit.domain_v2 import SessionPhase, TradingSession
 from quant_data_kit.exceptions import ValidationError
@@ -17,7 +18,7 @@ class MarketClock:
         ordered = tuple(sorted(sessions, key=lambda item: item.opens_at))
         if any(session.calendar_id != calendar_id for session in ordered):
             raise ValidationError("all sessions must belong to the market clock calendar")
-        for previous, current in zip(ordered, ordered[1:]):
+        for previous, current in pairwise(ordered):
             if current.opens_at < previous.closes_at:
                 raise ValidationError(
                     f"trading sessions overlap: {previous.session_id}, {current.session_id}"
