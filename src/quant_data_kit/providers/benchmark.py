@@ -38,7 +38,5 @@ def fetch_hs300_benchmark(
 
     hist = hist.sort_values("date")
     hist["benchmark_return"] = hist["close"].pct_change()
-    hist = hist[
-        (hist["date"] >= parse_date(start_date)) & (hist["date"] <= parse_date(end_date))
-    ]
+    hist = hist[(hist["date"] >= parse_date(start_date)) & (hist["date"] <= parse_date(end_date))]
     return hist[["date", "benchmark_return"]].dropna().reset_index(drop=True)

@@ -46,6 +46,8 @@ def test_fetch_industry_returns_mock() -> None:
             }
         )
 
-    df = fetch_industry_returns(["银行"], "2020-01-01", "2020-01-31", fetch_fn=mock_fetch, sleep_seconds=0)
+    df = fetch_industry_returns(
+        ["银行"], "2020-01-01", "2020-01-31", fetch_fn=mock_fetch, sleep_seconds=0
+    )
     assert len(df) == 1
     assert df.iloc[0]["industry"] == "银行"

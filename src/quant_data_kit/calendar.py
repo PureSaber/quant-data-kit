@@ -5,7 +5,9 @@ from __future__ import annotations
 import pandas as pd
 
 
-def trading_days_between(start: str, end: str, trade_dates: pd.DatetimeIndex | None = None) -> pd.DatetimeIndex:
+def trading_days_between(
+    start: str, end: str, trade_dates: pd.DatetimeIndex | None = None
+) -> pd.DatetimeIndex:
     """Return trading days in [start, end]. Uses AKShare SSE calendar when trade_dates is None."""
     start_ts = pd.Timestamp(start).normalize()
     end_ts = pd.Timestamp(end).normalize()

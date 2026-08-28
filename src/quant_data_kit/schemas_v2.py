@@ -7,6 +7,7 @@ from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from datetime import datetime, timezone
 from decimal import Decimal
+from functools import cache
 from typing import Any
 
 import pyarrow as pa
@@ -167,9 +168,7 @@ _ARROW_SCHEMAS: dict[str, pa.Schema] = {
             _field("interval_end", _UTC),
         ]
     ),
-    MARK_PRICE_EVENT_SCHEMA_ID: pa.schema(
-        _COMMON_EVENT_FIELDS + [_field("price", _FIXED_POINT)]
-    ),
+    MARK_PRICE_EVENT_SCHEMA_ID: pa.schema(_COMMON_EVENT_FIELDS + [_field("price", _FIXED_POINT)]),
     CORPORATE_ACTION_EVENT_SCHEMA_ID: pa.schema(
         _COMMON_EVENT_FIELDS
         + [
@@ -181,8 +180,7 @@ _ARROW_SCHEMAS: dict[str, pa.Schema] = {
         ]
     ),
     STATUS_EVENT_SCHEMA_ID: pa.schema(
-        _COMMON_EVENT_FIELDS
-        + [_field("status", pa.string()), _field("reason", pa.string())]
+        _COMMON_EVENT_FIELDS + [_field("status", pa.string()), _field("reason", pa.string())]
     ),
 }
 
@@ -255,9 +253,7 @@ _JSON_SCHEMAS: dict[str, dict[str, Any]] = {
             "available_at": _UTC_JSON,
             "superseded_at": _NULLABLE_UTC_JSON,
             "underlying_id": _NULLABLE_STRING,
-            "expiry_date": {
-                "oneOf": [{"type": "string", "format": "date"}, {"type": "null"}]
-            },
+            "expiry_date": {"oneOf": [{"type": "string", "format": "date"}, {"type": "null"}]},
             "metadata": {"type": "object", "additionalProperties": {"type": "string"}},
         },
         list(_ARROW_SCHEMAS[INSTRUMENT_SPEC_SCHEMA_ID].names),
@@ -521,18 +517,18 @@ def _validate_record_semantics(schema_id: str, payload: Mapping[str, Any]) -> No
         ) <= _timestamp(payload, "effective_from"):
             raise ValidationError("effective_to must be later than effective_from")
         _validate_knowledge_interval(payload)
-    elif schema_id == TRADING_SESSION_SCHEMA_ID and _timestamp(
-        payload, "closes_at"
-    ) <= _timestamp(payload, "opens_at"):
+    elif schema_id == TRADING_SESSION_SCHEMA_ID and _timestamp(payload, "closes_at") <= _timestamp(
+        payload, "opens_at"
+    ):
         raise ValidationError("closes_at must be later than opens_at")
     elif schema_id == TRADING_SESSION_SCHEMA_ID:
         _validate_knowledge_interval(payload)
 
 
 def _validate_knowledge_interval(payload: Mapping[str, Any]) -> None:
-    if payload["superseded_at"] is not None and _timestamp(
-        payload, "superseded_at"
-    ) <= _timestamp(payload, "available_at"):
+    if payload["superseded_at"] is not None and _timestamp(payload, "superseded_at") <= _timestamp(
+        payload, "available_at"
+    ):
         raise ValidationError("superseded_at must be later than available_at")
 
 
@@ -554,14 +550,26 @@ def get_json_schema(schema_id: str, version: str = SCHEMA_VERSION_V2) -> dict[st
         raise ValidationError(f"Unknown schema ID: {schema_id}") from exc
 
 
+@cache
+def _compiled_json_validator(
+    schema_id: str,
+    version: str,
+) -> Draft202012Validator:
+    if version != SCHEMA_VERSION_V2:
+        raise ValidationError(f"Unsupported schema version: {schema_id}@{version}")
+    try:
+        schema = _JSON_SCHEMAS[schema_id]
+    except KeyError as exc:
+        raise ValidationError(f"Unknown schema ID: {schema_id}") from exc
+    return Draft202012Validator(schema, format_checker=FormatChecker())
+
+
 def validate_json_record(
     schema_id: str,
     payload: dict[str, Any],
     version: str = SCHEMA_VERSION_V2,
 ) -> None:
-    validator = Draft202012Validator(
-        get_json_schema(schema_id, version), format_checker=FormatChecker()
-    )
+    validator = _compiled_json_validator(schema_id, version)
     errors = sorted(validator.iter_errors(payload), key=lambda error: list(error.path))
     if errors:
         detail = "; ".join(error.message for error in errors)
