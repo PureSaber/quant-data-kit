@@ -1,6 +1,6 @@
 """Shared quant data utilities: Parquet cache, calendar, validation, AKShare providers."""
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 from quant_data_kit.adapters_v2 import (
     AdapterContext,

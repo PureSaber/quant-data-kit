@@ -32,7 +32,7 @@ def trade(event_id: str, timestamp: str, price_units: int, quantity_units: int) 
         "source": "cn-fixture",
         "trading_day": "2026-01-05",
         "session_id": "CFFEX-IF-2026-01-05-DAY",
-        "sequence": None,
+        "sequence": int(event_id.removeprefix("t")),
         "price": {"units": price_units, "scale": 1},
         "quantity": {"units": quantity_units, "scale": 0},
         "aggressor_side": "unknown",

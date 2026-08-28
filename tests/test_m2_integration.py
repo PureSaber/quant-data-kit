@@ -36,7 +36,7 @@ def crypto_context(provider: str) -> qdk.AdapterContext:
 
 
 def test_public_m2_api_and_version_are_exposed() -> None:
-    assert qdk.__version__ == "0.5.0"
+    assert qdk.__version__ == "0.6.0"
     for name in (
         "write_raw_bytes",
         "write_normalized_events",

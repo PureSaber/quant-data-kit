@@ -56,7 +56,7 @@ class _MarketEventBase:
     source: str
     trading_day: date
     session_id: str
-    sequence: int | None = None
+    sequence: int
     event_type: ClassVar[str]
 
     def __post_init__(self) -> None:
@@ -75,12 +75,12 @@ class _MarketEventBase:
             raise ValidationError("available_at must not be earlier than received_at")
         if not isinstance(self.trading_day, date) or isinstance(self.trading_day, datetime):
             raise ValidationError("trading_day must be a date")
-        if self.sequence is not None and (
+        if (
             isinstance(self.sequence, bool)
             or not isinstance(self.sequence, int)
             or self.sequence < 0
         ):
-            raise ValidationError("sequence must be a non-negative integer or null")
+            raise ValidationError("sequence must be a non-negative integer")
         object.__setattr__(self, "event_time", event_time)
         object.__setattr__(self, "received_at", received_at)
         object.__setattr__(self, "available_at", available_at)
@@ -195,8 +195,6 @@ class BookSnapshotEvent(_MarketEventBase):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.sequence is None:
-            raise ValidationError("book snapshot sequence is required")
         if not self.bids or not self.asks:
             raise ValidationError("book snapshot must contain bids and asks")
         if any(not isinstance(level, BookLevel) for level in (*self.bids, *self.asks)):
@@ -227,8 +225,6 @@ class BookDeltaEvent(_MarketEventBase):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.sequence is None:
-            raise ValidationError("book delta sequence is required")
         if not isinstance(self.previous_sequence, int) or isinstance(self.previous_sequence, bool):
             raise ValidationError("previous_sequence must be an integer")
         if self.previous_sequence < 0 or self.previous_sequence >= self.sequence:

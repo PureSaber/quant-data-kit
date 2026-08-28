@@ -74,7 +74,7 @@ def test_market_event_base_and_simple_event_negative_contracts() -> None:
             price=fp("1"),
             quantity=fp("1"),
         )
-    for invalid_sequence in (True, "1", -1):
+    for invalid_sequence in (None, True, "1", -1):
         with pytest.raises(ValidationError, match="sequence"):
             TradeEvent(**event_base(invalid_sequence), price=fp("1"), quantity=fp("1"))
     with pytest.raises(ValidationError, match="aggressor_side"):
@@ -109,7 +109,7 @@ def test_market_event_base_and_simple_event_negative_contracts() -> None:
 
 def _bar(**changes):
     values = {
-        **event_base(None),
+        **event_base(1),
         "event_time": NOW,
         "bar_start": NOW - timedelta(minutes=1),
         "bar_end": NOW,
