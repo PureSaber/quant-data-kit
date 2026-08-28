@@ -7,6 +7,7 @@ from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from datetime import datetime, timezone
 from decimal import Decimal
+from functools import cache
 from typing import Any
 
 import pyarrow as pa
@@ -554,14 +555,26 @@ def get_json_schema(schema_id: str, version: str = SCHEMA_VERSION_V2) -> dict[st
         raise ValidationError(f"Unknown schema ID: {schema_id}") from exc
 
 
+@cache
+def _compiled_json_validator(
+    schema_id: str,
+    version: str,
+) -> Draft202012Validator:
+    if version != SCHEMA_VERSION_V2:
+        raise ValidationError(f"Unsupported schema version: {schema_id}@{version}")
+    try:
+        schema = _JSON_SCHEMAS[schema_id]
+    except KeyError as exc:
+        raise ValidationError(f"Unknown schema ID: {schema_id}") from exc
+    return Draft202012Validator(schema, format_checker=FormatChecker())
+
+
 def validate_json_record(
     schema_id: str,
     payload: dict[str, Any],
     version: str = SCHEMA_VERSION_V2,
 ) -> None:
-    validator = Draft202012Validator(
-        get_json_schema(schema_id, version), format_checker=FormatChecker()
-    )
+    validator = _compiled_json_validator(schema_id, version)
     errors = sorted(validator.iter_errors(payload), key=lambda error: list(error.path))
     if errors:
         detail = "; ".join(error.message for error in errors)

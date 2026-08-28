@@ -1,6 +1,6 @@
 # quant-data-kit
 
-Shared data layer for PureSaber quant research repos: Parquet cache, manifest tracking, schema validation, and AKShare providers.
+Shared data layer for PureSaber quant research repos: immutable Raw/Normalized/Curated storage, pinned DuckDB snapshots, deterministic L2 replay, cross-venue fixture adapters, Parquet contracts, and AKShare providers.
 
 ## Install
 
@@ -35,6 +35,23 @@ pip install -e ".[akshare,dev]"
 | `fixed_point` | Exact integer-unit prices, quantities, cash and fees |
 | `schemas_v2` | Frozen JSON Schema and Arrow registry for v2 contracts |
 | `temporal_v2` | Strict bitemporal validation and PIT joins without silent fallback |
+| `data_lake` | Immutable Raw bytes, strict partitioned Normalized Parquet, quarantine, pinned DuckDB reads and storage stop policy |
+| `curated` | Session-aware bar aggregation and immutable revision/lineage snapshots |
+| `l2_replay` | Deterministic Snapshot+Delta reconstruction, sequence/cross checks and checkpoint hashes |
+| `adapters_v2` | Binance, OKX and supplier-neutral domestic desensitized fixture adapters |
+
+## M2 data-lake guarantees
+
+- Raw persists exact provider bytes with source, request, UTC collection time, SHA-256 and a 30-day hot-retention deadline. Reusing an object key is either byte-for-byte idempotent or an explicit conflict.
+- Normalized writes only frozen`standard/v2`Arrow schemas under`provider/venue/event_type/date/instrument`partitions. Invalid records, duplicate IDs, bad sequences and L2 reconstruction failures quarantine the complete affected stream.
+- Curated revisions include recipe and lineage in a content-addressed snapshot ID; corrected data creates a new snapshot and never overwrites an old one.
+- DuckDB requires an explicit`snapshot_id`, verifies manifest/partition hashes and schemas first, and exposes read-only query methods. There is no`latest`alias.
+- Collection stops with a visible`COLLECTION_STOPPED`error if hot data would exceed150GB or free space would fall below`max(volume*20%,100GB)`.
+- Raw cleanup requires all of: the30-day window elapsed, explicit confirmation, archive hash equality and a successful restore hash. No background or silent deletion path exists.
+
+## M2 fixture certification scope
+
+Binance and OKX fixtures cover Trade、BBO、BookSnapshot/Delta、FundingRate和MarkPrice for mapped BTC/ETH spot and BTC perpetual instruments. The domestic supplier-neutral L2 fixture is deliberately marked`fixture-certified-not-market-data-certified`; it must not be described as real domestic market-data certification.
 
 ## PIT rules
 
