@@ -20,6 +20,15 @@ from urllib.parse import quote
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from quant_data_kit.data_lake import (
+    StoragePolicy,
+    _mkdir_in_lake,
+    _resolved_lake_root,
+    _validate_lake_path,
+    load_normalized_snapshot,
+    read_normalized_events,
+    require_collection_capacity,
+)
 from quant_data_kit.exceptions import ValidationError
 from quant_data_kit.fixed_point import FixedPoint
 from quant_data_kit.market_events_v2 import BarEvent, market_event_payload
@@ -102,9 +111,21 @@ def _json_value(value: Any) -> Any:
 def _dataset_segment(dataset: str) -> str:
     if not isinstance(dataset, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", dataset):
         raise ValidationError("dataset must be one Windows-safe path segment")
-    if dataset in {".", "..", "latest"}:
+    if (
+        dataset in {".", "..", "latest", "main"}
+        or dataset.rstrip(". ") != dataset
+        or dataset.split(".", 1)[0].upper()
+        in {"AUX", "CON", "NUL", "PRN", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+    ):
         raise ValidationError("dataset name is reserved")
     return dataset
+
+
+def _revision_segment(revision_id: str) -> str:
+    try:
+        return _dataset_segment(revision_id)
+    except ValidationError as exc:
+        raise ValidationError("revision_id must be one Windows-safe immutable identifier") from exc
 
 
 def _utc(value: str | datetime, field_name: str) -> datetime:
@@ -235,6 +256,7 @@ def _snapshot_identity(
     dataset: str,
     revision_id: str,
     recipe_version: str,
+    created_at: str,
     lineage: Mapping[str, str],
     partitions: tuple[CuratedPartition, ...],
 ) -> dict[str, Any]:
@@ -244,36 +266,33 @@ def _snapshot_identity(
         "dataset": dataset,
         "revision_id": revision_id,
         "recipe_version": recipe_version,
+        "created_at": created_at,
         "lineage": dict(sorted(lineage.items())),
-        "partitions": [
-            {
-                "relative_path": item.relative_path,
-                "trading_date": item.trading_date,
-                "instrument_id": item.instrument_id,
-                "schema_id": item.schema_id,
-                "rows": item.rows,
-                "logical_sha256": item.logical_sha256,
-            }
-            for item in partitions
-        ],
+        "partitions": [asdict(item) for item in partitions],
     }
 
 
-def write_curated_bars(
+def _write_curated_bars(
     root: Path,
     bars: Iterable[Mapping[str, Any]],
     *,
     dataset: str,
     revision_id: str,
     recipe_version: str,
-    lineage: Mapping[str, str],
+    normalized_snapshot_id: str,
+    policy: StoragePolicy,
 ) -> CuratedSnapshot:
-    """Persist one immutable Curated revision; lineage participates in snapshot identity."""
+    """Persist bars only after loading their exact immutable Normalized lineage."""
+    lake_root = _resolved_lake_root(root, create=False)
     dataset = _dataset_segment(dataset)
-    if not revision_id.strip() or not recipe_version.strip():
-        raise ValidationError("revision_id and recipe_version are required")
-    if not lineage or any(not key.strip() or not value.strip() for key, value in lineage.items()):
-        raise ValidationError("Curated lineage must contain non-empty immutable references")
+    revision_id = _revision_segment(revision_id)
+    if not recipe_version.strip():
+        raise ValidationError("recipe_version is required")
+    normalized = load_normalized_snapshot(lake_root, normalized_snapshot_id)
+    lineage = {
+        "normalized_snapshot_id": normalized.snapshot_id,
+        "normalized_logical_sha256": normalized.logical_sha256,
+    }
     records = [dict(item) for item in bars]
     if not records:
         raise ValidationError("Cannot write an empty Curated snapshot")
@@ -282,9 +301,15 @@ def write_curated_bars(
         validate_json_record(BAR_EVENT_SCHEMA_ID, record)
         groups[(str(record["trading_day"]), str(record["instrument_id"]))].append(record)
 
-    curated_root = Path(root) / "curated" / dataset
+    estimated_bytes = sum(len(_canonical(_json_value(item))) for item in records)
+    require_collection_capacity(
+        lake_root,
+        projected_write_bytes=estimated_bytes,
+        policy=policy,
+    )
+    curated_root = _mkdir_in_lake(lake_root, lake_root / "curated" / dataset)
     staging_root = curated_root / "staging"
-    staging_root.mkdir(parents=True, exist_ok=True)
+    _mkdir_in_lake(lake_root, staging_root)
     stage = Path(tempfile.mkdtemp(prefix="m2-", dir=staging_root))
     partition_items: list[CuratedPartition] = []
     try:
@@ -295,13 +320,13 @@ def write_curated_bars(
                 schema=get_arrow_schema(BAR_EVENT_SCHEMA_ID),
             )
             validate_arrow_table(BAR_EVENT_SCHEMA_ID, table)
-            partition_logical_sha256 = _hash_bytes(_canonical(ordered))
             relative = Path(
                 f"date={trading_date}/instrument={quote(instrument_id, safe='-._')}/data.parquet"
             )
             target = stage / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
+            _mkdir_in_lake(lake_root, target.parent)
             pq.write_table(table, target, compression="zstd", use_dictionary=False)
+            logical_rows = [_json_value(item) for item in table.to_pylist()]
             partition_items.append(
                 CuratedPartition(
                     relative_path=relative.as_posix(),
@@ -309,20 +334,24 @@ def write_curated_bars(
                     instrument_id=instrument_id,
                     schema_id=BAR_EVENT_SCHEMA_ID,
                     rows=table.num_rows,
-                    logical_sha256=partition_logical_sha256,
+                    logical_sha256=_hash_bytes(_canonical(logical_rows)),
                     content_sha256=_hash_file(target),
                 )
             )
         partitions = tuple(partition_items)
+        created_at = _utc_text(
+            max(_utc(str(record["available_at"]), "available_at") for record in records)
+        )
         identity = _snapshot_identity(
             dataset=dataset,
             revision_id=revision_id,
             recipe_version=recipe_version,
+            created_at=created_at,
             lineage=lineage,
             partitions=partitions,
         )
         logical_sha256 = _hash_bytes(_canonical(identity))
-        snapshot_id = f"sha256-{logical_sha256[:24]}"
+        snapshot_id = f"sha256-{logical_sha256}"
         snapshot = CuratedSnapshot(
             schema_version=SCHEMA_VERSION_V2,
             layer="curated",
@@ -330,7 +359,7 @@ def write_curated_bars(
             snapshot_id=snapshot_id,
             revision_id=revision_id,
             recipe_version=recipe_version,
-            created_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            created_at=created_at,
             logical_sha256=logical_sha256,
             rows=sum(item.rows for item in partitions),
             lineage=dict(sorted(lineage.items())),
@@ -341,24 +370,103 @@ def write_curated_bars(
             encoding="utf-8",
         )
         snapshot_dir = curated_root / "snapshots" / snapshot_id
-        snapshot_dir.parent.mkdir(parents=True, exist_ok=True)
+        _mkdir_in_lake(lake_root, snapshot_dir.parent)
+        _validate_lake_path(lake_root, snapshot_dir, allow_missing=True)
+        revision_root = _mkdir_in_lake(lake_root, curated_root / "revisions")
+        revision_path = revision_root / f"{revision_id}.json"
+        revision_record = {
+            "schema_version": SCHEMA_VERSION_V2,
+            "dataset": dataset,
+            "revision_id": revision_id,
+            "snapshot_id": snapshot_id,
+            "logical_sha256": logical_sha256,
+        }
+        revision_record["anchor_sha256"] = _hash_bytes(_canonical(revision_record))
+        if revision_path.exists():
+            _validate_lake_path(lake_root, revision_path, allow_missing=False)
+            existing_revision = json.loads(revision_path.read_text(encoding="utf-8"))
+            existing_anchor = existing_revision.pop("anchor_sha256", None)
+            if existing_anchor != _hash_bytes(_canonical(existing_revision)):
+                raise ValidationError("Curated revision registry integrity changed")
+            if existing_revision != {key: value for key, value in revision_record.items() if key != "anchor_sha256"}:
+                raise ValidationError(
+                    f"Curated revision maps to different content: {dataset}/{revision_id}"
+                )
         if snapshot_dir.exists():
-            return load_curated_snapshot(root, dataset, snapshot_id)
-        os.replace(stage, snapshot_dir)
-        stage = snapshot_dir
-        return load_curated_snapshot(root, dataset, snapshot_id)
+            existing_manifest = json.loads(
+                (snapshot_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            if _canonical(existing_manifest) != _canonical(asdict(snapshot)):
+                raise ValidationError(f"Curated snapshot collision: {snapshot_dir}")
+        else:
+            require_collection_capacity(lake_root, projected_write_bytes=0, policy=policy)
+            os.replace(stage, snapshot_dir)
+            stage = snapshot_dir
+        if not revision_path.exists():
+            temporary_revision = revision_root / f".{revision_id}.{os.getpid()}.tmp"
+            temporary_revision.write_text(
+                json.dumps(revision_record, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.replace(temporary_revision, revision_path)
+        return load_curated_snapshot(lake_root, dataset, snapshot_id)
     finally:
         if stage.exists() and stage.parent == staging_root:
             shutil.rmtree(stage)
 
 
+def curate_trade_bars_from_snapshot(
+    root: Path,
+    *,
+    normalized_snapshot_id: str,
+    dataset: str,
+    revision_id: str,
+    recipe_version: str,
+    interval: timedelta,
+    session_starts: Mapping[str, datetime],
+    source: str = "curated",
+    policy: StoragePolicy | None = None,
+) -> CuratedSnapshot:
+    """Certified public path: fixed Normalized trade snapshot to immutable Curated bars."""
+    normalized = load_normalized_snapshot(root, normalized_snapshot_id)
+    resolved_policy = policy or StoragePolicy()
+    trades = read_normalized_events(root, normalized.snapshot_id, event_type="trade")
+    if not trades:
+        raise ValidationError("Normalized snapshot contains no trades to curate")
+    bars = build_session_bars(
+        trades,
+        interval=interval,
+        session_starts=session_starts,
+        source=source,
+        recipe_version=recipe_version,
+    )
+    return _write_curated_bars(
+        root,
+        bars,
+        dataset=dataset,
+        revision_id=revision_id,
+        recipe_version=recipe_version,
+        normalized_snapshot_id=normalized.snapshot_id,
+        policy=resolved_policy,
+    )
+
+
 def load_curated_snapshot(root: Path, dataset: str, snapshot_id: str) -> CuratedSnapshot:
+    lake_root = _resolved_lake_root(root, create=False)
     dataset = _dataset_segment(dataset)
-    if not re.fullmatch(r"sha256-[0-9a-f]{24}", snapshot_id):
+    if not re.fullmatch(r"sha256-[0-9a-f]{64}", snapshot_id):
         raise ValidationError("Curated reads require an explicit content-addressed snapshot_id")
-    snapshot_dir = Path(root) / "curated" / dataset / "snapshots" / snapshot_id
-    manifest_path = snapshot_dir / "manifest.json"
-    if manifest_path.is_symlink() or not manifest_path.is_file():
+    snapshot_dir = _validate_lake_path(
+        lake_root,
+        lake_root / "curated" / dataset / "snapshots" / snapshot_id,
+        allow_missing=False,
+    )
+    manifest_path = _validate_lake_path(
+        lake_root,
+        snapshot_dir / "manifest.json",
+        allow_missing=False,
+    )
+    if not manifest_path.is_file():
         raise ValidationError(f"Curated snapshot manifest missing: {manifest_path}")
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     payload["partitions"] = tuple(CuratedPartition(**item) for item in payload["partitions"])
@@ -371,15 +479,27 @@ def load_curated_snapshot(root: Path, dataset: str, snapshot_id: str) -> Curated
     ):
         raise ValidationError("Curated snapshot identity mismatch")
     _utc(snapshot.created_at, "created_at")
+    if set(snapshot.lineage) != {
+        "normalized_snapshot_id",
+        "normalized_logical_sha256",
+    }:
+        raise ValidationError("Curated lineage is not an exact Normalized snapshot reference")
+    normalized = load_normalized_snapshot(
+        lake_root,
+        snapshot.lineage["normalized_snapshot_id"],
+    )
+    if normalized.logical_sha256 != snapshot.lineage["normalized_logical_sha256"]:
+        raise ValidationError("Curated Normalized lineage hash changed")
     identity = _snapshot_identity(
         dataset=dataset,
         revision_id=snapshot.revision_id,
         recipe_version=snapshot.recipe_version,
+        created_at=snapshot.created_at,
         lineage=snapshot.lineage,
         partitions=snapshot.partitions,
     )
     logical_sha256 = _hash_bytes(_canonical(identity))
-    if logical_sha256 != snapshot.logical_sha256 or snapshot_id != f"sha256-{logical_sha256[:24]}":
+    if logical_sha256 != snapshot.logical_sha256 or snapshot_id != f"sha256-{logical_sha256}":
         raise ValidationError("Curated snapshot logical hash changed")
     rows = 0
     expected_files = {Path("manifest.json")}
@@ -399,9 +519,9 @@ def load_curated_snapshot(root: Path, dataset: str, snapshot_id: str) -> Curated
         relative = Path(partition.relative_path)
         if relative.is_absolute() or ".." in relative.parts:
             raise ValidationError("Unsafe Curated partition path")
-        path = snapshot_dir / relative
+        path = _validate_lake_path(lake_root, snapshot_dir / relative, allow_missing=False)
         expected_files.add(relative)
-        if path.is_symlink() or not path.is_file() or snapshot_dir.resolve() not in path.resolve().parents:
+        if not path.is_file() or snapshot_dir.resolve() not in path.resolve().parents:
             raise ValidationError(f"Curated partition missing or unsafe: {path}")
         if _hash_file(path) != partition.content_sha256:
             raise ValidationError(f"Curated partition hash changed: {path}")
@@ -422,4 +542,21 @@ def load_curated_snapshot(root: Path, dataset: str, snapshot_id: str) -> Curated
     }
     if actual_files != expected_files:
         raise ValidationError("Curated snapshot contains an unexpected or missing file")
+    revision_path = _validate_lake_path(
+        lake_root,
+        lake_root / "curated" / dataset / "revisions" / f"{snapshot.revision_id}.json",
+        allow_missing=False,
+    )
+    revision_record = json.loads(revision_path.read_text(encoding="utf-8"))
+    anchor = revision_record.pop("anchor_sha256", None)
+    if anchor != _hash_bytes(_canonical(revision_record)):
+        raise ValidationError("Curated revision registry integrity changed")
+    if revision_record != {
+        "schema_version": SCHEMA_VERSION_V2,
+        "dataset": dataset,
+        "revision_id": snapshot.revision_id,
+        "snapshot_id": snapshot.snapshot_id,
+        "logical_sha256": snapshot.logical_sha256,
+    }:
+        raise ValidationError("Curated revision registry does not match its snapshot")
     return snapshot
