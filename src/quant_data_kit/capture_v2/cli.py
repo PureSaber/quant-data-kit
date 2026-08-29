@@ -12,6 +12,7 @@ from typing import Any
 from quant_data_kit.capture_v2.collector import CryptoL2CaptureCoordinator
 from quant_data_kit.capture_v2.models import (
     CaptureConfig,
+    CaptureDurabilityPolicy,
     MarketKind,
     Provider,
     RetryPolicy,
@@ -29,6 +30,7 @@ _CONFIG_KEYS = {
     "streams",
     "rotation",
     "retry",
+    "durability",
     "archive_reserve_bytes",
 }
 _STREAM_KEYS = {
@@ -79,8 +81,11 @@ def load_capture_config(path: Path) -> CaptureConfig:
     streams = _streams(payload.get("streams"))
     rotation_payload = payload.get("rotation", {})
     retry_payload = payload.get("retry", {})
-    if not isinstance(rotation_payload, dict) or not isinstance(retry_payload, dict):
-        raise ValidationError("rotation and retry must be JSON objects")
+    durability_payload = payload.get("durability", {})
+    if not all(
+        isinstance(item, dict) for item in (rotation_payload, retry_payload, durability_payload)
+    ):
+        raise ValidationError("rotation and retry and durability must be JSON objects")
     try:
         return CaptureConfig(
             hot_root=Path(str(payload["hot_root"])),
@@ -90,6 +95,7 @@ def load_capture_config(path: Path) -> CaptureConfig:
             streams=streams,
             rotation=SegmentRotation(**rotation_payload),
             retry=RetryPolicy(**retry_payload),
+            durability=CaptureDurabilityPolicy(**durability_payload),
             archive_reserve_bytes=int(payload.get("archive_reserve_bytes", 150 * 1024**3)),
         )
     except (TypeError, ValueError) as exc:
@@ -159,11 +165,22 @@ def main_capture(argv: list[str] | None = None) -> int:
             if not args.confirm_long_running:
                 raise ValidationError("run mode requires explicit --confirm-long-running")
             report = asyncio.run(coordinator.run(maximum_websocket_messages=None))
+    except KeyboardInterrupt:
+        print(json.dumps({"status": "CAPTURE_CANCELLED", "error": "KeyboardInterrupt"}))
+        return 130
     except (ValidationError, OSError) as exc:
         print(json.dumps({"status": "PAUSED", "error": str(exc)}, ensure_ascii=False))
         return 2
     print(json.dumps(asdict(report), indent=2, ensure_ascii=False))
-    return 0 if "FAILED" not in report.status else 2
+    return (
+        0
+        if report.status
+        in {
+            "PREFLIGHT_PASSED_NETWORK_NOT_STARTED",
+            "BOUNDED_PROBE_COMPLETE",
+        }
+        else 2
+    )
 
 
 if __name__ == "__main__":

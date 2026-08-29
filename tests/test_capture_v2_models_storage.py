@@ -12,6 +12,8 @@ from quant_data_kit.capture_v2.models import (
     M7_CAPABILITIES,
     M7_PROVIDERS,
     AuditEvent,
+    AuditPersistenceError,
+    AuditReference,
     CaptureConfig,
     CaptureState,
     CaptureStateMachine,
@@ -262,14 +264,19 @@ def test_raw_frame_round_trip_and_monotonic_clock() -> None:
 def test_state_machine_audits_legal_illegal_and_sink_failure() -> None:
     stream = default_crypto_l2_streams()[0]
     clock = FakeClock()
-    frames: list[RawFrame] = []
+    persisted: list[AuditEvent] = []
     alerts: list[str] = []
+
+    def persist(event: AuditEvent) -> AuditReference:
+        persisted.append(event)
+        return AuditReference(event.ordinal, "a" * 64, f"audit-{event.ordinal}.json")
+
     machine = CaptureStateMachine(
         stream,
         connection_id="one",
         collector_commit="abc",
         clock=clock,
-        audit_sink=frames.append,
+        audit_sink=persist,
         alert_sink=alerts.append,
     )
     machine.transition(CaptureState.BUFFERING, "connected")
@@ -279,15 +286,20 @@ def test_state_machine_audits_legal_illegal_and_sink_failure() -> None:
     machine.transition(CaptureState.RESYNC, "gap")
     machine.transition(CaptureState.CONNECTING, "retry")
     machine.transition(CaptureState.PAUSED, "operator")
-    assert len(frames) == len(machine.events) == 8
+    assert len(persisted) == len(machine.events) == 8
     assert isinstance(machine.events[0], AuditEvent)
-    assert RawFrame.from_record(frames[0].record()).payload == frames[0].payload
     with pytest.raises(ValidationError, match="illegal"):
         machine.transition(CaptureState.LIVE, "invalid")
     assert alerts[-1].startswith("ILLEGAL_CAPTURE_TRANSITION")
 
-    def failed_sink(_frame: RawFrame) -> None:
-        raise OSError("disk full")
+    calls = 0
+
+    def failed_sink(event: AuditEvent) -> AuditReference:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise OSError("disk full")
+        return AuditReference(event.ordinal, "b" * 64, "first.json")
 
     failed = CaptureStateMachine(
         stream,
@@ -297,7 +309,10 @@ def test_state_machine_audits_legal_illegal_and_sink_failure() -> None:
         audit_sink=failed_sink,
         alert_sink=alerts.append,
     )
-    assert failed.events
+    with pytest.raises(AuditPersistenceError, match="before state commit"):
+        failed.transition(CaptureState.BUFFERING, "must-not-commit")
+    assert failed.state is CaptureState.CONNECTING
+    assert len(failed.events) == 1
     assert any(item.startswith("AUDIT_PERSISTENCE_FAILED") for item in alerts)
 
 
@@ -463,6 +478,7 @@ def test_archive_missing_restore_and_hash_failure_pause(
         return real_hash(path)
 
     monkeypatch.setattr(storage_module, "_sha256_file", wrong_restore_hash)
+    controller.preflight()
     with pytest.raises(CapturePausedError, match="hash validation"):
         controller.archive_segment(segment)
 
@@ -522,11 +538,11 @@ def test_storage_negative_capacity_rotation_and_immutable_paths(
 
     failed_target = tmp_path / "immutable" / "replace-failure.bin"
 
-    def replace_failed(_source: Path, _target: Path) -> None:
-        raise OSError("injected atomic replace failure")
+    def link_failed(_source: Path, _target: Path) -> None:
+        raise OSError("injected atomic link failure")
 
-    monkeypatch.setattr(storage_module.os, "replace", replace_failed)
-    with pytest.raises(OSError, match="atomic replace"):
+    monkeypatch.setattr(storage_module.os, "link", link_failed)
+    with pytest.raises(OSError, match="atomic link"):
         storage_module._atomic_immutable_write(failed_target, b"temporary")
     assert not tuple(failed_target.parent.glob(".replace-failure.bin.*.tmp"))
 
@@ -675,4 +691,4 @@ def test_physical_volume_probe_failures_and_symlink_are_fail_closed(
     monkeypatch.setattr(Path, "is_symlink", lambda self: self == hot or real_is_symlink(self))
     decision = guard(hot, archive).preflight()
     assert not decision.allowed
-    assert "symbolic link" in (decision.alert or "")
+    assert "symlink/reparse" in (decision.alert or "")

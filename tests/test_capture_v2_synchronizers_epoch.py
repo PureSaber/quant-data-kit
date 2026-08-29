@@ -542,7 +542,8 @@ def test_epoch_configuration_closed_abort_and_part_integrity_guards(tmp_path: Pa
 
     closed = NormalizedEpochJournal(epoch_id="closed-abort", **common)
     closed.finalize(created_at=NOW)
-    assert closed.abort_visible("visible after close").is_file()
+    with pytest.raises(ValidationError, match="cannot abort"):
+        closed.abort_visible("visible after close")
 
     tampered = NormalizedEpochJournal(epoch_id="tampered", max_part_rows=1, **common)
     tampered.append(({"event_type": "test", "value": 1},))
