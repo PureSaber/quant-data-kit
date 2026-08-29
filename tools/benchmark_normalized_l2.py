@@ -21,11 +21,12 @@ from datetime import date, datetime, timezone
 from functools import wraps
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any, Self
+from typing import Any
 
 import psutil
 import pyarrow as pa
 import pyarrow.compute as pc
+from typing_extensions import Self
 
 from quant_data_kit import normalized_v3
 from quant_data_kit.data_lake import (
