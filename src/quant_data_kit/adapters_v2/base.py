@@ -13,7 +13,7 @@ from quant_data_kit.exceptions import ValidationError
 from quant_data_kit.fixed_point import FixedPoint
 from quant_data_kit.schemas_v2 import validate_event_stream
 
-_SEQUENCE_FACTOR = 1_000_000
+BOOK_SEQUENCE_FACTOR = 1_000_000
 
 
 @dataclass(frozen=True)
@@ -132,7 +132,7 @@ class BookSequenceNormalizer:
         previous = self._provider_sequence.get(provider_symbol)
         if previous is not None and provider_sequence <= previous:
             raise ValidationError("provider BookSnapshot sequence did not advance")
-        emitted = provider_sequence * _SEQUENCE_FACTOR
+        emitted = provider_sequence * BOOK_SEQUENCE_FACTOR
         self._provider_sequence[provider_symbol] = provider_sequence
         self._emitted_sequence[provider_symbol] = emitted
         return emitted
@@ -196,12 +196,12 @@ class BookSequenceNormalizer:
             )
         if provider_sequence <= provider_previous_sequence:
             raise ValidationError("provider BookDelta sequence did not advance")
-        if not 0 < level_count < _SEQUENCE_FACTOR:
+        if not 0 < level_count < BOOK_SEQUENCE_FACTOR:
             raise ValidationError("provider BookDelta level count is unsupported")
         previous_emitted = self._emitted_sequence[provider_symbol]
         pairs: list[tuple[int, int]] = []
         for index in range(1, level_count + 1):
-            emitted = provider_sequence * _SEQUENCE_FACTOR + index
+            emitted = provider_sequence * BOOK_SEQUENCE_FACTOR + index
             pairs.append((previous_emitted, emitted))
             previous_emitted = emitted
         self._provider_sequence[provider_symbol] = provider_sequence

@@ -76,6 +76,26 @@ def delta(
     }
 
 
+def apply_atomic_group(
+    reconstructor: L2BookReconstructor,
+    events: list[dict],
+) -> None:
+    reconstructor._apply_validated_atomic_delta_group(
+        source=str(events[0]["source"]),
+        instrument_id=str(events[0]["instrument_id"]),
+        session_id=str(events[0]["session_id"]),
+        event_time=str(events[0]["event_time"]),
+        sequences=[int(event["sequence"]) for event in events],
+        previous_sequences=[int(event["previous_sequence"]) for event in events],
+        sides=[str(event["side"]) for event in events],
+        actions=[str(event["action"]) for event in events],
+        price_units=[int(event["price"]["units"]) for event in events],
+        price_scales=[int(event["price"]["scale"]) for event in events],
+        quantity_units=[int(event["quantity"]["units"]) for event in events],
+        quantity_scales=[int(event["quantity"]["scale"]) for event in events],
+    )
+
+
 def test_snapshot_delta_replay_and_checkpoint_hash_are_deterministic() -> None:
     events = [snapshot(), delta(101, 100), delta(102, 101, side="ask", price_units=100_100)]
     first = replay_l2(events)
@@ -109,6 +129,175 @@ def test_crossed_delta_is_transactional_and_does_not_pollute_state() -> None:
     crossed = delta(101, 100, price_units=100_100)
     with pytest.raises(L2ReplayError, match="locked or crossed"):
         reconstructor.apply(crossed)
+    assert reconstructor.checkpoint() == initial
+
+
+def test_atomic_multi_level_group_matches_serial_golden_and_checks_book_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = [
+        delta(101, 100, side="bid", price_units=100_000, quantity_units=26),
+        delta(102, 101, side="ask", price_units=100_100, quantity_units=27),
+        delta(
+            103,
+            102,
+            side="bid",
+            action="delete",
+            price_units=99_900,
+            quantity_units=0,
+        ),
+        delta(104, 103, side="bid", price_units=99_800, quantity_units=28),
+    ]
+    for event in events:
+        for field in ("event_time", "received_at", "available_at"):
+            event[field] = "2026-01-02T00:00:01Z"
+
+    serial = L2BookReconstructor()
+    serial.apply_snapshot(snapshot())
+    for event in events:
+        serial.apply_delta(event)
+
+    atomic = L2BookReconstructor()
+    atomic.apply_snapshot(snapshot())
+    real_assert = L2BookReconstructor._assert_book_valid
+    checks = 0
+
+    def counted_assert(bids, asks) -> None:
+        nonlocal checks
+        checks += 1
+        real_assert(bids, asks)
+
+    monkeypatch.setattr(
+        L2BookReconstructor,
+        "_assert_book_valid",
+        staticmethod(counted_assert),
+    )
+    apply_atomic_group(atomic, events)
+    assert checks == 1
+    assert atomic.checkpoint() == serial.checkpoint()
+
+
+def test_atomic_multi_level_group_allows_transient_cross_but_commits_valid_final_book() -> None:
+    events = [
+        delta(101, 100, side="bid", price_units=100_150, quantity_units=25),
+        delta(
+            102,
+            101,
+            side="ask",
+            action="delete",
+            price_units=100_100,
+            quantity_units=0,
+        ),
+    ]
+    for event in events:
+        for field in ("event_time", "received_at", "available_at"):
+            event[field] = "2026-01-02T00:00:01Z"
+
+    serial = L2BookReconstructor()
+    serial.apply_snapshot(snapshot())
+    with pytest.raises(L2ReplayError, match="locked or crossed"):
+        serial.apply_delta(events[0])
+
+    atomic = L2BookReconstructor()
+    atomic.apply_snapshot(snapshot())
+    apply_atomic_group(atomic, events)
+    checkpoint = atomic.checkpoint()
+    assert checkpoint.sequence == 102
+    assert checkpoint.bids[0].price_units == 100_150
+    assert checkpoint.asks[0].price_units == 100_200
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda events: events[1].update(previous_sequence=100), "gap, duplicate"),
+        (lambda events: events[1].update(sequence=101), "strictly advance"),
+        (lambda events: events[1].update(side="invalid"), "Unsupported L2 side"),
+        (lambda events: events[1].update(action="invalid"), "Unsupported L2 action"),
+        (lambda events: events[1]["price"].update(units=0), "price must be positive"),
+        (lambda events: events[1]["price"].update(scale=3), "price scale changed"),
+        (lambda events: events[1]["quantity"].update(units=-1), "non-negative"),
+        (lambda events: events[1]["quantity"].update(scale=-1), "outside"),
+        (lambda events: events[1]["quantity"].update(scale=19), "outside"),
+        (
+            lambda events: (
+                events[1].update(action="delete"),
+                events[1]["quantity"].update(units=1),
+            ),
+            "delete delta quantity",
+        ),
+        (lambda events: events[1]["quantity"].update(units=0), "upsert delta quantity"),
+        (
+            lambda events: (
+                events[1].update(action="delete"),
+                events[1]["price"].update(units=98_000),
+                events[1]["quantity"].update(units=0),
+            ),
+            "absent price level",
+        ),
+        (lambda events: events[1]["price"].update(units=100_100), "locked or crossed"),
+    ],
+)
+def test_atomic_multi_level_group_rejects_bad_row_and_rolls_back(
+    mutate,
+    message: str,
+) -> None:
+    events = [delta(101, 100), delta(102, 101, price_units=99_900)]
+    for event in events:
+        for field in ("event_time", "received_at", "available_at"):
+            event[field] = "2026-01-02T00:00:01Z"
+    mutate(events)
+    reconstructor = L2BookReconstructor()
+    initial = reconstructor.apply_snapshot(snapshot())
+    with pytest.raises(L2ReplayError, match=message):
+        apply_atomic_group(reconstructor, events)
+    assert reconstructor.checkpoint() == initial
+
+
+def test_atomic_multi_level_group_defensive_entry_guards_preserve_state() -> None:
+    event = delta(101, 100)
+    arguments = {
+        "source": "binance",
+        "instrument_id": "BTC-USDT-SPOT",
+        "session_id": "binance-24x7-BTC-USDT-SPOT",
+        "event_time": event["event_time"],
+        "sequences": [101],
+        "previous_sequences": [100],
+        "sides": ["bid"],
+        "actions": ["upsert"],
+        "price_units": [100_000],
+        "price_scales": [2],
+        "quantity_units": [25],
+        "quantity_scales": [3],
+    }
+    uninitialized = L2BookReconstructor()
+    with pytest.raises(L2ReplayError, match="start from a BookSnapshot"):
+        uninitialized._apply_validated_atomic_delta_group(**arguments)
+
+    reconstructor = L2BookReconstructor()
+    initial = reconstructor.apply_snapshot(snapshot())
+    with pytest.raises(L2ReplayError, match="identity changed"):
+        reconstructor._apply_validated_atomic_delta_group(**{**arguments, "source": "okx"})
+    empty = {name: [] for name in (
+        "sequences",
+        "previous_sequences",
+        "sides",
+        "actions",
+        "price_units",
+        "price_scales",
+        "quantity_units",
+        "quantity_scales",
+    )}
+    with pytest.raises(L2ReplayError, match="must not be empty"):
+        reconstructor._apply_validated_atomic_delta_group(**{**arguments, **empty})
+    with pytest.raises(L2ReplayError, match="different lengths"):
+        reconstructor._apply_validated_atomic_delta_group(
+            **{**arguments, "quantity_scales": [3, 3]}
+        )
+    with pytest.raises(L2ReplayError, match="moved backwards"):
+        reconstructor._apply_validated_atomic_delta_group(
+            **{**arguments, "event_time": "2026-01-01T23:59:59Z"}
+        )
     assert reconstructor.checkpoint() == initial
 
 

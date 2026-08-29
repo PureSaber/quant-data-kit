@@ -8,7 +8,7 @@ import math
 import os
 import shutil
 import uuid
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
@@ -25,6 +25,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from typing_extensions import Self
 
+from quant_data_kit.adapters_v2.base import BOOK_SEQUENCE_FACTOR
 from quant_data_kit.data_lake import (
     EventClaimIndexManifest,
     EventClaimReference,
@@ -2063,6 +2064,138 @@ def _validate_l2_delta_columns(batch: pa.RecordBatch) -> None:
     _require_all(pc.or_(delete_ok, upsert_ok), "Arrow delta action and quantity disagree")
 
 
+def _encoded_l2_group_ranges(batch: pa.RecordBatch) -> tuple[tuple[int, int], ...] | None:
+    """Return contiguous provider-update ranges for the adapter sequence encoding."""
+    schema = get_arrow_schema(BOOK_DELTA_EVENT_SCHEMA_ID)
+    if batch.schema != schema or batch.num_rows == 0:
+        return None
+    sequences = batch.column(schema.get_field_index("sequence")).to_numpy(
+        zero_copy_only=False
+    )
+    first_provider, first_level = divmod(int(sequences[0]), BOOK_SEQUENCE_FACTOR)
+    if first_provider <= 0 or first_level <= 0:
+        return None
+    ranges: list[tuple[int, int]] = []
+    start = 0
+    provider = first_provider
+    level = first_level
+    for index in range(1, len(sequences)):
+        current_provider, current_level = divmod(
+            int(sequences[index]), BOOK_SEQUENCE_FACTOR
+        )
+        if current_provider == provider:
+            if current_level != level + 1:
+                return None
+        else:
+            if current_provider <= 0 or current_level != 1:
+                return None
+            ranges.append((start, index))
+            start = index
+            provider = current_provider
+        level = current_level
+    ranges.append((start, len(sequences)))
+    return tuple(ranges)
+
+
+def _try_apply_atomic_l2_delta_batch(
+    batch: pa.RecordBatch,
+    *,
+    last_sequences: dict[tuple[str, str, str, str], int],
+    books: dict[tuple[str, str, str], L2BookReconstructor],
+    expected_l2: Mapping[tuple[str, str, str], Mapping[int, str]],
+    reached_l2: dict[tuple[str, str, str], set[int]],
+) -> tuple[_SortKey, _SortKey] | None:
+    """Apply complete multi-level provider updates atomically without row materialization."""
+    ranges = _encoded_l2_group_ranges(batch)
+    if ranges is None:
+        return None
+    schema = get_arrow_schema(BOOK_DELTA_EVENT_SCHEMA_ID)
+    source = str(_uniform_value(batch.column(schema.get_field_index("source")), "source"))
+    instrument_id = str(
+        _uniform_value(batch.column(schema.get_field_index("instrument_id")), "instrument_id")
+    )
+    session_id = str(
+        _uniform_value(batch.column(schema.get_field_index("session_id")), "session_id")
+    )
+    stream_key = (source, instrument_id, session_id)
+    sequence = batch.column(schema.get_field_index("sequence"))
+    previous = batch.column(schema.get_field_index("previous_sequence"))
+    event_time = batch.column(schema.get_field_index("event_time"))
+    if batch.num_rows > 1:
+        _require_all(
+            pc.equal(previous.slice(1), sequence.slice(0, batch.num_rows - 1)),
+            "book_delta previous_sequence must equal prior stream sequence",
+        )
+        _require_all(
+            pc.greater_equal(event_time.slice(1), event_time.slice(0, batch.num_rows - 1)),
+            "L2 event_time moved backwards",
+        )
+
+    sequence_values = sequence.to_numpy(zero_copy_only=False)
+    previous_values = previous.to_numpy(zero_copy_only=False)
+    expected = expected_l2.get(stream_key, {})
+    for start, end in ranges:
+        first_sequence = int(sequence_values[start])
+        final_sequence = int(sequence_values[end - 1])
+        if first_sequence % BOOK_SEQUENCE_FACTOR != 1:
+            return None
+        if any(first_sequence <= checkpoint < final_sequence for checkpoint in expected):
+            return None
+        if event_time[start].as_py() != event_time[end - 1].as_py():
+            return None
+
+    price = batch.column(schema.get_field_index("price"))
+    quantity = batch.column(schema.get_field_index("quantity"))
+    sides = batch.column(schema.get_field_index("side")).to_pylist()
+    actions = batch.column(schema.get_field_index("action")).to_pylist()
+    price_units = price.field("units").to_numpy(zero_copy_only=False)
+    price_scales = price.field("scale").to_numpy(zero_copy_only=False)
+    quantity_units = quantity.field("units").to_numpy(zero_copy_only=False)
+    quantity_scales = quantity.field("scale").to_numpy(zero_copy_only=False)
+    book = books.setdefault(stream_key, L2BookReconstructor())
+    sequence_key = (*stream_key, "book")
+    for start, end in ranges:
+        event_time_text = _cached_utc_text(event_time[start].as_py(), "event_time")
+        book._apply_validated_atomic_delta_group(
+            source=source,
+            instrument_id=instrument_id,
+            session_id=session_id,
+            event_time=event_time_text,
+            sequences=sequence_values[start:end],
+            previous_sequences=previous_values[start:end],
+            sides=sides[start:end],
+            actions=actions[start:end],
+            price_units=price_units[start:end],
+            price_scales=price_scales[start:end],
+            quantity_units=quantity_units[start:end],
+            quantity_scales=quantity_scales[start:end],
+        )
+        final_sequence = int(sequence_values[end - 1])
+        last_sequences[sequence_key] = final_sequence
+        if final_sequence in expected:
+            checkpoint = book.checkpoint()
+            if checkpoint.state_sha256 != expected[final_sequence]:
+                raise L2ReplayError(
+                    f"L2 checkpoint hash mismatch at sequence {final_sequence}: "
+                    f"expected={expected[final_sequence]}, actual={checkpoint.state_sha256}"
+                )
+            reached_l2.setdefault(stream_key, set()).add(final_sequence)
+
+    first_sequence = int(sequence_values[0])
+    final_sequence = int(sequence_values[-1])
+    first_key = (
+        _utc_datetime(event_time[0].as_py(), "event_time"),
+        first_sequence,
+        str(batch.column(schema.get_field_index("event_id"))[0].as_py()),
+    )
+    last_key = (
+        _utc_datetime(event_time[-1].as_py(), "event_time"),
+        final_sequence,
+        str(batch.column(schema.get_field_index("event_id"))[-1].as_py()),
+    )
+    return first_key, last_key
+
+
 def _try_apply_uniform_l2_delta_batch(
     batch: pa.RecordBatch,
     *,
@@ -2163,14 +2296,22 @@ def _validate_record_batch(
     identity = _validate_common_arrow_batch(batch, provider=provider)
     if identity.schema_id == BOOK_DELTA_EVENT_SCHEMA_ID:
         _validate_l2_delta_columns(batch)
-        sort_keys = _try_apply_uniform_l2_delta_batch(
+        sort_keys = _try_apply_atomic_l2_delta_batch(
             batch,
-            identity=identity,
             last_sequences=last_sequences,
             books=books,
             expected_l2=expected_l2,
             reached_l2=reached_l2,
         )
+        if sort_keys is None:
+            sort_keys = _try_apply_uniform_l2_delta_batch(
+                batch,
+                identity=identity,
+                last_sequences=last_sequences,
+                books=books,
+                expected_l2=expected_l2,
+                reached_l2=reached_l2,
+            )
         if sort_keys is not None:
             return identity, *sort_keys
     rows = _logical_batch_rows(batch, identity.schema_id)
@@ -2198,6 +2339,85 @@ def _iter_record_batches(
             raise ValidationError("Normalized Arrow input must yield RecordBatch objects")
         if batch.num_rows:
             yield batch
+
+
+def _l2_group_key(batch: pa.RecordBatch, index: int) -> tuple[str, str, str, int]:
+    schema = get_arrow_schema(BOOK_DELTA_EVENT_SCHEMA_ID)
+    sequence = int(batch.column(schema.get_field_index("sequence"))[index].as_py())
+    return (
+        str(batch.column(schema.get_field_index("source"))[index].as_py()),
+        str(batch.column(schema.get_field_index("instrument_id"))[index].as_py()),
+        str(batch.column(schema.get_field_index("session_id"))[index].as_py()),
+        sequence // BOOK_SEQUENCE_FACTOR,
+    )
+
+
+def _concat_record_batches(batches: Sequence[pa.RecordBatch]) -> pa.RecordBatch:
+    if not batches:
+        raise ValidationError("Cannot concatenate an empty Arrow batch sequence")
+    if len(batches) == 1:
+        return batches[0]
+    schema = batches[0].schema
+    if any(batch.schema != schema for batch in batches[1:]):
+        raise ValidationError("Cannot concatenate Arrow batches with different schemas")
+    return pa.RecordBatch.from_arrays(
+        [
+            pa.concat_arrays([batch.column(index) for batch in batches])
+            for index in range(len(schema))
+        ],
+        schema=schema,
+    )
+
+
+def _iter_atomic_l2_record_batches(
+    batches: Iterable[pa.RecordBatch] | pa.RecordBatchReader,
+) -> Iterator[pa.RecordBatch]:
+    """Keep one encoded provider update intact across arbitrary input batch cuts."""
+    pending: pa.RecordBatch | None = None
+    for batch in _iter_record_batches(batches):
+        ranges = _encoded_l2_group_ranges(batch)
+        if ranges is None:
+            if pending is not None:
+                yield pending
+                pending = None
+            yield batch
+            continue
+
+        first_end = ranges[0][1]
+        last_start = ranges[-1][0]
+        first_piece = batch.slice(0, first_end)
+        joined_pending = False
+        if pending is not None:
+            pending_sequence = int(
+                pending.column(pending.schema.get_field_index("sequence"))[-1].as_py()
+            )
+            first_sequence = int(
+                first_piece.column(first_piece.schema.get_field_index("sequence"))[0].as_py()
+            )
+            if (
+                _l2_group_key(pending, pending.num_rows - 1)
+                == _l2_group_key(first_piece, 0)
+                and first_sequence == pending_sequence + 1
+            ):
+                first_piece = _concat_record_batches((pending, first_piece))
+                joined_pending = True
+            else:
+                yield pending
+            pending = None
+
+        if len(ranges) == 1:
+            pending = first_piece
+            continue
+        if joined_pending:
+            complete = [first_piece]
+            if first_end < last_start:
+                complete.append(batch.slice(first_end, last_start - first_end))
+            yield _concat_record_batches(complete)
+        else:
+            yield batch.slice(0, last_start)
+        pending = batch.slice(last_start)
+    if pending is not None:
+        yield pending
 
 
 def _finalize_strict_batch_snapshot(
@@ -2378,7 +2598,7 @@ def write_normalized_batches_v3(
         input_rows = 0
         next_capacity_check = _CAPACITY_CHECK_ROWS
         try:
-            for batch in _iter_record_batches(batches):
+            for batch in _iter_atomic_l2_record_batches(batches):
                 projected_rows = input_rows + batch.num_rows
                 if projected_rows >= next_capacity_check:
                     require_collection_capacity(

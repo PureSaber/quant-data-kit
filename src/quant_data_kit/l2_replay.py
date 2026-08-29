@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from functools import lru_cache
@@ -276,6 +276,134 @@ class L2BookReconstructor:
             raise
         self._sequence = final_sequence
         self._event_time = final_event_time
+
+    def _apply_validated_atomic_delta_group(
+        self,
+        *,
+        source: str,
+        instrument_id: str,
+        session_id: str,
+        event_time: str,
+        sequences: Sequence[int],
+        previous_sequences: Sequence[int],
+        sides: Sequence[str],
+        actions: Sequence[str],
+        price_units: Sequence[int],
+        price_scales: Sequence[int],
+        quantity_units: Sequence[int],
+        quantity_scales: Sequence[int],
+    ) -> None:
+        """Atomically apply every level from one provider book update.
+
+        Frozen Arrow validation proves row shape and PIT ordering before this method
+        is called. These defensive checks preserve the serial L2 contract while the
+        copy-on-write state lets one provider update replace both sides before the
+        final locked/crossed-book check. No live state changes until every level and
+        the resulting book have passed.
+        """
+        if not self.initialized:
+            raise L2ReplayError("L2 replay must start from a BookSnapshot")
+        identity = (source, instrument_id, session_id)
+        expected_identity = (self._source, self._instrument_id, self._session_id)
+        if identity != expected_identity:
+            raise L2ReplayError(
+                f"L2 stream identity changed: expected={expected_identity}, actual={identity}"
+            )
+        lengths = {
+            len(sequences),
+            len(previous_sequences),
+            len(sides),
+            len(actions),
+            len(price_units),
+            len(price_scales),
+            len(quantity_units),
+            len(quantity_scales),
+        }
+        if lengths == {0}:
+            raise L2ReplayError("L2 delta group must not be empty")
+        if len(lengths) != 1:
+            raise L2ReplayError("L2 delta group columns have different lengths")
+        self._assert_time_advances(event_time)
+
+        staged_bids = self._bids.copy()
+        staged_asks = self._asks.copy()
+        expected_previous = int(self._sequence)
+        final_sequence = expected_previous
+        for (
+            sequence_value,
+            previous_value,
+            side,
+            action,
+            price_value,
+            price_scale,
+            quantity_value,
+            quantity_scale,
+        ) in zip(
+            sequences,
+            previous_sequences,
+            sides,
+            actions,
+            price_units,
+            price_scales,
+            quantity_units,
+            quantity_scales,
+            strict=True,
+        ):
+            sequence = int(sequence_value)
+            previous_sequence = int(previous_value)
+            price = int(price_value)
+            price_scale_value = int(price_scale)
+            quantity = int(quantity_value)
+            quantity_scale_value = int(quantity_scale)
+            if previous_sequence != expected_previous:
+                raise L2ReplayError(
+                    "L2 sequence gap, duplicate, or out-of-order delta: "
+                    f"expected previous_sequence={expected_previous}, "
+                    f"actual={previous_sequence}"
+                )
+            if sequence <= previous_sequence:
+                raise L2ReplayError("L2 delta sequence must strictly advance")
+            if side not in {"bid", "ask"}:
+                raise L2ReplayError(f"Unsupported L2 side: {side!r}")
+            if action not in {"upsert", "delete"}:
+                raise L2ReplayError(f"Unsupported L2 action: {action!r}")
+            if price <= 0:
+                raise L2ReplayError("L2 delta price must be positive")
+            if price_scale_value != self._price_scale:
+                raise L2ReplayError(
+                    f"L2 delta price scale changed: expected={self._price_scale}, "
+                    f"actual={price_scale_value}"
+                )
+            if quantity < 0:
+                raise L2ReplayError("L2 delta quantity must be non-negative")
+            if quantity_scale_value < 0 or quantity_scale_value > 18:
+                raise L2ReplayError("L2 delta quantity scale is outside [0, 18]")
+            if action == "delete" and quantity != 0:
+                raise L2ReplayError("L2 delete delta quantity must be zero")
+            if action == "upsert" and quantity == 0:
+                raise L2ReplayError("L2 upsert delta quantity must be positive")
+
+            levels = staged_bids if side == "bid" else staged_asks
+            if action == "delete":
+                if price not in levels:
+                    raise L2ReplayError("L2 delete references an absent price level")
+                del levels[price]
+            else:
+                levels[price] = ReconstructedLevel(
+                    price_units=price,
+                    price_scale=price_scale_value,
+                    quantity_units=quantity,
+                    quantity_scale=quantity_scale_value,
+                    order_count=None,
+                )
+            expected_previous = sequence
+            final_sequence = sequence
+
+        self._assert_book_valid(staged_bids, staged_asks)
+        self._bids = staged_bids
+        self._asks = staged_asks
+        self._sequence = final_sequence
+        self._event_time = event_time
 
     def _assert_identity(self, payload: Mapping[str, Any]) -> None:
         identity = (
