@@ -14,6 +14,7 @@ from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, ClassVar, Protocol
+from urllib.parse import parse_qsl, urlsplit
 
 from quant_data_kit.domain_v2 import SymbolMapping
 from quant_data_kit.exceptions import ValidationError
@@ -141,6 +142,33 @@ class SegmentRotation:
 
 
 @dataclass(frozen=True)
+class CaptureDurabilityPolicy:
+    """Bound capacity staleness and batch durability without per-message disk probes."""
+
+    capacity_probe_messages: int = 256
+    capacity_probe_bytes: int = 4 * 1024 * 1024
+    capacity_probe_seconds: float = 1.0
+    normalized_flush_records: int = 256
+    normalized_flush_bytes: int = 1024 * 1024
+    normalized_flush_seconds: float = 1.0
+    probe_timeout_seconds: float = 30.0
+
+    def __post_init__(self) -> None:
+        integer_fields = (
+            "capacity_probe_messages",
+            "capacity_probe_bytes",
+            "normalized_flush_records",
+            "normalized_flush_bytes",
+        )
+        if any(getattr(self, name) < 1 for name in integer_fields):
+            raise ValidationError("durability message/byte limits must be positive")
+        if self.capacity_probe_seconds <= 0 or self.normalized_flush_seconds <= 0:
+            raise ValidationError("durability time limits must be positive")
+        if self.probe_timeout_seconds <= 0:
+            raise ValidationError("probe_timeout_seconds must be positive")
+
+
+@dataclass(frozen=True)
 class StreamConfig:
     stream_id: str
     provider: Provider
@@ -159,11 +187,15 @@ class StreamConfig:
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
                 raise ValidationError(f"{name} must be a non-empty string")
-        if not self.websocket_url.startswith("wss://"):
-            raise ValidationError("public market-data websocket_url must use TLS wss://")
+        _validate_public_url(self.websocket_url, expected_scheme="wss", field="websocket_url")
         if self.provider is Provider.BINANCE:
-            if not self.rest_snapshot_url or not self.rest_snapshot_url.startswith("https://"):
+            if not self.rest_snapshot_url:
                 raise ValidationError("Binance L2 requires an HTTPS REST snapshot endpoint")
+            _validate_public_url(
+                self.rest_snapshot_url,
+                expected_scheme="https",
+                field="rest_snapshot_url",
+            )
         elif self.rest_snapshot_url is not None:
             raise ValidationError("OKX books snapshot must arrive on its public WebSocket channel")
         if self.price_scale < 0 or self.quantity_scale < 0:
@@ -171,7 +203,13 @@ class StreamConfig:
 
     @property
     def capability(self) -> str:
-        asset = "btc" if "BTC" in self.native_symbol.upper() else "eth"
+        symbol = self.native_symbol.upper()
+        if symbol in {"BTCUSDT", "BTC-USDT", "BTC-USDT-SWAP"}:
+            asset = "btc"
+        elif symbol in {"ETHUSDT", "ETH-USDT", "ETH-USDT-SWAP"}:
+            asset = "eth"
+        else:
+            asset = "unsupported"
         suffix = "spot-l2" if self.market is MarketKind.SPOT else "usdt-perpetual-l2"
         return f"{asset}-{suffix}"
 
@@ -190,6 +228,7 @@ class CaptureConfig:
     streams: tuple[StreamConfig, ...] = field(default_factory=tuple)
     rotation: SegmentRotation = field(default_factory=SegmentRotation)
     retry: RetryPolicy = field(default_factory=RetryPolicy)
+    durability: CaptureDurabilityPolicy = field(default_factory=CaptureDurabilityPolicy)
     archive_reserve_bytes: int = 150 * 1024**3
 
     def __post_init__(self) -> None:
@@ -467,6 +506,21 @@ class AuditEvent:
         return canonical_json_bytes(value)
 
 
+@dataclass(frozen=True)
+class AuditReference:
+    ordinal: int
+    audit_sha256: str
+    audit_path: str
+
+    def __post_init__(self) -> None:
+        if self.ordinal < 1 or len(self.audit_sha256) != 64 or not self.audit_path:
+            raise ValidationError("durable audit reference is malformed")
+
+
+class AuditPersistenceError(ValidationError):
+    """A state/audit event was not durably committed and must not change memory state."""
+
+
 class CaptureStateMachine:
     _ALLOWED: ClassVar[dict[CaptureState, set[CaptureState]]] = {
         CaptureState.CONNECTING: {CaptureState.BUFFERING, CaptureState.PAUSED},
@@ -492,7 +546,7 @@ class CaptureStateMachine:
         connection_id: str,
         collector_commit: str,
         clock: Clock,
-        audit_sink: Callable[[RawFrame], None] | None = None,
+        audit_sink: Callable[[AuditEvent], AuditReference] | None = None,
         alert_sink: Callable[[str], None] | None = None,
     ) -> None:
         self.stream = stream
@@ -503,11 +557,16 @@ class CaptureStateMachine:
         self.alert_sink = alert_sink or (lambda _message: None)
         self.state = CaptureState.CONNECTING
         self._events: list[AuditEvent] = []
+        self._references: list[AuditReference] = []
         self._record(None, CaptureState.CONNECTING, "state_initialized", {})
 
     @property
     def events(self) -> tuple[AuditEvent, ...]:
         return tuple(self._events)
+
+    @property
+    def references(self) -> tuple[AuditReference, ...]:
+        return tuple(self._references)
 
     def transition(
         self,
@@ -530,8 +589,9 @@ class CaptureStateMachine:
                 f"illegal capture state transition: {source.value}->{target.value}; "
                 f"audit_ordinal={event.ordinal}"
             )
+        event = self._record(source, target, reason, dict(details or {}))
         self.state = target
-        return self._record(source, target, reason, dict(details or {}))
+        return event
 
     def audit(
         self, event: str, reason: str, details: Mapping[str, Any] | None = None
@@ -558,29 +618,20 @@ class CaptureStateMachine:
             reason=reason,
             details=details,
         )
-        self._events.append(event)
         if self.audit_sink is not None:
             try:
-                self.audit_sink(
-                    RawFrame(
-                        frame_kind="audit",
-                        provider=self.stream.provider.value,
-                        stream_id=self.stream.stream_id,
-                        connection_id=self.connection_id,
-                        subscription=self.stream.channel,
-                        transport="audit",
-                        tls_url="audit://local",
-                        received_at=occurred,
-                        observed_at=occurred,
-                        payload=event.payload(),
-                        native_sequence={"audit_ordinal": event.ordinal},
-                        collector_commit=self.collector_commit,
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001 - audit persistence must not mask state
+                reference = self.audit_sink(event)
+                if reference.ordinal != event.ordinal:
+                    raise ValidationError("durable audit ordinal does not match event")
+            except Exception as exc:
                 self.alert_sink(
                     f"AUDIT_PERSISTENCE_FAILED:{self.stream.stream_id}:{type(exc).__name__}:{exc}"
                 )
+                raise AuditPersistenceError(
+                    f"audit persistence failed before state commit: {type(exc).__name__}: {exc}"
+                ) from exc
+            self._references.append(reference)
+        self._events.append(event)
         return event
 
 
@@ -594,6 +645,55 @@ def assert_m7_scope(streams: Iterable[StreamConfig]) -> None:
         )
     if providers != M7_PROVIDERS:
         raise ValidationError(f"M7 providers must be {list(M7_PROVIDERS)}, got {list(providers)}")
-    missing = sorted(set(M7_CAPABILITIES).difference(capabilities))
-    if missing:
-        raise ValidationError(f"M7 capabilities are missing: {missing}")
+    if capabilities != M7_CAPABILITIES:
+        raise ValidationError(
+            f"M7 capabilities must be exactly {list(M7_CAPABILITIES)}, got {list(capabilities)}"
+        )
+    expected = {_m7_stream_identity(item) for item in default_crypto_l2_streams()}
+    actual = {_m7_stream_identity(item) for item in values}
+    if len(actual) != 8 or actual != expected:
+        missing = sorted(expected.difference(actual))
+        unexpected = sorted(actual.difference(expected))
+        raise ValidationError(
+            "M7 stream identities/endpoints must match the frozen eight-stream scope: "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+
+
+def _validate_public_url(value: str, *, expected_scheme: str, field: str) -> None:
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme.lower() != expected_scheme
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        raise ValidationError(f"{field} must be a credential-free TLS {expected_scheme} URL")
+
+
+def _canonical_url_identity(
+    value: str,
+) -> tuple[str, str, int | None, str, tuple[tuple[str, str], ...]]:
+    parsed = urlsplit(value)
+    return (
+        parsed.scheme.lower(),
+        (parsed.hostname or "").lower(),
+        parsed.port,
+        parsed.path,
+        tuple(sorted(parse_qsl(parsed.query, keep_blank_values=True))),
+    )
+
+
+def _m7_stream_identity(stream: StreamConfig) -> tuple[Any, ...]:
+    return (
+        stream.provider.value,
+        stream.market.value,
+        stream.native_symbol,
+        stream.instrument_id,
+        stream.stream_id,
+        stream.venue,
+        stream.channel,
+        _canonical_url_identity(stream.websocket_url),
+        _canonical_url_identity(stream.rest_snapshot_url) if stream.rest_snapshot_url else None,
+    )

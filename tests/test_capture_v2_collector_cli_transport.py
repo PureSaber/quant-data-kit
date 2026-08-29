@@ -588,7 +588,9 @@ def test_runner_fail_closed_internal_guards_and_raw_metadata(tmp_path: Path) -> 
     assert event_time == NOW and sequences == {"U": 1, "u": 2}
 
 
-def test_unverified_archive_receipt_pauses_before_lineage(tmp_path: Path) -> None:
+def test_unverified_archive_receipt_pauses_before_lineage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     capture_config, streams = config(tmp_path, attempts=1)
     guard = storage_guard(capture_config.hot_root, capture_config.archive_root)
     archive = LocalArchiveController(
@@ -620,7 +622,7 @@ def test_unverified_archive_receipt_pauses_before_lineage(tmp_path: Path) -> Non
         def archive_segment(self, _segment) -> UnverifiedReceipt:
             return UnverifiedReceipt()
 
-    runner.segment_writer.flush()
+    monkeypatch.setattr(runner.segment_writer, "peek_completed", lambda: (object(),))
     runner.archive = UnverifiedArchive()  # type: ignore[assignment]
     with pytest.raises(CapturePausedError, match="not restore-verified"):
         runner._drain_segments()

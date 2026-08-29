@@ -7,7 +7,10 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import tempfile
+import threading
+import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass
@@ -17,6 +20,8 @@ from types import MappingProxyType
 from typing import Protocol
 
 from quant_data_kit.capture_v2.models import (
+    AuditEvent,
+    AuditReference,
     RawFrame,
     SegmentRotation,
     canonical_json_bytes,
@@ -30,6 +35,7 @@ from quant_data_kit.data_lake import (
     write_raw_bytes,
 )
 from quant_data_kit.exceptions import ValidationError
+from quant_data_kit.process_lock import process_file_lock
 
 UTC = timezone.utc
 _GIB = 1024**3
@@ -208,6 +214,10 @@ class CaptureStorageGuard:
         volume_identity: VolumeIdentityProbe = default_volume_identity,
         capacity_probe: CapacityProbe = default_capacity_probe,
         hot_size_probe: Callable[[Path], int] | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
+        probe_messages: int = 256,
+        probe_bytes: int = 4 * 1024 * 1024,
+        probe_seconds: float = 1.0,
     ) -> None:
         self.hot_root = Path(hot_root)
         self.archive_root = Path(archive_root)
@@ -216,6 +226,26 @@ class CaptureStorageGuard:
         self.volume_identity = volume_identity
         self.capacity_probe = capacity_probe
         self.hot_size_probe = hot_size_probe or self._tree_size
+        if probe_messages < 1 or probe_bytes < 1 or probe_seconds <= 0:
+            raise ValidationError("capacity probe intervals must be positive")
+        self.monotonic = monotonic
+        self.probe_messages = probe_messages
+        self.probe_bytes = probe_bytes
+        self.probe_seconds = probe_seconds
+        self._lock = threading.RLock()
+        self._hot_capacity: DiskCapacity | None = None
+        self._hot_bytes = 0
+        self._hot_unprobed_bytes = 0
+        self._hot_unprobed_messages = 0
+        self._archive_capacity: DiskCapacity | None = None
+        self._archive_unprobed_bytes = 0
+        self._archive_unprobed_messages = 0
+        self._last_hot_probe = float("-inf")
+        self._last_archive_probe = float("-inf")
+        self._capacity_probe_count = 0
+        self._tree_scan_count = 0
+        self._hot_reservation_count = 0
+        self._archive_reservation_count = 0
 
     @staticmethod
     def _tree_size(root: Path) -> int:
@@ -238,8 +268,11 @@ class CaptureStorageGuard:
                 reasons.append(f"{name} must be an explicit absolute path")
             elif not root.is_dir():
                 reasons.append(f"{name} is missing or not a directory: {root}")
-            elif root.is_symlink():
-                reasons.append(f"{name} cannot be a symbolic link: {root}")
+            else:
+                try:
+                    _validate_safe_path(root, root, allow_missing=False)
+                except ValidationError as exc:
+                    reasons.append(f"{name} is unsafe: {exc}")
         if reasons:
             return StoragePreflight(False, None, None, None, None, None, None, tuple(reasons))
         try:
@@ -254,15 +287,15 @@ class CaptureStorageGuard:
             if overlap:
                 reasons.append(f"hot and archive roots share physical devices: {overlap}")
         try:
-            hot_capacity = self.capacity_probe(self.hot_root)
-            archive_capacity = self.capacity_probe(self.archive_root)
+            hot_capacity = self._probe_capacity(self.hot_root)
+            archive_capacity = self._probe_capacity(self.archive_root)
             minimum_hot = self._minimum_free(hot_capacity, self.policy)
             minimum_archive = self._minimum_free(archive_capacity, self.policy)
             hot_decision = evaluate_capacity(
                 self.hot_root,
                 projected_write_bytes=projected_hot_bytes,
                 policy=self.policy,
-                current_hot_bytes=self.hot_size_probe(self.hot_root),
+                current_hot_bytes=self._probe_hot_size(),
                 disk_total_bytes=hot_capacity.total_bytes,
                 disk_free_bytes=hot_capacity.free_bytes,
             )
@@ -276,7 +309,7 @@ class CaptureStorageGuard:
                 )
         except Exception as exc:  # noqa: BLE001 - injectable capacity probe must fail closed
             reasons.append(f"capacity probe failed: {type(exc).__name__}: {exc}")
-        return StoragePreflight(
+        result = StoragePreflight(
             allowed=not reasons,
             hot_identity=hot_identity,
             archive_identity=archive_identity,
@@ -286,6 +319,20 @@ class CaptureStorageGuard:
             minimum_archive_free_bytes=minimum_archive,
             reasons=tuple(reasons),
         )
+        if result.allowed:
+            assert hot_capacity is not None and archive_capacity is not None
+            with self._lock:
+                self._hot_capacity = hot_capacity
+                self._archive_capacity = archive_capacity
+                self._hot_bytes = self._last_hot_size
+                self._hot_unprobed_bytes = projected_hot_bytes
+                self._hot_unprobed_messages = 0
+                self._archive_unprobed_bytes = 0
+                self._archive_unprobed_messages = 0
+                now = self.monotonic()
+                self._last_hot_probe = now
+                self._last_archive_probe = now
+        return result
 
     def require_preflight(self, *, projected_hot_bytes: int = 0) -> StoragePreflight:
         decision = self.preflight(projected_hot_bytes=projected_hot_bytes)
@@ -294,27 +341,133 @@ class CaptureStorageGuard:
         return decision
 
     def require_hot_capacity(self, *, projected_write_bytes: int) -> None:
-        capacity = self.capacity_probe(self.hot_root)
+        if projected_write_bytes < 0:
+            raise ValidationError("projected_write_bytes cannot be negative")
+        with self._lock:
+            self._ensure_hot_baseline()
+            now = self.monotonic()
+            if self._probe_due(
+                self._hot_unprobed_messages + 1,
+                self._hot_unprobed_bytes + projected_write_bytes,
+                now - self._last_hot_probe,
+            ):
+                self._refresh_hot(now)
+            assert self._hot_capacity is not None
+            decision = evaluate_capacity(
+                self.hot_root,
+                projected_write_bytes=projected_write_bytes,
+                policy=self.policy,
+                current_hot_bytes=self._hot_bytes + self._hot_unprobed_bytes,
+                disk_total_bytes=self._hot_capacity.total_bytes,
+                disk_free_bytes=self._hot_capacity.free_bytes - self._hot_unprobed_bytes,
+            )
+            if not decision.allowed:
+                raise CapturePausedError(decision.alert or "CAPTURE_PAUSED")
+            self._hot_unprobed_bytes += projected_write_bytes
+            self._hot_unprobed_messages += 1
+            self._hot_reservation_count += 1
+
+    def require_archive_capacity(self, *, projected_write_bytes: int) -> None:
+        if projected_write_bytes < 0:
+            raise ValidationError("projected_write_bytes cannot be negative")
+        with self._lock:
+            self._ensure_archive_baseline()
+            now = self.monotonic()
+            if self._probe_due(
+                self._archive_unprobed_messages + 1,
+                self._archive_unprobed_bytes + projected_write_bytes,
+                now - self._last_archive_probe,
+            ):
+                self._refresh_archive(now)
+            assert self._archive_capacity is not None
+            minimum = self._minimum_free(self._archive_capacity, self.policy)
+            projected = (
+                self._archive_capacity.free_bytes
+                - self._archive_unprobed_bytes
+                - projected_write_bytes
+            )
+            if projected < minimum:
+                raise CapturePausedError(
+                    "CAPTURE_PAUSED: archive free-space floor breached: "
+                    f"projected={projected}, minimum={minimum}"
+                )
+            self._archive_unprobed_bytes += projected_write_bytes
+            self._archive_unprobed_messages += 1
+            self._archive_reservation_count += 1
+
+    @property
+    def probe_statistics(self) -> Mapping[str, int]:
+        with self._lock:
+            return MappingProxyType(
+                {
+                    "capacity_probes": self._capacity_probe_count,
+                    "tree_scans": self._tree_scan_count,
+                    "hot_reservations": self._hot_reservation_count,
+                    "archive_reservations": self._archive_reservation_count,
+                    "maximum_unprobed_bytes": self.probe_bytes,
+                }
+            )
+
+    def force_hot_probe(self) -> None:
+        with self._lock:
+            self._refresh_hot(self.monotonic())
+
+    def _probe_due(self, messages: int, byte_count: int, age: float) -> bool:
+        return (
+            messages >= self.probe_messages
+            or byte_count >= self.probe_bytes
+            or age >= self.probe_seconds
+        )
+
+    def _probe_capacity(self, path: Path) -> DiskCapacity:
+        self._capacity_probe_count += 1
+        return self.capacity_probe(path)
+
+    def _probe_hot_size(self) -> int:
+        self._tree_scan_count += 1
+        value = self.hot_size_probe(self.hot_root)
+        self._last_hot_size = value
+        return value
+
+    def _ensure_hot_baseline(self) -> None:
+        if self._hot_capacity is None:
+            self._refresh_hot(self.monotonic())
+
+    def _ensure_archive_baseline(self) -> None:
+        if self._archive_capacity is None:
+            self._refresh_archive(self.monotonic())
+
+    def _refresh_hot(self, now: float) -> None:
+        capacity = self._probe_capacity(self.hot_root)
+        hot_bytes = self._probe_hot_size()
         decision = evaluate_capacity(
             self.hot_root,
-            projected_write_bytes=projected_write_bytes,
+            projected_write_bytes=0,
             policy=self.policy,
-            current_hot_bytes=self.hot_size_probe(self.hot_root),
+            current_hot_bytes=hot_bytes,
             disk_total_bytes=capacity.total_bytes,
             disk_free_bytes=capacity.free_bytes,
         )
         if not decision.allowed:
             raise CapturePausedError(decision.alert or "CAPTURE_PAUSED")
+        self._hot_capacity = capacity
+        self._hot_bytes = hot_bytes
+        self._hot_unprobed_bytes = 0
+        self._hot_unprobed_messages = 0
+        self._last_hot_probe = now
 
-    def require_archive_capacity(self, *, projected_write_bytes: int) -> None:
-        capacity = self.capacity_probe(self.archive_root)
+    def _refresh_archive(self, now: float) -> None:
+        capacity = self._probe_capacity(self.archive_root)
         minimum = self._minimum_free(capacity, self.policy)
-        projected = capacity.free_bytes - projected_write_bytes
-        if projected < minimum:
+        if capacity.free_bytes < minimum:
             raise CapturePausedError(
                 "CAPTURE_PAUSED: archive free-space floor breached: "
-                f"projected={projected}, minimum={minimum}"
+                f"projected={capacity.free_bytes}, minimum={minimum}"
             )
+        self._archive_capacity = capacity
+        self._archive_unprobed_bytes = 0
+        self._archive_unprobed_messages = 0
+        self._last_archive_probe = now
 
 
 @dataclass(frozen=True)
@@ -393,11 +546,19 @@ class RawSegmentWriter:
         self._completed.clear()
         return completed
 
+    def peek_completed(self) -> tuple[RawSegment, ...]:
+        return tuple(self._completed)
+
+    def acknowledge_completed(self, segment: RawSegment) -> None:
+        if not self._completed or self._completed[0] != segment:
+            raise ValidationError("Raw segment acknowledgement is out of order")
+        self._completed.pop(0)
+
     def flush(self) -> RawSegment | None:
         if not self._frames:
             return None
         payload = b"".join(self._records)
-        self.storage_guard.require_hot_capacity(projected_write_bytes=len(payload) + 4096)
+        self.storage_guard.require_hot_capacity(projected_write_bytes=4096)
         sequence_range: dict[str, tuple[int, int]] = {}
         for frame in self._frames:
             for name, value in frame.native_sequence.items():
@@ -473,6 +634,7 @@ class ArchivePreflightReceipt:
     verified_at: str
     hot_identity: VolumeIdentity
     archive_identity: VolumeIdentity
+    restore_identity: VolumeIdentity
     probe_sha256: str
     restored_sha256: str
     receipt_path: str
@@ -499,6 +661,7 @@ class SegmentArchiveReceipt:
     eligible_for_cleanup: bool
     cleanup_performed: bool
     receipt_sha256: str
+    receipt_path: str
 
 
 def _sha256_file(path: Path) -> str:
@@ -509,22 +672,167 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _atomic_immutable_write(path: Path, body: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        if path.is_file() and path.read_bytes() == body:
-            return
-        raise ValidationError(f"immutable archive path already contains different bytes: {path}")
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+def _is_reparse_point(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    try:
+        attributes = getattr(os.lstat(path), "st_file_attributes", 0)
+    except FileNotFoundError:
+        return False
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+
+def _validate_safe_path(root: Path, candidate: Path, *, allow_missing: bool) -> Path:
+    lexical_root = Path(root).absolute()
+    lexical_candidate = Path(candidate).absolute()
+    if not lexical_root.exists() or not lexical_root.is_dir():
+        raise ValidationError(f"trusted storage root is missing: {lexical_root}")
+    if _is_reparse_point(lexical_root):
+        raise ValidationError(f"trusted storage root is a symlink/reparse point: {lexical_root}")
+    resolved_root = lexical_root.resolve(strict=True)
+    try:
+        relative = lexical_candidate.relative_to(lexical_root)
+    except ValueError as exc:
+        raise ValidationError(f"storage path escapes trusted root: {candidate}") from exc
+    current = lexical_root
+    for part in relative.parts:
+        current = current / part
+        if not current.exists():
+            if allow_missing:
+                continue
+            raise ValidationError(f"storage path is missing: {current}")
+        if _is_reparse_point(current):
+            raise ValidationError(f"storage path contains a symlink/reparse point: {current}")
+        try:
+            current.resolve(strict=True).relative_to(resolved_root)
+        except ValueError as exc:
+            raise ValidationError(f"resolved storage path escapes trusted root: {current}") from exc
+    resolved_candidate = lexical_candidate.resolve(strict=not allow_missing)
+    try:
+        resolved_candidate.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ValidationError(f"resolved storage path escapes trusted root: {candidate}") from exc
+    return lexical_candidate
+
+
+def _safe_mkdir(root: Path, path: Path) -> Path:
+    checked = _validate_safe_path(root, path, allow_missing=True)
+    lock = Path(root) / ".capture-path-bootstrap.lock"
+    with process_file_lock(lock):
+        _validate_safe_path(root, lock, allow_missing=True)
+        checked.mkdir(parents=True, exist_ok=True)
+        return _validate_safe_path(root, checked, allow_missing=False)
+
+
+def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _atomic_immutable_write(path: Path, body: bytes, *, root: Path | None = None) -> None:
+    """Publish create-if-absent across processes; never replace an existing target."""
+
+    if root is None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    trusted_root = Path(root) if root is not None else path.parent
+    parent = _safe_mkdir(trusted_root, path.parent)
+    checked_path = _validate_safe_path(trusted_root, path, allow_missing=True)
+    temporary = parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    _validate_safe_path(trusted_root, temporary, allow_missing=True)
+    expected_hash = hashlib.sha256(body).hexdigest()
     try:
         with temporary.open("xb") as stream:
             stream.write(body)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        if _sha256_file(temporary) != expected_hash:
+            raise ValidationError(f"immutable staging hash mismatch: {temporary}")
+        _validate_safe_path(trusted_root, parent, allow_missing=False)
+        try:
+            os.link(temporary, checked_path)
+            _fsync_directory(parent)
+        except FileExistsError:
+            pass
+        _validate_safe_path(trusted_root, checked_path, allow_missing=False)
+        if not checked_path.is_file() or _sha256_file(checked_path) != expected_hash:
+            raise ValidationError(
+                f"immutable archive path already contains different bytes: {checked_path}"
+            )
     finally:
         if temporary.exists():
             temporary.unlink()
+
+
+class DurableAuditStore:
+    """Low-frequency, immutable and independently reloadable state/audit journal."""
+
+    def __init__(
+        self,
+        hot_root: Path,
+        *,
+        stream_id: str,
+        connection_id: str,
+        collector_commit: str,
+        storage_guard: CaptureStorageGuard,
+    ) -> None:
+        self.hot_root = Path(hot_root)
+        self.stream_id = stream_id
+        self.connection_id = connection_id
+        self.collector_commit = collector_commit
+        self.storage_guard = storage_guard
+        stream_hash = hashlib.sha256(stream_id.encode("utf-8")).hexdigest()[:16]
+        self.root = (
+            self.hot_root
+            / "capture"
+            / "durable-audit"
+            / f"stream={stream_hash}"
+            / f"connection={connection_id}"
+        )
+        _safe_mkdir(self.hot_root, self.root)
+        self._previous_sha256: str | None = None
+
+    def append(self, event: AuditEvent) -> AuditReference:
+        if event.stream_id != self.stream_id:
+            raise ValidationError("audit event stream identity mismatch")
+        identity = {
+            "schema_version": "puresaber.durable-capture-audit@1.0.0",
+            "stream_id": self.stream_id,
+            "connection_id": self.connection_id,
+            "collector_commit": self.collector_commit,
+            "ordinal": event.ordinal,
+            "previous_audit_sha256": self._previous_sha256,
+            "event": json.loads(event.payload()),
+        }
+        digest = hashlib.sha256(canonical_json_bytes(identity)).hexdigest()
+        payload = {**identity, "audit_sha256": digest}
+        body = canonical_json_bytes(payload)
+        self.storage_guard.require_hot_capacity(projected_write_bytes=len(body) + 4096)
+        path = self.root / f"audit-{event.ordinal:012d}-sha256-{digest}.json"
+        _atomic_immutable_write(path, body, root=self.hot_root)
+        loaded = self.load(path)
+        if loaded["audit_sha256"] != digest or loaded["ordinal"] != event.ordinal:
+            raise ValidationError("durable audit reload verification failed")
+        self._previous_sha256 = digest
+        return AuditReference(event.ordinal, digest, str(path))
+
+    def load(self, path: Path) -> Mapping[str, object]:
+        checked = _validate_safe_path(self.hot_root, path, allow_missing=False)
+        try:
+            payload = json.loads(checked.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValidationError(f"durable audit is unreadable: {checked}") from exc
+        if not isinstance(payload, dict):
+            raise ValidationError("durable audit must be a JSON object")
+        digest = payload.get("audit_sha256")
+        identity = {key: value for key, value in payload.items() if key != "audit_sha256"}
+        if digest != hashlib.sha256(canonical_json_bytes(identity)).hexdigest():
+            raise ValidationError("durable audit hash verification failed")
+        return MappingProxyType(payload)
 
 
 class LocalArchiveController:
@@ -544,14 +852,30 @@ class LocalArchiveController:
         self.restore_root = Path(restore_root)
         self.storage_guard = storage_guard
         self.clock = clock
+        self._preflight_receipt: ArchivePreflightReceipt | None = None
 
     def preflight(self) -> ArchivePreflightReceipt:
+        for root, name in (
+            (self.hot_root, "hot_root"),
+            (self.archive_root, "archive_root"),
+            (self.restore_root, "restore_root"),
+        ):
+            if not root.is_absolute() or not root.is_dir():
+                raise CapturePausedError(
+                    f"CAPTURE_PAUSED: {name} is missing or not absolute: {root}"
+                )
+            try:
+                _validate_safe_path(root, root, allow_missing=False)
+            except ValidationError as exc:
+                raise CapturePausedError(f"CAPTURE_PAUSED: unsafe {name}: {exc}") from exc
         decision = self.storage_guard.require_preflight(projected_hot_bytes=4096)
-        if not self.restore_root.is_absolute() or not self.restore_root.is_dir():
-            raise CapturePausedError(
-                f"CAPTURE_PAUSED: restore_root is missing or not absolute: {self.restore_root}"
-            )
         assert decision.hot_identity is not None and decision.archive_identity is not None
+        try:
+            restore_identity = self.storage_guard.volume_identity(self.restore_root)
+        except Exception as exc:
+            raise CapturePausedError(
+                f"CAPTURE_PAUSED: restore volume identity unavailable: {type(exc).__name__}: {exc}"
+            ) from exc
         verified_at = utc_text(self.clock(), "archive preflight clock")
         probe_payload = canonical_json_bytes(
             {
@@ -559,19 +883,23 @@ class LocalArchiveController:
                 "verified_at": verified_at,
                 "hot_identity": asdict(decision.hot_identity),
                 "archive_identity": asdict(decision.archive_identity),
+                "restore_identity": asdict(restore_identity),
             }
         )
         probe_hash = hashlib.sha256(probe_payload).hexdigest()
         self.storage_guard.require_archive_capacity(projected_write_bytes=len(probe_payload) + 4096)
         archive_probe = self.archive_root / "preflight" / f"sha256-{probe_hash}.bin"
-        _atomic_immutable_write(archive_probe, probe_payload)
+        _atomic_immutable_write(archive_probe, probe_payload, root=self.archive_root)
+        self._assert_identity(self.archive_root, decision.archive_identity, "archive_root")
         restore_dir = Path(tempfile.mkdtemp(prefix="qdk-archive-preflight-", dir=self.restore_root))
         try:
+            _validate_safe_path(self.restore_root, restore_dir, allow_missing=False)
             restored = restore_dir / "probe.bin"
             shutil.copy2(archive_probe, restored)
+            _validate_safe_path(self.restore_root, restored, allow_missing=False)
             restored_hash = _sha256_file(restored)
         finally:
-            shutil.rmtree(restore_dir)
+            self._remove_restore_temp(restore_dir)
         if restored_hash != probe_hash:
             raise CapturePausedError("CAPTURE_PAUSED: archive preflight restore hash mismatch")
         receipt_payload = {
@@ -579,24 +907,34 @@ class LocalArchiveController:
             "verified_at": verified_at,
             "hot_identity": asdict(decision.hot_identity),
             "archive_identity": asdict(decision.archive_identity),
+            "restore_identity": asdict(restore_identity),
             "probe_sha256": probe_hash,
             "restored_sha256": restored_hash,
         }
         receipt_path = self.hot_root / "capture" / "archive-preflight" / f"{probe_hash}.json"
-        _atomic_immutable_write(receipt_path, canonical_json_bytes(receipt_payload))
-        return ArchivePreflightReceipt(
+        _atomic_immutable_write(
+            receipt_path, canonical_json_bytes(receipt_payload), root=self.hot_root
+        )
+        receipt = ArchivePreflightReceipt(
             schema_version=receipt_payload["schema_version"],
             verified_at=verified_at,
             hot_identity=decision.hot_identity,
             archive_identity=decision.archive_identity,
+            restore_identity=restore_identity,
             probe_sha256=probe_hash,
             restored_sha256=restored_hash,
             receipt_path=str(receipt_path),
         )
+        self._preflight_receipt = receipt
+        return receipt
 
     def archive_segment(self, segment: RawSegment) -> SegmentArchiveReceipt:
-        decision = self.storage_guard.require_preflight(projected_hot_bytes=4096)
-        assert decision.hot_identity is not None and decision.archive_identity is not None
+        preflight = self._preflight_receipt
+        if preflight is None:
+            raise CapturePausedError("CAPTURE_PAUSED: archive preflight was not completed")
+        self._assert_identity(self.hot_root, preflight.hot_identity, "hot_root")
+        self._assert_identity(self.archive_root, preflight.archive_identity, "archive_root")
+        self._assert_identity(self.restore_root, preflight.restore_identity, "restore_root")
         raw, payload = load_raw_object(self.hot_root, segment.raw_manifest.reference())
         source_dir = self._hot_object_dir(raw)
         source_manifest_path = source_dir / "manifest.json"
@@ -610,12 +948,22 @@ class LocalArchiveController:
             / f"date={raw.collection_date}"
             / f"object={raw.object_id}"
         )
-        _atomic_immutable_write(destination / raw.data_path, payload)
-        _atomic_immutable_write(destination / "manifest.json", source_manifest_path.read_bytes())
+        _safe_mkdir(self.archive_root, destination)
+        self._assert_identity(self.archive_root, preflight.archive_identity, "archive_root")
+        _atomic_immutable_write(destination / raw.data_path, payload, root=self.archive_root)
+        self._assert_identity(self.archive_root, preflight.archive_identity, "archive_root")
+        _atomic_immutable_write(
+            destination / "manifest.json",
+            source_manifest_path.read_bytes(),
+            root=self.archive_root,
+        )
+        self._assert_identity(self.archive_root, preflight.archive_identity, "archive_root")
         archive_content_hash = _sha256_file(destination / raw.data_path)
         archive_manifest_hash = _sha256_file(destination / "manifest.json")
         restore_dir = Path(tempfile.mkdtemp(prefix="qdk-segment-restore-", dir=self.restore_root))
         try:
+            _validate_safe_path(self.restore_root, restore_dir, allow_missing=False)
+            self._assert_identity(self.restore_root, preflight.restore_identity, "restore_root")
             restored_payload = restore_dir / raw.data_path
             restored_manifest = restore_dir / "manifest.json"
             shutil.copy2(destination / raw.data_path, restored_payload)
@@ -625,12 +973,14 @@ class LocalArchiveController:
             restored_model = RawObjectManifest(
                 **json.loads(restored_manifest.read_text(encoding="utf-8"))
             )
+            self._assert_identity(self.archive_root, preflight.archive_identity, "archive_root")
+            self._assert_identity(self.restore_root, preflight.restore_identity, "restore_root")
         except (OSError, TypeError, json.JSONDecodeError) as exc:
             raise CapturePausedError(
                 f"CAPTURE_PAUSED: archive restore validation failed: {type(exc).__name__}: {exc}"
             ) from exc
         finally:
-            shutil.rmtree(restore_dir)
+            self._remove_restore_temp(restore_dir)
         expected = (
             raw.content_sha256,
             raw.content_sha256,
@@ -656,10 +1006,10 @@ class LocalArchiveController:
             "archive_manifest_file_sha256": archive_manifest_hash,
             "restored_content_sha256": restored_content_hash,
             "restored_manifest_file_sha256": restored_manifest_hash,
-            "hot_volume_identity": decision.hot_identity.identity,
-            "archive_volume_identity": decision.archive_identity.identity,
-            "hot_physical_devices": list(decision.hot_identity.physical_devices),
-            "archive_physical_devices": list(decision.archive_identity.physical_devices),
+            "hot_volume_identity": preflight.hot_identity.identity,
+            "archive_volume_identity": preflight.archive_identity.identity,
+            "hot_physical_devices": list(preflight.hot_identity.physical_devices),
+            "archive_physical_devices": list(preflight.archive_identity.physical_devices),
             "verified_at": utc_text(self.clock(), "archive verified_at"),
             "archive_restore_verified": True,
             "eligible_for_cleanup": True,
@@ -673,14 +1023,37 @@ class LocalArchiveController:
             / "archive-receipts"
             / (f"object={raw.object_id}-receipt={receipt_hash}.json")
         )
-        _atomic_immutable_write(receipt_path, canonical_json_bytes(receipt_payload))
+        _atomic_immutable_write(
+            receipt_path, canonical_json_bytes(receipt_payload), root=self.hot_root
+        )
         return SegmentArchiveReceipt(
             **{
                 **receipt_payload,
                 "hot_physical_devices": tuple(identity["hot_physical_devices"]),
                 "archive_physical_devices": tuple(identity["archive_physical_devices"]),
+                "receipt_path": str(receipt_path),
             }
         )
+
+    def _assert_identity(self, root: Path, expected: VolumeIdentity, root_name: str) -> None:
+        _validate_safe_path(root, root, allow_missing=False)
+        try:
+            actual = self.storage_guard.volume_identity(root)
+        except Exception as exc:
+            raise CapturePausedError(
+                f"CAPTURE_PAUSED: {root_name} identity recheck failed: {type(exc).__name__}: {exc}"
+            ) from exc
+        if actual != expected:
+            raise CapturePausedError(
+                f"CAPTURE_PAUSED: {root_name} physical identity changed since preflight: "
+                f"expected={expected}, actual={actual}"
+            )
+
+    def _remove_restore_temp(self, restore_dir: Path) -> None:
+        checked = _validate_safe_path(self.restore_root, restore_dir, allow_missing=False)
+        if checked.parent.resolve(strict=True) != self.restore_root.resolve(strict=True):
+            raise CapturePausedError("CAPTURE_PAUSED: restore temp escaped configured restore_root")
+        shutil.rmtree(checked)
 
     def _hot_object_dir(self, raw: RawObjectManifest) -> Path:
         path = (
@@ -691,12 +1064,7 @@ class LocalArchiveController:
             / f"key={raw.idempotency_key}"
             / f"object={raw.object_id}"
         )
-        resolved = path.resolve(strict=True)
-        try:
-            resolved.relative_to(self.hot_root.resolve(strict=True))
-        except ValueError as exc:
-            raise ValidationError("Raw object path escaped the hot root") from exc
-        return resolved
+        return _validate_safe_path(self.hot_root, path, allow_missing=False).resolve(strict=True)
 
 
 def iter_segment_frames(hot_root: Path, segment: RawSegment) -> Iterable[RawFrame]:
