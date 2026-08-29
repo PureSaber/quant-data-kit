@@ -68,6 +68,7 @@ class ProviderBatchingExecutor(Executor):
         self.submit_times: list[float] = []
         self.group_start_times: list[float] = []
         self.group_end_times: list[float] = []
+        self._delegated: list[Future[object]] = []
 
     def submit(self, fn, /, *args, **kwargs):
         if fn is not _publish_epoch_parts or kwargs:
@@ -102,6 +103,7 @@ class ProviderBatchingExecutor(Executor):
         group = tuple(entry[0] for entry in entries)
         self.group_start_times.append(time.perf_counter())
         delegated = self.delegate.submit(_publish_epoch_group, group)
+        self._delegated.append(delegated)
 
         def complete(source: Future[object]) -> None:
             self.group_end_times.append(time.perf_counter())
@@ -123,6 +125,53 @@ class ProviderBatchingExecutor(Executor):
             providers = tuple(self._pending)
             for provider in providers:
                 self._launch_locked(provider)
+            delegated = tuple(self._delegated)
+        if cancel_futures:
+            for future in delegated:
+                future.cancel()
+        if wait:
+            for future in delegated:
+                future.result()
+
+    def assert_quiescent(self) -> None:
+        with self._lock:
+            if self._pending or self._timers or any(not item.done() for item in self._delegated):
+                raise RuntimeError("normalization executor is not quiescent")
+
+
+@dataclass
+class BenchmarkTiming:
+    started_at: float
+    workload_completed_at: float | None = None
+    pool_closed_at: float | None = None
+
+    def mark_workload_completed(self, observed_at: float) -> None:
+        if self.workload_completed_at is not None or observed_at < self.started_at:
+            raise RuntimeError("benchmark workload timing boundary is invalid")
+        self.workload_completed_at = observed_at
+
+    def mark_pool_closed(self, observed_at: float) -> None:
+        if self.workload_completed_at is None or observed_at < self.workload_completed_at:
+            raise RuntimeError("worker pool closed before workload completion")
+        self.pool_closed_at = observed_at
+
+    @property
+    def workload_seconds(self) -> float:
+        if self.workload_completed_at is None:
+            raise RuntimeError("benchmark workload has not completed")
+        return self.workload_completed_at - self.started_at
+
+    @property
+    def worker_teardown_seconds(self) -> float:
+        if self.workload_completed_at is None or self.pool_closed_at is None:
+            raise RuntimeError("benchmark worker teardown has not completed")
+        return self.pool_closed_at - self.workload_completed_at
+
+    @property
+    def total_wall_seconds(self) -> float:
+        if self.pool_closed_at is None:
+            raise RuntimeError("benchmark worker pool has not closed")
+        return self.pool_closed_at - self.started_at
 
 
 @dataclass(frozen=True)
@@ -481,7 +530,7 @@ async def _run_benchmark(
         samples: list[float] = []
         stop = asyncio.Event()
         sampler = asyncio.create_task(_event_loop_sampler(stop, samples))
-        started = time.perf_counter()
+        timing = BenchmarkTiming(started_at=time.perf_counter())
         with ProcessPoolExecutor(
             max_workers=NORMALIZATION_PROCESS_WORKERS,
             mp_context=get_context("spawn"),
@@ -502,9 +551,12 @@ async def _run_benchmark(
             )
             report = await coordinator.run(maximum_websocket_messages=messages_per_stream)
             normalization_executor.shutdown()
-        elapsed = time.perf_counter() - started
-        stop.set()
+            normalization_executor.assert_quiescent()
+            timing.mark_workload_completed(time.perf_counter())
+            stop.set()
+        timing.mark_pool_closed(time.perf_counter())
         await sampler
+        elapsed = timing.workload_seconds
         websocket_messages = sum(item.websocket_messages for item in report.streams)
         raw_frames = websocket_messages + sum(
             1 for item in report.streams if item.provider == Provider.BINANCE.value
@@ -524,7 +576,7 @@ async def _run_benchmark(
         )
         p95 = _percentile(samples, 0.95)
         p99 = _percentile(samples, 0.99)
-        last_epoch_submit_seconds = max(normalization_executor.submit_times) - started
+        last_epoch_submit_seconds = max(normalization_executor.submit_times) - timing.started_at
         normalization_group_window_seconds = max(normalization_executor.group_end_times) - min(
             normalization_executor.group_start_times
         )
@@ -547,7 +599,7 @@ async def _run_benchmark(
         )
         commit, dirty = _git_metadata(repository)
         return {
-            "schema_version": "puresaber.m7-offline-capture-benchmark@1.1.0",
+            "schema_version": "puresaber.m7-offline-capture-benchmark@1.2.0",
             "scope": "OFFLINE_FIXTURE_NOT_NETWORK",
             "scenario": {
                 **asdict(selected),
@@ -595,6 +647,9 @@ async def _run_benchmark(
             "result": {
                 "run_status": report.status,
                 "elapsed_seconds": elapsed,
+                "workload_elapsed_seconds": elapsed,
+                "worker_teardown_seconds": timing.worker_teardown_seconds,
+                "total_wall_seconds": timing.total_wall_seconds,
                 "throughput_websocket_messages_per_second": throughput,
                 "throughput_normalized_rows_per_second": normalized_throughput,
                 "event_loop_delay_samples": len(samples),
@@ -626,7 +681,9 @@ async def _run_benchmark(
                     "The frozen eight streams at 100 ms imply 80 messages/s. Both message and "
                     "scenario-density Normalized-row throughput require at least 3x live offer-rate "
                     "headroom while including Raw segment publication, Normalized publication, "
-                    "archive copy and restore hash."
+                    "archive copy and restore hash. The capacity gate ends only after every stream "
+                    "report is complete and the batching executor is quiescent; one-time worker "
+                    "process teardown is reported separately and the pool is still fully closed."
                 ),
                 "passed": gate_passed,
             },

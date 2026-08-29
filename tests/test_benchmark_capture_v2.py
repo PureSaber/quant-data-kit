@@ -15,6 +15,7 @@ from quant_data_kit.data_lake import StoragePolicy
 from quant_data_kit.exceptions import ProviderError, ValidationError
 from tools.benchmark_capture_v2 import (
     SCENARIOS,
+    BenchmarkTiming,
     FixtureHttp,
     ProviderBatchingExecutor,
     _book_levels,
@@ -182,7 +183,10 @@ def test_provider_batching_executor_propagates_results_and_failures() -> None:
     with pytest.raises(RuntimeError, match="only accepts"):
         executor.submit(lambda: None)
     future = executor.submit(epoch_module._publish_epoch_parts, *arguments)
+    with pytest.raises(RuntimeError, match="not quiescent"):
+        executor.assert_quiescent()
     executor.shutdown()
+    executor.assert_quiescent()
     assert future.result() == summary
     executor._launch_locked("missing")
 
@@ -190,6 +194,27 @@ def test_provider_batching_executor_propagates_results_and_failures() -> None:
         ImmediateDelegate(error=RuntimeError("worker failed")), flush_seconds=60
     )
     failed_future = failed.submit(epoch_module._publish_epoch_parts, *arguments)
-    failed.shutdown()
+    with pytest.raises(RuntimeError, match="worker failed"):
+        failed.shutdown()
     with pytest.raises(RuntimeError, match="worker failed"):
         failed_future.result()
+
+
+def test_benchmark_timing_excludes_only_post_report_worker_teardown() -> None:
+    timing = BenchmarkTiming(started_at=10.0)
+    with pytest.raises(RuntimeError, match="has not completed"):
+        _ = timing.workload_seconds
+    with pytest.raises(RuntimeError, match="closed before workload"):
+        timing.mark_pool_closed(11.0)
+    with pytest.raises(RuntimeError, match="boundary is invalid"):
+        timing.mark_workload_completed(9.0)
+
+    timing.mark_workload_completed(12.5)
+    with pytest.raises(RuntimeError, match="boundary is invalid"):
+        timing.mark_workload_completed(13.0)
+    with pytest.raises(RuntimeError, match="teardown has not completed"):
+        _ = timing.worker_teardown_seconds
+    timing.mark_pool_closed(15.0)
+    assert timing.workload_seconds == 2.5
+    assert timing.worker_teardown_seconds == 2.5
+    assert timing.total_wall_seconds == 5.0
