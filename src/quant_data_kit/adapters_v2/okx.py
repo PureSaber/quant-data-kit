@@ -225,6 +225,13 @@ class OKXFixtureAdapter:
                 changes = [(BookSide.BID, item) for item in message["bids"]] + [
                     (BookSide.ASK, item) for item in message["asks"]
                 ]
+                if not changes:
+                    self._book_sequences.advance_without_levels(
+                        symbol,
+                        provider_previous_sequence=provider_previous_sequence,
+                        provider_sequence=provider_sequence,
+                    )
+                    return []
                 pairs = self._book_sequences.delta(
                     symbol,
                     provider_previous_sequence=provider_previous_sequence,

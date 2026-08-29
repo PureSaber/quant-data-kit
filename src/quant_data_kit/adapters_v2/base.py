@@ -153,6 +153,31 @@ class BookSequenceNormalizer:
         self._provider_sequence.pop(provider_symbol, None)
         self._emitted_sequence.pop(provider_symbol, None)
 
+    def advance_without_levels(
+        self,
+        provider_symbol: str,
+        *,
+        provider_previous_sequence: int,
+        provider_sequence: int,
+    ) -> None:
+        """Advance provider continuity when a live update has no material local-book change.
+
+        Current market feeds may send no-change updates or deletes for price levels that are
+        already absent. Those messages remain in Raw and advance provider continuity, but they
+        must not manufacture a BookDelta that the strict L2 reconstructor would reject.
+        """
+        if provider_symbol not in self._provider_sequence:
+            raise ValidationError("provider no-change update arrived before BookSnapshot")
+        expected_provider = self._provider_sequence[provider_symbol]
+        if provider_previous_sequence != expected_provider:
+            raise ValidationError(
+                f"provider no-change gap: expected previous={expected_provider}, "
+                f"actual={provider_previous_sequence}"
+            )
+        if provider_sequence <= provider_previous_sequence:
+            raise ValidationError("provider no-change sequence did not advance")
+        self._provider_sequence[provider_symbol] = provider_sequence
+
     def delta(
         self,
         provider_symbol: str,

@@ -19,6 +19,7 @@ dependencies = [
     "orjson>=3.11,<4.0",
     "duckdb>=1.4,<2.0",
     "typing-extensions>=4.4",
+    "websockets>=15.0,<16.0",
 ]
 
 [project.optional-dependencies]
@@ -29,6 +30,7 @@ dev = ["coverage>=7.6", "psutil>=6.0,<8.0", "pytest>=7.4", "ruff>=0.9.0"]
 qdk-validate = "quant_data_kit.cli:main_validate"
 qdk-manifest = "quant_data_kit.cli:main_manifest"
 qdk-catalog = "quant_data_kit.cli:main_catalog"
+qdk-capture = "quant_data_kit.capture_v2.cli:main_capture"
 
 [tool.setuptools.packages.find]
 where = ["src"]

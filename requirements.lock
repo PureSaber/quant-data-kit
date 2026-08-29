@@ -67,6 +67,8 @@ typing-extensions==4.16.0
     #   referencing
 tzdata==2026.3
     # via pandas
+websockets==15.0.1
+    # via quant-data-kit (pyproject.toml)
 
 # The following packages are considered to be unsafe in a requirements file:
 setuptools==84.0.0
