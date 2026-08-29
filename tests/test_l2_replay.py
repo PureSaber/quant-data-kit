@@ -278,16 +278,19 @@ def test_atomic_multi_level_group_defensive_entry_guards_preserve_state() -> Non
     initial = reconstructor.apply_snapshot(snapshot())
     with pytest.raises(L2ReplayError, match="identity changed"):
         reconstructor._apply_validated_atomic_delta_group(**{**arguments, "source": "okx"})
-    empty = {name: [] for name in (
-        "sequences",
-        "previous_sequences",
-        "sides",
-        "actions",
-        "price_units",
-        "price_scales",
-        "quantity_units",
-        "quantity_scales",
-    )}
+    empty = {
+        name: []
+        for name in (
+            "sequences",
+            "previous_sequences",
+            "sides",
+            "actions",
+            "price_units",
+            "price_scales",
+            "quantity_units",
+            "quantity_scales",
+        )
+    }
     with pytest.raises(L2ReplayError, match="must not be empty"):
         reconstructor._apply_validated_atomic_delta_group(**{**arguments, **empty})
     with pytest.raises(L2ReplayError, match="different lengths"):

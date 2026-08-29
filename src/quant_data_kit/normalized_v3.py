@@ -2069,9 +2069,7 @@ def _encoded_l2_group_ranges(batch: pa.RecordBatch) -> tuple[tuple[int, int], ..
     schema = get_arrow_schema(BOOK_DELTA_EVENT_SCHEMA_ID)
     if batch.schema != schema or batch.num_rows == 0:
         return None
-    sequences = batch.column(schema.get_field_index("sequence")).to_numpy(
-        zero_copy_only=False
-    )
+    sequences = batch.column(schema.get_field_index("sequence")).to_numpy(zero_copy_only=False)
     first_provider, first_level = divmod(int(sequences[0]), BOOK_SEQUENCE_FACTOR)
     if first_provider <= 0 or first_level <= 0:
         return None
@@ -2080,9 +2078,7 @@ def _encoded_l2_group_ranges(batch: pa.RecordBatch) -> tuple[tuple[int, int], ..
     provider = first_provider
     level = first_level
     for index in range(1, len(sequences)):
-        current_provider, current_level = divmod(
-            int(sequences[index]), BOOK_SEQUENCE_FACTOR
-        )
+        current_provider, current_level = divmod(int(sequences[index]), BOOK_SEQUENCE_FACTOR)
         if current_provider == provider:
             if current_level != level + 1:
                 return None
@@ -2395,8 +2391,7 @@ def _iter_atomic_l2_record_batches(
                 first_piece.column(first_piece.schema.get_field_index("sequence"))[0].as_py()
             )
             if (
-                _l2_group_key(pending, pending.num_rows - 1)
-                == _l2_group_key(first_piece, 0)
+                _l2_group_key(pending, pending.num_rows - 1) == _l2_group_key(first_piece, 0)
                 and first_sequence == pending_sequence + 1
             ):
                 first_piece = _concat_record_batches((pending, first_piece))

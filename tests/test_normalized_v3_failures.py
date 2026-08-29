@@ -563,9 +563,7 @@ def test_encoded_group_batch_coalescer_preserves_order_and_atomic_boundaries() -
     ] == expected_sequences
 
     whole = list(
-        normalized_v3._iter_atomic_l2_record_batches(
-            [_record_batch([*first, *second, *third])]
-        )
+        normalized_v3._iter_atomic_l2_record_batches([_record_batch([*first, *second, *third])])
     )
     assert [batch.num_rows for batch in whole] == [4, 2]
 
