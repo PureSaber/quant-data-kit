@@ -7,11 +7,16 @@ import json
 import os
 import time
 from collections.abc import Callable, Iterable, Mapping
+from concurrent.futures import Executor
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import orjson
+import pyarrow as pa
+
+from quant_data_kit import normalized_v3
 from quant_data_kit.capture_v2.models import canonical_json_bytes, utc_text
 from quant_data_kit.capture_v2.storage import (
     CaptureStorageGuard,
@@ -19,15 +24,24 @@ from quant_data_kit.capture_v2.storage import (
     _atomic_immutable_write,
 )
 from quant_data_kit.data_lake import (
-    NormalizationResult,
     RawObjectReference,
     StoragePolicy,
-    write_normalized_events,
+    write_normalized_batches,
 )
 from quant_data_kit.exceptions import ValidationError
+from quant_data_kit.schemas_v2 import (
+    BOOK_DELTA_EVENT_SCHEMA_ID,
+    BOOK_SNAPSHOT_EVENT_SCHEMA_ID,
+    get_arrow_schema,
+)
 
 UTC = timezone.utc
 _DEFAULT_POLICY = StoragePolicy()
+_ARROW_BATCH_ROWS = 32_768
+_CAPTURE_EVENT_SCHEMAS = {
+    "book_delta": BOOK_DELTA_EVENT_SCHEMA_ID,
+    "book_snapshot": BOOK_SNAPSHOT_EVENT_SCHEMA_ID,
+}
 
 
 @dataclass(frozen=True)
@@ -57,6 +71,13 @@ class NormalizedEpochReceipt:
     receipt_path: str
 
 
+@dataclass(frozen=True)
+class _NormalizationSummary:
+    snapshot_id: str | None
+    accepted_rows: int
+    quarantined_rows: int
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -83,6 +104,7 @@ class NormalizedEpochJournal:
         flush_bytes: int = 1024 * 1024,
         flush_seconds: float = 1.0,
         monotonic: Callable[[], float] = time.monotonic,
+        normalization_executor: Executor | None = None,
     ) -> None:
         if max_part_rows < 1:
             raise ValidationError("max_part_rows must be positive")
@@ -100,6 +122,7 @@ class NormalizedEpochJournal:
         self.flush_bytes = flush_bytes
         self.flush_seconds = flush_seconds
         self.monotonic = monotonic
+        self.normalization_executor = normalization_executor
         self.root = (
             self.hot_root
             / "capture"
@@ -123,14 +146,39 @@ class NormalizedEpochJournal:
 
     def append(self, records: Iterable[Mapping[str, Any]]) -> None:
         self._require_open()
+        bodies: list[bytes] = []
+        body_bytes = 0
         for record in records:
-            body = canonical_json_bytes(dict(record)) + b"\n"
-            self.storage_guard.require_hot_capacity(projected_write_bytes=len(body))
-            self._open_stream.write(body)
-            self._open_rows += 1
-            self._records += 1
-            self._unflushed_rows += 1
-            self._unflushed_bytes += len(body)
+            value = record if isinstance(record, dict) else dict(record)
+            body = orjson.dumps(value, option=orjson.OPT_SORT_KEYS) + b"\n"
+            if bodies and (
+                len(bodies) >= self.flush_records or body_bytes + len(body) > self.flush_bytes
+            ):
+                self._append_bodies(bodies, body_bytes)
+                bodies, body_bytes = [], 0
+            bodies.append(body)
+            body_bytes += len(body)
+        if bodies:
+            self._append_bodies(bodies, body_bytes)
+
+    def _append_bodies(self, bodies: list[bytes], body_bytes: int) -> None:
+        offset = 0
+        while offset < len(bodies):
+            available_rows = self.max_part_rows - self._open_rows
+            selected = bodies[offset : offset + available_rows]
+            selected_bytes = (
+                body_bytes
+                if offset == 0 and len(selected) == len(bodies)
+                else sum(len(body) for body in selected)
+            )
+            self.storage_guard.require_hot_capacity(projected_write_bytes=selected_bytes)
+            self._open_stream.writelines(selected)
+            written = len(selected)
+            self._open_rows += written
+            self._records += written
+            self._unflushed_rows += written
+            self._unflushed_bytes += selected_bytes
+            offset += written
             if (
                 self._unflushed_rows >= self.flush_records
                 or self._unflushed_bytes >= self.flush_bytes
@@ -178,6 +226,7 @@ class NormalizedEpochJournal:
         flush_bytes: int = 1024 * 1024,
         flush_seconds: float = 1.0,
         monotonic: Callable[[], float] = time.monotonic,
+        normalization_executor: Executor | None = None,
     ) -> NormalizedEpochJournal:
         """Reload a retryable failed finalize while preserving journal and Raw lineage."""
 
@@ -210,6 +259,7 @@ class NormalizedEpochJournal:
         self.flush_bytes = flush_bytes
         self.flush_seconds = flush_seconds
         self.monotonic = monotonic
+        self.normalization_executor = normalization_executor
         self.root = root
         self._parts = []
         self._records = 0
@@ -247,9 +297,7 @@ class NormalizedEpochJournal:
             if self._records and not self._raw_references:
                 raise ValidationError("Normalized epoch records require Raw segment lineage")
             result = (
-                self._publish_normalized()
-                if self._records
-                else NormalizationResult(None, 0, 0, None)
+                self._publish_normalized() if self._records else _NormalizationSummary(None, 0, 0)
             )
             created = utc_text(created_at or datetime.now(tz=UTC), "epoch created_at")
             identity = {
@@ -263,7 +311,7 @@ class NormalizedEpochJournal:
                 "raw_segments": len(self._raw_references),
                 "raw_references": [asdict(item) for item in self._raw_references],
                 "journal_parts": [asdict(item) for item in self._parts],
-                "normalized_snapshot_id": result.snapshot.snapshot_id if result.snapshot else None,
+                "normalized_snapshot_id": result.snapshot_id,
                 "accepted_rows": result.accepted_rows,
                 "quarantined_rows": result.quarantined_rows,
             }
@@ -374,32 +422,36 @@ class NormalizedEpochJournal:
         )
         return path
 
-    def _publish_normalized(self) -> NormalizationResult:
-        return write_normalized_events(
+    def _publish_normalized(self) -> _NormalizationSummary:
+        arguments = (
             self.hot_root,
-            self._iter_records(),
-            provider=self.provider,
-            venue=self.venue,
-            upstream_raw_references=self._raw_references,
-            policy=self.policy,
+            self.root,
+            tuple(self._parts),
+            self.provider,
+            self.venue,
+            tuple(self._raw_references),
+            self.policy,
         )
+        if self.normalization_executor is not None:
+            return self.normalization_executor.submit(_publish_epoch_parts, *arguments).result()
+        return _publish_epoch_parts(*arguments)
+
+    def _iter_record_batches(self) -> Iterable[pa.RecordBatch]:
+        return _iter_epoch_record_batches(self.root, tuple(self._parts))
+
+    @staticmethod
+    def _record_batch(
+        identity: tuple[str, str, str] | None,
+        records: list[dict[str, Any]],
+    ) -> pa.RecordBatch:
+        if identity is None or not records:
+            raise ValidationError("capture epoch Arrow batch identity is missing")
+        schema = get_arrow_schema(identity[0])
+        prepared = normalized_v3._arrow_ready_rows(schema, records)
+        return pa.RecordBatch.from_pylist(prepared, schema=schema)
 
     def _iter_records(self) -> Iterable[dict[str, Any]]:
-        for part in self._parts:
-            path = self.root / part.relative_path
-            if path.stat().st_size != part.byte_length or _sha256_file(path) != part.content_sha256:
-                raise ValidationError(f"Normalized epoch journal part integrity changed: {path}")
-            with path.open("rb") as stream:
-                for line_number, line in enumerate(stream, start=1):
-                    try:
-                        value = json.loads(line)
-                    except (UnicodeError, json.JSONDecodeError) as exc:
-                        raise ValidationError(
-                            f"Normalized epoch journal line is malformed: {path}:{line_number}"
-                        ) from exc
-                    if not isinstance(value, dict):
-                        raise ValidationError("Normalized epoch journal record must be an object")
-                    yield value
+        return _iter_epoch_records(self.root, tuple(self._parts))
 
     def _require_open(self) -> None:
         if self._state != "OPEN":
@@ -414,3 +466,117 @@ class NormalizedEpochJournal:
             except OSError:
                 pass
             stream.close()
+
+
+def _iter_epoch_records(root: Path, parts: tuple[EpochPart, ...]) -> Iterable[dict[str, Any]]:
+    for part in parts:
+        path = root / part.relative_path
+        if path.stat().st_size != part.byte_length or _sha256_file(path) != part.content_sha256:
+            raise ValidationError(f"Normalized epoch journal part integrity changed: {path}")
+        with path.open("rb") as stream:
+            for line_number, line in enumerate(stream, start=1):
+                try:
+                    value = orjson.loads(line)
+                except (UnicodeError, orjson.JSONDecodeError) as exc:
+                    raise ValidationError(
+                        f"Normalized epoch journal line is malformed: {path}:{line_number}"
+                    ) from exc
+                if not isinstance(value, dict):
+                    raise ValidationError("Normalized epoch journal record must be an object")
+                yield value
+
+
+def _iter_epoch_record_batches(
+    root: Path, parts: tuple[EpochPart, ...]
+) -> Iterable[pa.RecordBatch]:
+    pending: list[dict[str, Any]] = []
+    pending_identity: tuple[str, str, str] | None = None
+    for record in _iter_epoch_records(root, parts):
+        try:
+            schema_id = _CAPTURE_EVENT_SCHEMAS[str(record["event_type"])]
+            identity = (
+                schema_id,
+                str(record["instrument_id"]),
+                str(record["trading_day"]),
+            )
+        except KeyError as exc:
+            raise ValidationError(
+                f"capture epoch contains an unsupported or incomplete event: {record}"
+            ) from exc
+        if pending and (identity != pending_identity or len(pending) >= _ARROW_BATCH_ROWS):
+            yield NormalizedEpochJournal._record_batch(pending_identity, pending)
+            pending = []
+        pending_identity = identity
+        pending.append(record)
+    if pending:
+        yield NormalizedEpochJournal._record_batch(pending_identity, pending)
+
+
+def _publish_epoch_parts(
+    hot_root: Path,
+    journal_root: Path,
+    parts: tuple[EpochPart, ...],
+    provider: str,
+    venue: str,
+    raw_references: tuple[RawObjectReference, ...],
+    policy: StoragePolicy,
+) -> _NormalizationSummary:
+    result = write_normalized_batches(
+        hot_root,
+        _iter_epoch_record_batches(journal_root, parts),
+        provider=provider,
+        venue=venue,
+        upstream_raw_references=raw_references,
+        policy=policy,
+    )
+    return _NormalizationSummary(
+        snapshot_id=result.snapshot.snapshot_id if result.snapshot else None,
+        accepted_rows=result.accepted_rows,
+        quarantined_rows=result.quarantined_rows,
+    )
+
+
+def _publish_epoch_group(
+    jobs: tuple[
+        tuple[
+            Path,
+            Path,
+            tuple[EpochPart, ...],
+            str,
+            str,
+            tuple[RawObjectReference, ...],
+            StoragePolicy,
+        ],
+        ...,
+    ],
+) -> tuple[_NormalizationSummary, ...]:
+    if not jobs:
+        raise ValidationError("Normalized epoch group must not be empty")
+    hot_root = jobs[0][0]
+    provider = jobs[0][3]
+    venue = jobs[0][4]
+    policy = jobs[0][6]
+    if any(
+        job[0] != hot_root or job[3] != provider or job[4] != venue or job[6] != policy
+        for job in jobs
+    ):
+        raise ValidationError("Normalized epoch group identity or policy changed")
+    expected_rows = tuple(sum(part.rows for part in job[2]) for job in jobs)
+
+    def batches() -> Iterable[pa.RecordBatch]:
+        for job in jobs:
+            yield from _iter_epoch_record_batches(job[1], job[2])
+
+    raw_references = tuple(reference for job in jobs for reference in job[5])
+    result = write_normalized_batches(
+        hot_root,
+        batches(),
+        provider=provider,
+        venue=venue,
+        upstream_raw_references=raw_references,
+        policy=policy,
+    )
+    if result.accepted_rows != sum(expected_rows) or result.quarantined_rows:
+        raise ValidationError("Normalized epoch group row accounting changed")
+    snapshot_id = result.snapshot.snapshot_id if result.snapshot else None
+    return tuple(_NormalizationSummary(snapshot_id, rows, 0) for rows in expected_rows)

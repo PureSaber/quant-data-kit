@@ -8,6 +8,7 @@ import json
 import time
 import uuid
 from collections.abc import Callable
+from concurrent.futures import Executor
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -164,6 +165,7 @@ class CaptureStreamRunner:
         policy: StoragePolicy = _DEFAULT_POLICY,
         receive_timeout_seconds: float = 30.0,
         monotonic: Callable[[], float] = time.monotonic,
+        normalization_executor: Executor | None = None,
     ) -> None:
         self.config = config
         self.stream = stream
@@ -178,6 +180,7 @@ class CaptureStreamRunner:
         self.policy = policy
         self.receive_timeout_seconds = receive_timeout_seconds
         self.monotonic = monotonic
+        self.normalization_executor = normalization_executor
         self.connection_id = f"conn-{uuid.uuid4().hex}"
         self._audit_failures = 0
         self.segment_writer = RawSegmentWriter(
@@ -230,11 +233,11 @@ class CaptureStreamRunner:
                 await self._run_connection(maximum_websocket_messages)
                 if maximum_websocket_messages is not None:
                     self._outcome = "BOUNDED_COMPLETE"
-                    self._terminal_cleanup("bounded_probe_complete")
+                    await self._terminal_cleanup("bounded_probe_complete")
                     break
                 raise ValidationError("long-running connection returned without a stop cause")
         except asyncio.CancelledError:
-            self._handle_cancellation()
+            await self._handle_cancellation()
             raise
         except Exception as exc:  # noqa: BLE001 - feed failures share one retry boundary
             while True:
@@ -249,7 +252,7 @@ class CaptureStreamRunner:
                 except Exception as audit_exc:  # noqa: BLE001 - state remains fail-closed
                     self._errors.append(f"{type(audit_exc).__name__}: {audit_exc}")
                     self._outcome = "FAILED"
-                    self._terminal_cleanup("audit_persistence_failure", abort_reason=str(exc))
+                    await self._terminal_cleanup("audit_persistence_failure", abort_reason=str(exc))
                     break
                 try:
                     if self.state.state not in {CaptureState.CONNECTING, CaptureState.RESYNC}:
@@ -261,15 +264,15 @@ class CaptureStreamRunner:
                         self._resyncs += 1
                     self.segment_writer.flush()
                     self._drain_segments()
-                    self._finalize_epoch(abort_reason=str(exc))
+                    await asyncio.to_thread(self._finalize_epoch, str(exc))
                 except Exception as cleanup_exc:  # noqa: BLE001 - cleanup failures always pause
                     self._errors.append(f"{type(cleanup_exc).__name__}: {cleanup_exc}")
                     self._outcome = "FAILED"
-                    self._terminal_cleanup("failure_cleanup_failed", abort_reason=str(exc))
+                    await self._terminal_cleanup("failure_cleanup_failed", abort_reason=str(exc))
                     break
                 if failed_attempts >= self.config.retry.max_attempts:
                     self._outcome = "FAILED"
-                    self._terminal_cleanup("retry_budget_exhausted", abort_reason=str(exc))
+                    await self._terminal_cleanup("retry_budget_exhausted", abort_reason=str(exc))
                     break
                 delay = self.config.retry.delay(failed_attempts, self.jitter)
                 self.state.audit(
@@ -278,7 +281,7 @@ class CaptureStreamRunner:
                 try:
                     await self.clock.sleep(delay)
                 except asyncio.CancelledError:
-                    self._handle_cancellation()
+                    await self._handle_cancellation()
                     raise
                 try:
                     if self.state.state is CaptureState.RESYNC:
@@ -287,10 +290,10 @@ class CaptureStreamRunner:
                     await self._run_connection(maximum_websocket_messages)
                     if maximum_websocket_messages is not None:
                         self._outcome = "BOUNDED_COMPLETE"
-                        self._terminal_cleanup("bounded_probe_complete")
+                        await self._terminal_cleanup("bounded_probe_complete")
                         break
                 except asyncio.CancelledError:
-                    self._handle_cancellation()
+                    await self._handle_cancellation()
                     raise
                 except Exception as retry_exc:  # noqa: BLE001 - retry shares the same boundary
                     exc = retry_exc
@@ -299,12 +302,12 @@ class CaptureStreamRunner:
         self._last_report = self._report()
         return self._last_report
 
-    def _handle_cancellation(self) -> None:
+    async def _handle_cancellation(self) -> None:
         self._outcome = "CANCELLED"
         message = "CancelledError: capture task cancelled"
         if message not in self._errors:
             self._errors.append(message)
-        self._terminal_cleanup("capture_cancelled", abort_reason="capture_cancelled")
+        await self._terminal_cleanup("capture_cancelled", abort_reason="capture_cancelled")
         self._last_report = self._report()
 
     async def _run_connection(self, maximum_websocket_messages: int | None) -> None:
@@ -491,6 +494,7 @@ class CaptureStreamRunner:
             flush_bytes=self.config.durability.normalized_flush_bytes,
             flush_seconds=self.config.durability.normalized_flush_seconds,
             monotonic=self.monotonic,
+            normalization_executor=self.normalization_executor,
         )
 
     def _drain_segments(self) -> None:
@@ -516,8 +520,9 @@ class CaptureStreamRunner:
         self._epoch_receipts.append(receipt)
         self._journal = None
 
-    def _terminal_cleanup(self, reason: str, *, abort_reason: str | None = None) -> None:
+    async def _terminal_cleanup(self, reason: str, *, abort_reason: str | None = None) -> None:
         cleanup_errors: list[Exception] = []
+        deferred_cancellation: asyncio.CancelledError | None = None
         try:
             self._pause(reason)
         except Exception as exc:  # noqa: BLE001 - later durability steps must still run
@@ -527,8 +532,14 @@ class CaptureStreamRunner:
             self._drain_segments()
         except Exception as exc:  # noqa: BLE001 - retain Raw references for operator recovery
             cleanup_errors.append(exc)
+        finalize_task = asyncio.create_task(asyncio.to_thread(self._finalize_epoch, abort_reason))
+        while not finalize_task.done():
+            try:
+                await asyncio.shield(finalize_task)
+            except asyncio.CancelledError as exc:
+                deferred_cancellation = deferred_cancellation or exc
         try:
-            self._finalize_epoch(abort_reason=abort_reason)
+            finalize_task.result()
         except Exception as exc:  # noqa: BLE001 - retain journal on finalize failure
             cleanup_errors.append(exc)
         for exc in cleanup_errors:
@@ -540,6 +551,8 @@ class CaptureStreamRunner:
             )
         if cleanup_errors:
             self._outcome = "FAILED"
+        if deferred_cancellation is not None:
+            raise deferred_cancellation
 
     def _pause(self, reason: str, exc: Exception | None = None) -> None:
         if self.state.state is CaptureState.PAUSED:
@@ -616,6 +629,7 @@ class CryptoL2CaptureCoordinator:
         alert_sink: Callable[[str], None] | None = None,
         policy: StoragePolicy = _DEFAULT_POLICY,
         monotonic: Callable[[], float] = time.monotonic,
+        normalization_executor: Executor | None = None,
     ) -> None:
         assert_m7_scope(config.streams)
         self.config = config
@@ -644,6 +658,7 @@ class CryptoL2CaptureCoordinator:
         self.websockets = websockets or WebsocketsConnector()
         self.jitter = jitter
         self.policy = policy
+        self.normalization_executor = normalization_executor
 
     def preflight(self) -> ArchivePreflightReceipt:
         return self.archive.preflight()
@@ -708,6 +723,7 @@ class CryptoL2CaptureCoordinator:
                         alert_sink=self.alert_sink,
                         policy=self.policy,
                         monotonic=self.monotonic,
+                        normalization_executor=self.normalization_executor,
                     )
                 )
         except Exception as exc:  # noqa: BLE001 - initialization failure blocks all streams
@@ -751,7 +767,7 @@ class CryptoL2CaptureCoordinator:
                         first_cause = first_cause or f"{type(exc).__name__}: {exc}"
                         runner._errors.append(first_cause)
                         runner._outcome = "FAILED"
-                        runner._terminal_cleanup(
+                        await runner._terminal_cleanup(
                             "coordinator_stream_exception", abort_reason=first_cause
                         )
                         result = runner._report()
