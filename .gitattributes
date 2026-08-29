@@ -1,0 +1,2 @@
+tests/fixtures/providers/*.json text eol=lf
+tests/fixtures/providers/**/*.json text eol=lf

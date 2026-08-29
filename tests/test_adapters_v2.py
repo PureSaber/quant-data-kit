@@ -238,7 +238,7 @@ def test_book_sequence_state_rolls_back_after_snapshot_and_delta_conversion_fail
     assert len(binance.adapt(update)) == 2
 
 
-def test_okx_books_checksum_fails_closed_and_corrected_messages_are_retryable() -> None:
+def test_okx_legacy_fixture_crc32_fails_closed_and_corrected_messages_are_retryable() -> None:
     adapter = okx_adapter()
     snapshot = deepcopy(load_messages("okx")[3])
     bad_snapshot = deepcopy(snapshot)
@@ -255,14 +255,77 @@ def test_okx_books_checksum_fails_closed_and_corrected_messages_are_retryable() 
     assert len(adapter.adapt(update)) == 2
 
     assert "no books checksum" in BinanceFixtureAdapter.integrity_gate
-    assert "CRC32" in OKXFixtureAdapter.integrity_gate
+    assert adapter.certification_status == "legacy-fixture-certified-not-market-data-certified"
+    assert "checksum=0 is not an integrity signal" in OKXFixtureAdapter.integrity_gate
+    assert "historical fixtures only" in OKXFixtureAdapter.integrity_gate
+
+
+def test_okx_current_checksum_zero_and_equal_sequence_heartbeat_contract() -> None:
+    adapter = okx_adapter()
+    snapshot = deepcopy(load_messages("okx")[3])
+    snapshot["checksum"] = 0
+    assert adapter.adapt(snapshot)[0]["event_type"] == "book_snapshot"
+
+    heartbeat = deepcopy(load_messages("okx")[4])
+    heartbeat.update(
+        {
+            "prevSeqId": "200",
+            "seqId": "200",
+            "checksum": 0,
+            "bids": [],
+            "asks": [],
+        }
+    )
+    assert adapter.adapt(heartbeat) == []
+
+    invalid_heartbeat = deepcopy(heartbeat)
+    invalid_heartbeat["bids"] = [["1001.00", "0.750", "0", "1"]]
+    with pytest.raises(ValidationError, match="heartbeat must not contain"):
+        adapter.adapt(invalid_heartbeat)
+
+    update = deepcopy(load_messages("okx")[4])
+    update["checksum"] = 0
+    assert len(adapter.adapt(update)) == 2
+
+
+def test_okx_maintenance_reset_poison_survives_transaction_until_fresh_snapshot() -> None:
+    adapter = okx_adapter()
+    snapshot = deepcopy(load_messages("okx")[3])
+    snapshot["checksum"] = 0
+    reset = deepcopy(load_messages("okx")[4])
+    reset.update(
+        {
+            "prevSeqId": "200",
+            "seqId": "199",
+            "checksum": 0,
+            "bids": [],
+            "asks": [],
+        }
+    )
+    with pytest.raises(ValidationError, match="maintenance sequence reset.*fresh BookSnapshot"):
+        adapt_fixture_messages(adapter, [snapshot, reset])
+
+    update = deepcopy(load_messages("okx")[4])
+    update["checksum"] = 0
+    with pytest.raises(ValidationError, match="before BookSnapshot"):
+        adapter.adapt(update)
+
+    fresh_snapshot = deepcopy(snapshot)
+    fresh_snapshot["seqId"] = "50"
+    assert adapter.adapt(fresh_snapshot)[0]["event_type"] == "book_snapshot"
+    fresh_update = deepcopy(update)
+    fresh_update["prevSeqId"] = "50"
+    fresh_update["seqId"] = "51"
+    assert len(adapter.adapt(fresh_update)) == 2
 
 
 def test_fixture_index_hashes_are_exact() -> None:
     index = json.loads((FIXTURES / "index.json").read_text(encoding="utf-8"))
     assert index["certification_scope"] == "desensitized-fixture-only"
     assert "no books checksum" in index["provider_integrity"]["binance"]
-    assert "CRC32" in index["provider_integrity"]["okx"]
+    assert "checksum=0 is not an integrity signal" in index["provider_integrity"]["okx"]
+    assert "historical golden-fixture" in index["provider_integrity"]["okx"]
+    assert "not market-data-certified" in index["provider_integrity"]["okx"]
     assert "not market-data-certified" in index["provider_integrity"]["cn_neutral"]
     assert set(index["l2_checkpoint_sha256"]) == {"binance", "okx", "cn_neutral"}
     for relative_path, expected_hash in index["sha256"].items():
@@ -303,6 +366,8 @@ def test_adapter_context_time_and_sequence_primitives_fail_closed() -> None:
         )
 
     sequences = BookSequenceNormalizer()
+    with pytest.raises(ValidationError, match="heartbeat arrived before"):
+        sequences.heartbeat("BTCUSDT", 10)
     with pytest.raises(ValidationError, match="before BookSnapshot"):
         sequences.delta(
             "BTCUSDT",
@@ -311,6 +376,9 @@ def test_adapter_context_time_and_sequence_primitives_fail_closed() -> None:
             level_count=1,
         )
     sequences.snapshot("BTCUSDT", 10)
+    sequences.heartbeat("BTCUSDT", 10)
+    with pytest.raises(ValidationError, match="heartbeat gap"):
+        sequences.heartbeat("BTCUSDT", 9)
     with pytest.raises(ValidationError, match="did not advance"):
         sequences.snapshot("BTCUSDT", 10)
     with pytest.raises(ValidationError, match="did not advance"):
@@ -327,6 +395,9 @@ def test_adapter_context_time_and_sequence_primitives_fail_closed() -> None:
             provider_sequence=11,
             level_count=0,
         )
+    sequences.reset("BTCUSDT")
+    with pytest.raises(ValidationError, match="heartbeat arrived before"):
+        sequences.heartbeat("BTCUSDT", 10)
 
 
 def test_adapter_constructors_and_unknown_message_kinds_are_strict() -> None:
