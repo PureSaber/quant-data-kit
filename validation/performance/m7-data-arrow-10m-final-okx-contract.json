@@ -4,8 +4,8 @@
     "duckdb": "1.5.5",
     "git": {
       "branch": "codex/cross-asset-v2-m7-data-performance",
-      "commit": "edf1351690dc60691cc6330390adcdbf8bc79c5f",
-      "dirty": true
+      "commit": "009a36162a2ec1a48fc4f96b93b2e675196e9263",
+      "dirty": false
     },
     "jsonschema_rs": "0.52.0",
     "logical_cpu_count": 16,
@@ -16,9 +16,9 @@
     "python": "3.12.5 (tags/v3.12.5:ff3bc82, Aug  6 2024, 20:45:27) [MSC v.1940 64 bit (AMD64)]",
     "quant_data_kit": "0.6.1",
     "temp_environment": {
-      "TEMP": "H:\\Documents\\ChatGPT\\temp\\puresaber-quant-platform\\.worktrees\\quant-data-kit-m7\\.m7\\temp-10m-final-okx-contract",
-      "TMP": "H:\\Documents\\ChatGPT\\temp\\puresaber-quant-platform\\.worktrees\\quant-data-kit-m7\\.m7\\temp-10m-final-okx-contract",
-      "tempfile_gettempdir": "H:\\Documents\\ChatGPT\\temp\\puresaber-quant-platform\\.worktrees\\quant-data-kit-m7\\.m7\\temp-10m-final-okx-contract"
+      "TEMP": "F:\\puresaber-m7-temp",
+      "TMP": "F:\\puresaber-m7-temp",
+      "tempfile_gettempdir": "F:\\puresaber-m7-temp"
     }
   },
   "execution": {
@@ -30,40 +30,40 @@
     },
     "disk_usage_after": {
       "C:\\": {
-        "free_bytes": 6914097152,
+        "free_bytes": 6913232896,
         "total_bytes": 321320923136,
-        "used_bytes": 314406825984
+        "used_bytes": 314407690240
       },
       "F:\\": {
-        "free_bytes": 308037836800,
+        "free_bytes": 303531569152,
         "total_bytes": 594535321600,
-        "used_bytes": 286497484800
+        "used_bytes": 291003752448
       },
       "H:\\": {
-        "free_bytes": 241740365824,
+        "free_bytes": 232390111232,
         "total_bytes": 998553677824,
-        "used_bytes": 756813312000
+        "used_bytes": 766163566592
       }
     },
     "disk_usage_before": {
       "C:\\": {
-        "free_bytes": 6942900224,
+        "free_bytes": 6916562944,
         "total_bytes": 321320923136,
-        "used_bytes": 314378022912
+        "used_bytes": 314404360192
       },
       "F:\\": {
-        "free_bytes": 308037836800,
+        "free_bytes": 303531700224,
         "total_bytes": 594535321600,
-        "used_bytes": 286497484800
+        "used_bytes": 291003621376
       },
       "H:\\": {
-        "free_bytes": 245054144512,
+        "free_bytes": 235700928512,
         "total_bytes": 998553677824,
-        "used_bytes": 753499533312
+        "used_bytes": 762852749312
       }
     },
     "independent_processes": true,
-    "work_root": "H:\\Documents\\ChatGPT\\temp\\puresaber-quant-platform\\.worktrees\\quant-data-kit-m7\\.m7\\quant-data-kit-10m-final-okx-contract"
+    "work_root": "H:\\Documents\\ChatGPT\\temp\\puresaber-quant-platform\\.worktrees\\quant-data-kit-m7\\.m7\\quant-data-kit-10m-final-clean2-009a361"
   },
   "fixture": "one valid snapshot followed by same-book sequential upsert deltas",
   "gates": {
@@ -167,8 +167,8 @@
           }
         ]
       },
-      "elapsed_seconds": 56.78307909999785,
-      "events_per_second": 176108.80139820348,
+      "elapsed_seconds": 64.1304080000009,
+      "events_per_second": 155932.26851137233,
       "final_l2_checkpoint": {
         "instrument_id": "BTC-USDT-SPOT",
         "sequence": 10000000,
@@ -202,8 +202,8 @@
           "venue": "BINANCE"
         }
       ],
-      "peak_rss_bytes": 3161690112,
-      "peak_rss_gib": 2.9445533752441406,
+      "peak_rss_bytes": 3159621632,
+      "peak_rss_gib": 2.942626953125,
       "quarantined_rows": 0,
       "retained_bytes": 1103495926,
       "rows": 10000000,
@@ -222,7 +222,7 @@
         },
         "_OpenPartition.flush": {
           "calls": 4,
-          "seconds": 5.800004146294668e-06
+          "seconds": 6.000002031214535e-06
         },
         "_arrow_ready_rows": {
           "calls": 0,
@@ -230,23 +230,23 @@
         },
         "_assert_lake_wide_claims": {
           "calls": 1,
-          "seconds": 6.749999738531187e-05
+          "seconds": 8.499999967170879e-05
         },
         "_build_claim_index_files": {
           "calls": 1,
-          "seconds": 16.750588699997024
+          "seconds": 19.846420699999726
         },
         "_claim_database": {
           "calls": 1,
-          "seconds": 24.089754900000116
+          "seconds": 26.618977499998437
         },
         "_claim_shard_manifests": {
           "calls": 1,
-          "seconds": 1.1966786999983015
+          "seconds": 1.3676076000010653
         },
         "_claim_shard_manifests_from_paths": {
           "calls": 4,
-          "seconds": 3.7652362000007997
+          "seconds": 4.821134300000267
         },
         "_duplicate_event_ids": {
           "calls": 0,
@@ -258,23 +258,23 @@
         },
         "_logical_rows": {
           "calls": 1,
-          "seconds": 6.799999755457975e-05
+          "seconds": 8.179999713320285e-05
         },
         "_partition_manifests": {
           "calls": 1,
-          "seconds": 1.7077691000013147
+          "seconds": 1.5643729999974312
         },
         "_publish_or_validate_claim_index": {
           "calls": 1,
-          "seconds": 1.5886443999988842
+          "seconds": 1.9434428999993543
         },
         "_write_claim_index_manifest": {
           "calls": 1,
-          "seconds": 0.6604442000025301
+          "seconds": 0.7611584000005678
         },
         "load_normalized_snapshot_v3": {
           "calls": 2,
-          "seconds": 30.2918374999972
+          "seconds": 33.89361949999875
         }
       },
       "strict_reload_verified": true
@@ -368,8 +368,8 @@
           }
         ]
       },
-      "elapsed_seconds": 57.27277210000102,
-      "events_per_second": 174603.03794165084,
+      "elapsed_seconds": 64.48650819999966,
+      "events_per_second": 155071.19673755343,
       "final_l2_checkpoint": {
         "instrument_id": "BTC-USDT-SPOT",
         "sequence": 10000000,
@@ -403,8 +403,8 @@
           "venue": "BINANCE"
         }
       ],
-      "peak_rss_bytes": 3168739328,
-      "peak_rss_gib": 2.9511184692382812,
+      "peak_rss_bytes": 3165978624,
+      "peak_rss_gib": 2.94854736328125,
       "quarantined_rows": 0,
       "retained_bytes": 1103495926,
       "rows": 10000000,
@@ -423,7 +423,7 @@
         },
         "_OpenPartition.flush": {
           "calls": 4,
-          "seconds": 5.100002454128116e-06
+          "seconds": 5.49999822396785e-06
         },
         "_arrow_ready_rows": {
           "calls": 0,
@@ -431,23 +431,23 @@
         },
         "_assert_lake_wide_claims": {
           "calls": 1,
-          "seconds": 0.0001652000028116163
+          "seconds": 9.57000011112541e-05
         },
         "_build_claim_index_files": {
           "calls": 1,
-          "seconds": 17.43220999999903
+          "seconds": 19.608818100001372
         },
         "_claim_database": {
           "calls": 1,
-          "seconds": 23.639003899999807
+          "seconds": 26.698755500001425
         },
         "_claim_shard_manifests": {
           "calls": 1,
-          "seconds": 1.238394399999379
+          "seconds": 1.3101673999990453
         },
         "_claim_shard_manifests_from_paths": {
           "calls": 4,
-          "seconds": 3.907032800005254
+          "seconds": 4.650051799995708
         },
         "_duplicate_event_ids": {
           "calls": 0,
@@ -459,23 +459,23 @@
         },
         "_logical_rows": {
           "calls": 1,
-          "seconds": 6.360000043059699e-05
+          "seconds": 6.329999814624898e-05
         },
         "_partition_manifests": {
           "calls": 1,
-          "seconds": 1.553248700001859
+          "seconds": 1.5965077999971982
         },
         "_publish_or_validate_claim_index": {
           "calls": 1,
-          "seconds": 1.6587462999996205
+          "seconds": 1.9024305999992066
         },
         "_write_claim_index_manifest": {
           "calls": 1,
-          "seconds": 0.6860811000005924
+          "seconds": 0.7481010000010428
         },
         "load_normalized_snapshot_v3": {
           "calls": 2,
-          "seconds": 30.054873699999007
+          "seconds": 33.83859569999913
         }
       },
       "strict_reload_verified": true
@@ -569,8 +569,8 @@
           }
         ]
       },
-      "elapsed_seconds": 57.483620099999825,
-      "events_per_second": 173962.59982589423,
+      "elapsed_seconds": 65.31793879999896,
+      "events_per_second": 153097.29890007124,
       "final_l2_checkpoint": {
         "instrument_id": "BTC-USDT-SPOT",
         "sequence": 10000000,
@@ -604,8 +604,8 @@
           "venue": "BINANCE"
         }
       ],
-      "peak_rss_bytes": 3171721216,
-      "peak_rss_gib": 2.9538955688476562,
+      "peak_rss_bytes": 3185700864,
+      "peak_rss_gib": 2.9669151306152344,
       "quarantined_rows": 0,
       "retained_bytes": 1103495926,
       "rows": 10000000,
@@ -624,7 +624,7 @@
         },
         "_OpenPartition.flush": {
           "calls": 4,
-          "seconds": 5.000001692678779e-06
+          "seconds": 5.699996108887717e-06
         },
         "_arrow_ready_rows": {
           "calls": 0,
@@ -632,23 +632,23 @@
         },
         "_assert_lake_wide_claims": {
           "calls": 1,
-          "seconds": 6.489999941550195e-05
+          "seconds": 8.119999984046444e-05
         },
         "_build_claim_index_files": {
           "calls": 1,
-          "seconds": 16.952792100000806
+          "seconds": 20.092350899998564
         },
         "_claim_database": {
           "calls": 1,
-          "seconds": 24.3877121000005
+          "seconds": 27.38903130000108
         },
         "_claim_shard_manifests": {
           "calls": 1,
-          "seconds": 1.0477202000001853
+          "seconds": 1.4364416999997047
         },
         "_claim_shard_manifests_from_paths": {
           "calls": 4,
-          "seconds": 4.0621948999978486
+          "seconds": 4.874611199993524
         },
         "_duplicate_event_ids": {
           "calls": 0,
@@ -660,23 +660,23 @@
         },
         "_logical_rows": {
           "calls": 1,
-          "seconds": 6.450000000768341e-05
+          "seconds": 6.360000043059699e-05
         },
         "_partition_manifests": {
           "calls": 1,
-          "seconds": 1.4980174000011175
+          "seconds": 1.5722326000031899
         },
         "_publish_or_validate_claim_index": {
           "calls": 1,
-          "seconds": 1.7949523999996018
+          "seconds": 1.9018204999993031
         },
         "_write_claim_index_manifest": {
           "calls": 1,
-          "seconds": 0.7279170999972848
+          "seconds": 0.7818688000006659
         },
         "load_normalized_snapshot_v3": {
           "calls": 2,
-          "seconds": 30.71097500000178
+          "seconds": 34.90367659999902
         }
       },
       "strict_reload_verified": true
@@ -685,9 +685,9 @@
   "runs": 3,
   "schema_version": "1.0.0",
   "summary": {
-    "maximum_peak_rss_gib": 2.9538955688476562,
-    "median_events_per_second": 174603.03794165084,
-    "minimum_events_per_second": 173962.59982589423,
+    "maximum_peak_rss_gib": 2.9669151306152344,
+    "median_events_per_second": 155071.19673755343,
+    "minimum_events_per_second": 153097.29890007124,
     "retained_bytes": 3310487778
   },
   "thresholds": {

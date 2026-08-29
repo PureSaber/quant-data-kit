@@ -75,11 +75,11 @@ setup is excluded; RecordBatch generation and the complete normalized write are
 inside the timed scope.
 
 ```powershell
-$env:TEMP = 'H:\PureSaber-M7\temp'
-$env:TMP = 'H:\PureSaber-M7\temp'
+$env:TEMP = 'F:\puresaber-m7-temp'
+$env:TMP = 'F:\puresaber-m7-temp'
 python tools/benchmark_normalized_l2.py `
-  --work-root H:\PureSaber-M7\quant-data-kit-10m `
-  --output validation/performance/m7-data-arrow-10m-final.json `
+  --work-root .m7\quant-data-kit-10m-final-clean2-009a361 `
+  --output validation/performance/m7-data-arrow-10m-final-okx-contract.json `
   --rows 10000000 --runs 3 --batch-rows 262144 `
   --minimum-events-per-second 100000 --maximum-peak-rss-gib 16
 ```
@@ -89,3 +89,11 @@ timed scope, three run results, deterministic artifact fields, C/H/F disk space,
 actual temporary directory, and whether generated synthetic data was removed.
 The formal run retains all three lake directories under the recorded H-drive
 work root; cleanup is a separate, explicit operator decision after evidence review.
+
+The final clean run used commit`009a36162a2ec1a48fc4f96b93b2e675196e9263`with
+`dirty=false`. Its three throughputs were155,932.27、155,071.20 and153,097.30events/s;
+maximum peak RSS was2.967GiB. All30,000,000 rows were accepted, no row was quarantined,
+strict reload passed, and snapshot/partition/claim/L2-checkpoint hashes were identical across
+fresh processes. The three retained runs contain3,310,487,778bytes. `TEMP`, `TMP`, and Python's
+actual `tempfile.gettempdir()` all resolved to`F:\puresaber-m7-temp`; C was not the temp volume.
+The report SHA-256 is`69416eeba389ff520043c9382ed7e1ff7380f4d5937030a02cb84cb1ab80c08f`.
