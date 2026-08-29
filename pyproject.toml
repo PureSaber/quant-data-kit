@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quant-data-kit"
-version = "0.6.0"
+version = "0.6.1"
 description = "Shared data providers, Parquet cache, and validation for quant research repos"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
 dependencies = [
-    "pandas>=2.0",
-    "numpy>=1.24",
+    "pandas>=2.0,<3.0",
+    "numpy>=1.24,<2.3",
     "pyarrow>=14.0",
     "pyyaml>=6.0",
     "jsonschema>=4.20",
@@ -38,3 +38,11 @@ pythonpath = ["src"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+
+[tool.quant-workspace]
+layer = "data"
+schemas = [
+    { id = "puresaber.market-events", version = "2.0.0" },
+    { id = "puresaber.instrument-master", version = "2.0.0" },
+]
+lock-files = ["requirements.lock"]

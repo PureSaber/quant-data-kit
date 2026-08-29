@@ -8,8 +8,46 @@ Shared data layer for PureSaber quant research repos: immutable Raw/Normalized/C
 cd quant-data-kit
 python -m venv .venv
 .venv\Scripts\activate
-pip install -e ".[akshare,dev]"
+python -m pip install -r requirements.lock
+python -m pip install -e . --no-deps --no-build-isolation
 ```
+
+AKShare providers are an explicit optional integration and are deliberately excluded from the
+audited runtime-and-development lock. Install `.[akshare]` only in an environment that needs live
+AKShare access; the core package and CI do not require it.
+
+## M6 dependency governance
+
+The package declares the `data` layer through `[tool.quant-workspace]`, publishes
+`puresaber.market-events@2.0.0` and `puresaber.instrument-master@2.0.0`, and identifies
+`requirements.lock` as its externally resolved dependency set. The lock covers the base runtime
+dependencies, the `dev` extra, and editable-build requirements for Python3.10-3.12. Every package
+is resolved to one exact version, while the workspace manifest records the complete lock-file
+SHA-256; CI must not resolve from unconstrained extras.
+
+The direct `pandas<3` and `numpy<2.3` upper bounds preserve the package's declared Python3.10
+support. Raising either bound requires a coordinated Python support review and a successful CI
+matrix, not merely a lock refresh on a newer local interpreter.
+
+Regenerate the lock only after reviewing changes to `pyproject.toml`:
+
+```bash
+python -m pip install "pip-tools==7.6.1"
+pip-compile --extra dev --build-deps-for editable --allow-unsafe --strip-extras \
+  --resolver backtracking --index-url https://pypi.org/simple \
+  --constraint requirements-constraints.txt \
+  --output-file requirements.lock pyproject.toml
+```
+
+Then install the lock in a clean Python3.10,3.11, or3.12 environment, run `pip check`, and install
+the package with `python -m pip install -e . --no-deps --no-build-isolation`. Updating the lock and
+the dependency declaration or resolver constraints is one review unit; never hand-edit an isolated
+transitive pin. `requirements-constraints.txt` contains only cross-interpreter resolver limits and
+is not an additional installation input.
+
+Rollback is a Git revert of the governance commit, restoring both `pyproject.toml` and
+`requirements.lock` together. Existing tags and historical lock hashes remain immutable; do not
+move or rebuild a release tag to repair a dependency resolution.
 
 ## Features
 
