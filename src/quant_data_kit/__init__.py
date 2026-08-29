@@ -1,7 +1,6 @@
 """Shared quant data utilities: Parquet cache, calendar, validation, AKShare providers."""
 
-__version__ = "0.6.0"
-
+from quant_data_kit._version import __version__
 from quant_data_kit.adapters_v2 import (
     AdapterContext,
     AdapterInstrument,
@@ -36,6 +35,7 @@ from quant_data_kit.data_lake import (
     read_normalized_events,
     require_collection_capacity,
     validate_raw_reference,
+    write_normalized_batches,
     write_normalized_events,
     write_raw_bytes,
 )
@@ -199,6 +199,7 @@ __all__ = [
     "validate_price_frame",
     "validate_raw_reference",
     "write_manifest",
+    "write_normalized_batches",
     "write_normalized_events",
     "write_raw_bytes",
 ]

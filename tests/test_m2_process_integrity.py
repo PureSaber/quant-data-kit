@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import multiprocessing
 import os
 from copy import deepcopy
@@ -539,8 +538,9 @@ def test_event_claim_reuse_conflict_tamper_and_publish_retry(
     first = _normalized(root, key="claim-1", record=record)
     second = _normalized(root, key="claim-2", record=deepcopy(record))
     assert first.snapshot_id != second.snapshot_id
-    claim_files = list((root / "normalized" / "event-claims").rglob("*.json"))
-    assert len(claim_files) == 1
+    claim_files = list((root / "normalized" / "event-claim-index-v3").rglob("*.parquet"))
+    assert len(claim_files) == 2
+    assert not list((root / "normalized" / "event-claims").rglob("*.json"))
 
     changed = deepcopy(record)
     changed["price"]["units"] += 1
@@ -555,10 +555,13 @@ def test_event_claim_reuse_conflict_tamper_and_publish_retry(
             policy=TEST_POLICY,
         )
 
-    claim_payload = json.loads(claim_files[0].read_text(encoding="utf-8"))
-    claim_payload["event_sha256"] = "0" * 64
-    claim_files[0].write_text(json.dumps(claim_payload), encoding="utf-8")
-    with pytest.raises(ValidationError, match="integrity changed|Conflicting"):
+    first_claim = next(
+        (root / "normalized" / "event-claim-index-v3" / f"snapshot={first.snapshot_id}").rglob(
+            "*.parquet"
+        )
+    )
+    first_claim.write_bytes(first_claim.read_bytes() + b"tampered")
+    with pytest.raises(ValidationError, match="physical content changed"):
         load_normalized_snapshot(root, first.snapshot_id)
 
     retry_root = tmp_path / "claim-retry"
@@ -584,7 +587,7 @@ def test_event_claim_reuse_conflict_tamper_and_publish_retry(
             policy=TEST_POLICY,
         )
     monkeypatch.setattr(lake_module.os, "replace", real_replace)
-    assert list((retry_root / "normalized" / "event-claims").rglob("*.json"))
+    assert not list((retry_root / "normalized" / "event-claim-index-v3").rglob("*.parquet"))
     retried = write_normalized_events(
         retry_root,
         [trade("retry-claim")],
@@ -634,28 +637,29 @@ def test_deleted_event_claim_recovers_from_snapshot_and_preserves_binding(tmp_pa
     root = tmp_path / "event-claim-recovery"
     record = trade("recover-global-id")
     original = _normalized(root, key="original", record=record)
-    claim_path = next((root / "normalized" / "event-claims").rglob("*.json"))
+    index_root = root / "normalized" / "event-claim-index-v3" / f"snapshot={original.snapshot_id}"
+    claim_path = next(index_root.rglob("*.parquet"))
     claim_path.unlink()
 
     repeated = _normalized(root, key="repeated", record=deepcopy(record))
     assert repeated.snapshot_id != original.snapshot_id
     assert load_normalized_snapshot(root, original.snapshot_id) == original
-    assert claim_path.is_file()
+    assert list(index_root.rglob("*.parquet"))
 
-    claim_path.unlink()
+    next(index_root.rglob("*.parquet")).unlink()
     changed = deepcopy(record)
     changed["price"]["units"] += 1
     with pytest.raises(ValidationError, match="Conflicting lake event_id claim"):
         _normalized(root, key="changed", record=changed)
-    assert not claim_path.exists()
+    assert list(index_root.rglob("*.parquet"))
 
 
 def test_deleted_event_claim_recovery_is_process_safe(tmp_path: Path) -> None:
     root = tmp_path / "event-claim-process-recovery"
     record = trade("recover-process-id")
     original = _normalized(root, key="original", record=record)
-    claim_path = next((root / "normalized" / "event-claims").rglob("*.json"))
-    claim_path.unlink()
+    index_root = root / "normalized" / "event-claim-index-v3" / f"snapshot={original.snapshot_id}"
+    next(index_root.rglob("*.parquet")).unlink()
     admitted = _raw(root, key="same", payload=b"same")
     results, exit_codes = _run_pair(
         _normalized_process,
@@ -666,10 +670,10 @@ def test_deleted_event_claim_recovery_is_process_safe(tmp_path: Path) -> None:
     )
     assert exit_codes == [0, 0]
     assert [status for status, _ in results] == ["ok", "ok"], results
-    assert claim_path.is_file()
+    assert list(index_root.rglob("*.parquet"))
     assert load_normalized_snapshot(root, original.snapshot_id) == original
 
-    claim_path.unlink()
+    next(index_root.rglob("*.parquet")).unlink()
     changed_raw = _raw(root, key="changed", payload=b"changed")
     changed = deepcopy(record)
     changed["price"]["units"] += 1

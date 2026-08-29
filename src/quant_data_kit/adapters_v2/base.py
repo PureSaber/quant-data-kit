@@ -137,6 +137,22 @@ class BookSequenceNormalizer:
         self._emitted_sequence[provider_symbol] = emitted
         return emitted
 
+    def heartbeat(self, provider_symbol: str, provider_sequence: int) -> None:
+        """Validate a provider no-change heartbeat without emitting a v2 sequence."""
+        if provider_symbol not in self._provider_sequence:
+            raise ValidationError("provider heartbeat arrived before BookSnapshot")
+        expected_provider = self._provider_sequence[provider_symbol]
+        if provider_sequence != expected_provider:
+            raise ValidationError(
+                f"provider heartbeat gap: expected sequence={expected_provider}, "
+                f"actual={provider_sequence}"
+            )
+
+    def reset(self, provider_symbol: str) -> None:
+        """Discard continuity after a provider reset until a fresh snapshot arrives."""
+        self._provider_sequence.pop(provider_symbol, None)
+        self._emitted_sequence.pop(provider_symbol, None)
+
     def delta(
         self,
         provider_symbol: str,

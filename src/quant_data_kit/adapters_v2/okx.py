@@ -1,4 +1,4 @@
-"""OKX desensitized fixture adapter for v2 market events."""
+"""OKX fixture adapter with explicit legacy and post-checksum sequence semantics."""
 
 from __future__ import annotations
 
@@ -33,8 +33,12 @@ from quant_data_kit.market_events_v2 import (
 
 
 class OKXFixtureAdapter:
-    certification_status = "fixture-certified"
-    integrity_gate = "OKX signed CRC32 books checksum plus trusted Raw SHA-256"
+    certification_status = "legacy-fixture-certified-not-market-data-certified"
+    integrity_gate = (
+        "current live prerequisite: TLS plus strict seqId/prevSeqId continuity; "
+        "checksum=0 is not an integrity signal; nonzero signed CRC32 is verified "
+        "for historical fixtures only; trusted Raw SHA-256 remains mandatory"
+    )
 
     def __init__(self, context: AdapterContext) -> None:
         if context.provider != "okx":
@@ -42,20 +46,29 @@ class OKXFixtureAdapter:
         self.context = context
         self._book_sequences = BookSequenceNormalizer()
         self._books: dict[str, dict[str, dict[str, str]]] = {}
+        self._awaiting_snapshot: set[str] = set()
 
     @contextmanager
     def transaction(self) -> Iterable[None]:
         books_before = copy.deepcopy(self._books)
-        with self._book_sequences.transaction():
-            try:
+        awaiting_before = set(self._awaiting_snapshot)
+        try:
+            with self._book_sequences.transaction():
                 yield
-            except Exception:
-                self._books = books_before
-                raise
+        except Exception:
+            reset_during_transaction = self._awaiting_snapshot.difference(awaiting_before)
+            self._books = books_before
+            self._awaiting_snapshot = awaiting_before
+            for symbol in reset_during_transaction:
+                self._books.pop(symbol, None)
+                self._book_sequences.reset(symbol)
+                self._awaiting_snapshot.add(symbol)
+            raise
 
     @contextmanager
     def _book_transaction(self, symbol: str) -> Any:
         before = copy.deepcopy(self._books.get(symbol))
+        awaiting_before = symbol in self._awaiting_snapshot
         with self._book_sequences.transaction():
             try:
                 yield
@@ -64,7 +77,16 @@ class OKXFixtureAdapter:
                     self._books.pop(symbol, None)
                 else:
                     self._books[symbol] = before
+                if awaiting_before:
+                    self._awaiting_snapshot.add(symbol)
+                else:
+                    self._awaiting_snapshot.discard(symbol)
                 raise
+
+    def _require_fresh_snapshot(self, symbol: str) -> None:
+        self._books.pop(symbol, None)
+        self._book_sequences.reset(symbol)
+        self._awaiting_snapshot.add(symbol)
 
     @staticmethod
     def _signed_crc32(value: str) -> int:
@@ -105,8 +127,12 @@ class OKXFixtureAdapter:
                     book[field].pop(price, None)
                 else:
                     book[field][price] = quantity
-        if cls._checksum(book) != int(message["checksum"]):
-            raise ValidationError("OKX books checksum mismatch")
+        try:
+            checksum = int(message["checksum"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValidationError("OKX books checksum field must be an integer") from exc
+        if checksum != 0 and cls._checksum(book) != checksum:
+            raise ValidationError("OKX legacy books CRC32 checksum mismatch")
 
     def adapt(self, message: Mapping[str, Any]) -> list[dict[str, Any]]:
         channel = str(message.get("channel", ""))
@@ -173,19 +199,36 @@ class OKXFixtureAdapter:
                         self._book_level(item, instrument, "ask") for item in message["asks"]
                     ),
                 )
+                self._awaiting_snapshot.discard(symbol)
                 return [market_event_payload(event)]
         if channel == "books" and message["action"] == "update":
+            provider_previous_sequence = int(message["prevSeqId"])
+            provider_sequence = int(message["seqId"])
+            if provider_sequence < provider_previous_sequence:
+                self._require_fresh_snapshot(symbol)
+                raise ValidationError(
+                    "OKX maintenance sequence reset terminated admission; "
+                    "a fresh BookSnapshot is required"
+                )
             with self._book_transaction(symbol):
-                if symbol not in self._books:
+                if symbol in self._awaiting_snapshot or symbol not in self._books:
                     raise ValidationError("OKX BookDelta arrived before BookSnapshot")
+                if provider_sequence == provider_previous_sequence:
+                    if message["bids"] or message["asks"]:
+                        raise ValidationError(
+                            "OKX equal-sequence heartbeat must not contain book levels"
+                        )
+                    self._apply_book_message(self._books[symbol], message, replace=False)
+                    self._book_sequences.heartbeat(symbol, provider_sequence)
+                    return []
                 self._apply_book_message(self._books[symbol], message, replace=False)
                 changes = [(BookSide.BID, item) for item in message["bids"]] + [
                     (BookSide.ASK, item) for item in message["asks"]
                 ]
                 pairs = self._book_sequences.delta(
                     symbol,
-                    provider_previous_sequence=int(message["prevSeqId"]),
-                    provider_sequence=int(message["seqId"]),
+                    provider_previous_sequence=provider_previous_sequence,
+                    provider_sequence=provider_sequence,
                     level_count=len(changes),
                 )
                 events: list[dict[str, Any]] = []

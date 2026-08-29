@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 CORE_THRESHOLDS = {
+    "src/quant_data_kit/normalized_v3.py": 90,
     "src/quant_data_kit/data_lake.py": 90,
     "src/quant_data_kit/curated.py": 90,
     "src/quant_data_kit/process_lock.py": 90,

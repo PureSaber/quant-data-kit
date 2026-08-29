@@ -191,3 +191,78 @@ def test_snapshot_and_delta_time_and_sequence_must_strictly_advance() -> None:
     backwards["available_at"] = backwards["event_time"]
     with pytest.raises(L2ReplayError, match="moved backwards"):
         reconstructor.apply_delta(backwards)
+
+
+def test_validated_snapshot_and_batch_guards_preserve_state() -> None:
+    reconstructor = L2BookReconstructor()
+    initial = reconstructor.apply_snapshot(snapshot())
+
+    resync = snapshot()
+    resync["event_id"] = "snapshot-200"
+    resync["sequence"] = 200
+    resync["event_time"] = "2026-01-02T00:01:00Z"
+    resync["received_at"] = resync["event_time"]
+    resync["available_at"] = resync["event_time"]
+    assert reconstructor.apply_snapshot(resync).sequence == 200
+
+    empty_level = deepcopy(resync)
+    empty_level["sequence"] = 201
+    empty_level["bids"][0]["quantity"]["units"] = 0
+    with pytest.raises(L2ReplayError, match="empty price levels"):
+        reconstructor._apply_validated_snapshot_state(empty_level)
+
+    mixed_scale = deepcopy(resync)
+    mixed_scale["sequence"] = 201
+    mixed_scale["asks"][0]["price"]["scale"] = 3
+    with pytest.raises(L2ReplayError, match="price scales differ"):
+        reconstructor._apply_validated_snapshot_state(mixed_scale)
+    assert reconstructor.checkpoint().sequence == 200
+    assert initial.sequence == 100
+
+
+def test_private_validated_dispatch_and_uniform_batch_fail_closed() -> None:
+    reconstructor = L2BookReconstructor()
+    with pytest.raises(L2ReplayError, match="Unsupported"):
+        reconstructor._apply_without_checkpoint({"event_type": "trade"})
+    with pytest.raises(L2ReplayError, match="Unsupported"):
+        reconstructor._apply_validated_without_checkpoint({"event_type": "trade"})
+    with pytest.raises(L2ReplayError, match="start from a BookSnapshot"):
+        reconstructor._apply_validated_uniform_upsert_batch(
+            source="binance",
+            instrument_id="BTC-USDT-SPOT",
+            session_id="binance-24x7-BTC-USDT-SPOT",
+            first_previous_sequence=100,
+            final_sequence=101,
+            first_event_time="2026-01-02T00:00:01Z",
+            final_event_time="2026-01-02T00:00:01Z",
+            side="bid",
+            price_units=100_000,
+            price_scale=2,
+            quantity_units=25,
+            quantity_scale=3,
+        )
+
+    reconstructor.apply_snapshot(snapshot())
+    arguments = {
+        "source": "binance",
+        "instrument_id": "BTC-USDT-SPOT",
+        "session_id": "binance-24x7-BTC-USDT-SPOT",
+        "first_previous_sequence": 100,
+        "final_sequence": 101,
+        "first_event_time": "2026-01-02T00:00:01Z",
+        "final_event_time": "2026-01-02T00:00:01Z",
+        "side": "bid",
+        "price_units": 100_000,
+        "price_scale": 2,
+        "quantity_units": 25,
+        "quantity_scale": 3,
+    }
+    wrong_identity = {**arguments, "source": "okx"}
+    with pytest.raises(L2ReplayError, match="identity changed"):
+        reconstructor._apply_validated_uniform_upsert_batch(**wrong_identity)
+    non_advancing = {**arguments, "final_sequence": 100}
+    with pytest.raises(L2ReplayError, match="strictly advance"):
+        reconstructor._apply_validated_uniform_upsert_batch(**non_advancing)
+    wrong_scale = {**arguments, "price_scale": 3}
+    with pytest.raises(L2ReplayError, match="price scale changed"):
+        reconstructor._apply_validated_uniform_upsert_batch(**wrong_scale)

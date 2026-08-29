@@ -7,6 +7,7 @@ import json
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from functools import lru_cache
 from typing import Any
 
 from quant_data_kit.exceptions import ValidationError
@@ -106,6 +107,39 @@ class L2BookReconstructor:
     def _apply_snapshot_state(self, event: Mapping[str, Any]) -> None:
         payload = dict(event)
         validate_json_record(BOOK_SNAPSHOT_EVENT_SCHEMA_ID, payload)
+        self._apply_validated_snapshot_state(payload)
+
+    def apply_delta(self, event: Mapping[str, Any]) -> BookCheckpoint:
+        self._apply_delta_state(event)
+        return self.checkpoint()
+
+    def _apply_delta_state(self, event: Mapping[str, Any]) -> None:
+        payload = dict(event)
+        validate_json_record(BOOK_DELTA_EVENT_SCHEMA_ID, payload)
+        self._apply_validated_delta_state(payload)
+
+    def _apply_without_checkpoint(self, event: Mapping[str, Any]) -> None:
+        event_type = event.get("event_type")
+        if event_type == "book_snapshot":
+            self._apply_snapshot_state(event)
+            return
+        if event_type == "book_delta":
+            self._apply_delta_state(event)
+            return
+        raise L2ReplayError(f"Unsupported L2 event_type: {event_type!r}")
+
+    def _apply_validated_without_checkpoint(self, event: Mapping[str, Any]) -> None:
+        """Apply an event whose frozen JSON schema and PIT semantics already passed."""
+        event_type = event["event_type"]
+        if event_type == "book_snapshot":
+            self._apply_validated_snapshot_state(event)
+            return
+        if event_type == "book_delta":
+            self._apply_validated_delta_state(event)
+            return
+        raise L2ReplayError(f"Unsupported L2 event_type: {event_type!r}")
+
+    def _apply_validated_snapshot_state(self, payload: Mapping[str, Any]) -> None:
         sequence = int(payload["sequence"])
         if self._sequence is not None:
             self._assert_identity(payload)
@@ -133,15 +167,9 @@ class L2BookReconstructor:
         self._bids = bids
         self._asks = asks
 
-    def apply_delta(self, event: Mapping[str, Any]) -> BookCheckpoint:
-        self._apply_delta_state(event)
-        return self.checkpoint()
-
-    def _apply_delta_state(self, event: Mapping[str, Any]) -> None:
+    def _apply_validated_delta_state(self, payload: Mapping[str, Any]) -> None:
         if not self.initialized:
             raise L2ReplayError("L2 replay must start from a BookSnapshot")
-        payload = dict(event)
-        validate_json_record(BOOK_DELTA_EVENT_SCHEMA_ID, payload)
         self._assert_identity(payload)
         sequence = int(payload["sequence"])
         previous_sequence = int(payload["previous_sequence"])
@@ -150,8 +178,6 @@ class L2BookReconstructor:
                 f"L2 sequence gap, duplicate, or out-of-order delta: "
                 f"expected previous_sequence={self._sequence}, actual={previous_sequence}"
             )
-        if sequence <= previous_sequence:
-            raise L2ReplayError("L2 delta sequence must strictly advance")
         self._assert_time_advances(str(payload["event_time"]))
         level = _level(
             {
@@ -165,30 +191,91 @@ class L2BookReconstructor:
                 f"L2 delta price scale changed: expected={self._price_scale}, "
                 f"actual={level.price_scale}"
             )
-        bids = dict(self._bids)
-        asks = dict(self._asks)
-        side = bids if payload["side"] == "bid" else asks
+        side = self._bids if payload["side"] == "bid" else self._asks
+        previous_level = side.get(level.price_units)
         if payload["action"] == "delete":
-            if level.price_units not in side:
+            if previous_level is None:
                 raise L2ReplayError("L2 delete references an absent price level")
             del side[level.price_units]
         else:
             side[level.price_units] = level
-        self._assert_book_valid(bids, asks)
-        self._bids = bids
-        self._asks = asks
+        try:
+            self._assert_book_valid(self._bids, self._asks)
+        except L2ReplayError:
+            if previous_level is None:
+                side.pop(level.price_units, None)
+            else:
+                side[level.price_units] = previous_level
+            raise
         self._sequence = sequence
         self._event_time = str(payload["event_time"])
 
-    def _apply_without_checkpoint(self, event: Mapping[str, Any]) -> None:
-        event_type = event.get("event_type")
-        if event_type == "book_snapshot":
-            self._apply_snapshot_state(event)
-            return
-        if event_type == "book_delta":
-            self._apply_delta_state(event)
-            return
-        raise L2ReplayError(f"Unsupported L2 event_type: {event_type!r}")
+    def _apply_validated_uniform_upsert_batch(
+        self,
+        *,
+        source: str,
+        instrument_id: str,
+        session_id: str,
+        first_previous_sequence: int,
+        final_sequence: int,
+        first_event_time: str,
+        final_event_time: str,
+        side: str,
+        price_units: int,
+        price_scale: int,
+        quantity_units: int,
+        quantity_scale: int,
+    ) -> None:
+        """Apply a proven-uniform batch without weakening serial book semantics.
+
+        The caller must already have vector-validated every row, strict sequence
+        continuity, non-decreasing event time, and positive quantities. Because all
+        updates target one price on one side and are upserts, only the final quantity
+        changes retained state; checking the one price against the opposite book is
+        equivalent to checking every intermediate update.
+        """
+        if not self.initialized:
+            raise L2ReplayError("L2 replay must start from a BookSnapshot")
+        identity = (source, instrument_id, session_id)
+        expected = (self._source, self._instrument_id, self._session_id)
+        if identity != expected:
+            raise L2ReplayError(
+                f"L2 stream identity changed: expected={expected}, actual={identity}"
+            )
+        if first_previous_sequence != self._sequence:
+            raise L2ReplayError(
+                "L2 sequence gap, duplicate, or out-of-order delta: "
+                f"expected previous_sequence={self._sequence}, "
+                f"actual={first_previous_sequence}"
+            )
+        if final_sequence <= first_previous_sequence:
+            raise L2ReplayError("L2 delta batch sequence must strictly advance")
+        self._assert_time_advances(first_event_time)
+        self._assert_time_advances(final_event_time)
+        if price_scale != self._price_scale:
+            raise L2ReplayError(
+                f"L2 delta price scale changed: expected={self._price_scale}, actual={price_scale}"
+            )
+        level = ReconstructedLevel(
+            price_units=price_units,
+            price_scale=price_scale,
+            quantity_units=quantity_units,
+            quantity_scale=quantity_scale,
+            order_count=None,
+        )
+        levels = self._bids if side == "bid" else self._asks
+        previous_level = levels.get(price_units)
+        levels[price_units] = level
+        try:
+            self._assert_book_valid(self._bids, self._asks)
+        except L2ReplayError:
+            if previous_level is None:
+                levels.pop(price_units, None)
+            else:
+                levels[price_units] = previous_level
+            raise
+        self._sequence = final_sequence
+        self._event_time = final_event_time
 
     def _assert_identity(self, payload: Mapping[str, Any]) -> None:
         identity = (
@@ -205,8 +292,10 @@ class L2BookReconstructor:
     def _assert_time_advances(self, event_time: str) -> None:
         if self._event_time is None:
             return
-        previous = datetime.fromisoformat(self._event_time.replace("Z", "+00:00"))
-        current = datetime.fromisoformat(event_time.replace("Z", "+00:00"))
+        if event_time == self._event_time:
+            return
+        previous = _parsed_timestamp(self._event_time)
+        current = _parsed_timestamp(event_time)
         if current < previous:
             raise L2ReplayError("L2 event_time moved backwards")
 
@@ -244,6 +333,11 @@ class L2BookReconstructor:
             asks=asks,
             state_sha256=hashlib.sha256(_canonical(state)).hexdigest(),
         )
+
+
+@lru_cache(maxsize=4096)
+def _parsed_timestamp(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def replay_l2(
