@@ -11,6 +11,7 @@ import pytest
 
 import quant_data_kit.data_lake as lake_module
 from quant_data_kit import normalized_v3
+from quant_data_kit.adapters_v2.base import BOOK_SEQUENCE_FACTOR
 from quant_data_kit.data_lake import (
     CollectionStoppedError,
     StoragePolicy,
@@ -293,6 +294,58 @@ def test_record_batch_reader_is_a_supported_strict_input(tmp_path: Path) -> None
     assert result.snapshot is not None
     assert result.accepted_rows == 1
     assert result.quarantined_rows == 0
+
+
+def test_encoded_dense_group_is_atomic_across_input_batch_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    initial = snapshot()
+    initial["sequence"] = 100 * BOOK_SEQUENCE_FACTOR
+    first = delta(101, 100, side="bid", price_units=100_150, quantity_units=25)
+    second = delta(
+        102,
+        101,
+        side="ask",
+        action="delete",
+        price_units=100_100,
+        quantity_units=0,
+    )
+    first["sequence"] = 101 * BOOK_SEQUENCE_FACTOR + 1
+    first["previous_sequence"] = initial["sequence"]
+    second["sequence"] = 101 * BOOK_SEQUENCE_FACTOR + 2
+    second["previous_sequence"] = first["sequence"]
+    for index, event in enumerate((first, second), start=1):
+        event["event_id"] = f"encoded-delta-101-{index}"
+        for field in ("event_time", "received_at", "available_at"):
+            event[field] = "2026-01-02T00:00:01Z"
+
+    applied_group_sizes: list[int] = []
+    real_apply = normalized_v3.L2BookReconstructor._apply_validated_atomic_delta_group
+
+    def observed_apply(self, **kwargs) -> None:
+        applied_group_sizes.append(len(kwargs["sequences"]))
+        real_apply(self, **kwargs)
+
+    monkeypatch.setattr(
+        normalized_v3.L2BookReconstructor,
+        "_apply_validated_atomic_delta_group",
+        observed_apply,
+    )
+    result = _strict_batches(
+        tmp_path,
+        [
+            _record_batch([initial]),
+            _record_batch([first]),
+            _record_batch([second]),
+        ],
+        key="encoded-atomic-boundary",
+    )
+    assert result.snapshot is not None
+    assert result.accepted_rows == 3
+    assert applied_group_sizes == [2]
+    checkpoint = result.snapshot.l2_checkpoints[0]
+    assert checkpoint.sequence == second["sequence"]
 
 
 def test_arrow_snapshot_identity_is_independent_of_input_batch_boundaries(

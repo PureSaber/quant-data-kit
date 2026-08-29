@@ -14,6 +14,7 @@ import pytest
 
 import quant_data_kit.data_lake as lake_module
 from quant_data_kit import normalized_v3
+from quant_data_kit.adapters_v2.base import BOOK_SEQUENCE_FACTOR
 from quant_data_kit.data_lake import (
     load_normalized_snapshot,
     write_normalized_batches,
@@ -31,6 +32,28 @@ from tests.test_normalized_v3 import (
     _record_batch,
     _strict_batches,
 )
+
+
+def _encoded_delta_group(
+    provider_sequence: int,
+    previous_sequence: int,
+    *,
+    levels: int = 2,
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    previous = previous_sequence
+    timestamp = f"2026-01-02T00:00:{provider_sequence - 100:02d}Z"
+    for index in range(1, levels + 1):
+        sequence = provider_sequence * BOOK_SEQUENCE_FACTOR + index
+        record = delta(101, 100, price_units=100_000 - index * 10)
+        record["event_id"] = f"encoded-{provider_sequence}-{index}"
+        record["sequence"] = sequence
+        record["previous_sequence"] = previous
+        for field in ("event_time", "received_at", "available_at"):
+            record[field] = timestamp
+        records.append(record)
+        previous = sequence
+    return records
 
 
 def _set_path(payload: dict[str, Any], path: tuple[str | int, ...], value: Any) -> None:
@@ -518,6 +541,199 @@ def test_arrow_input_reference_and_empty_batch_contracts(tmp_path: Path) -> None
     )
     assert empty.snapshot is None
     assert empty.accepted_rows == empty.quarantined_rows == 0
+
+
+def test_encoded_group_batch_coalescer_preserves_order_and_atomic_boundaries() -> None:
+    first = _encoded_delta_group(101, 100 * BOOK_SEQUENCE_FACTOR)
+    second = _encoded_delta_group(102, first[-1]["sequence"])
+    third = _encoded_delta_group(103, second[-1]["sequence"])
+    expected_sequences = [event["sequence"] for event in (*first, *second, *third)]
+
+    cut_batches = [
+        _record_batch(first[:1]),
+        _record_batch([*first[1:], *second, *third[:1]]),
+        _record_batch(third[1:]),
+    ]
+    coalesced = list(normalized_v3._iter_atomic_l2_record_batches(cut_batches))
+    assert [batch.num_rows for batch in coalesced] == [4, 2]
+    assert [
+        value
+        for batch in coalesced
+        for value in batch.column(batch.schema.get_field_index("sequence")).to_pylist()
+    ] == expected_sequences
+
+    whole = list(
+        normalized_v3._iter_atomic_l2_record_batches(
+            [_record_batch([*first, *second, *third])]
+        )
+    )
+    assert [batch.num_rows for batch in whole] == [4, 2]
+
+    mismatched = list(
+        normalized_v3._iter_atomic_l2_record_batches(
+            [_record_batch(first[:1]), _record_batch(second)]
+        )
+    )
+    assert [batch.num_rows for batch in mismatched] == [1, 2]
+
+    unencoded = list(
+        normalized_v3._iter_atomic_l2_record_batches(
+            [_record_batch(first[:1]), _record_batch([delta(101, 100)])]
+        )
+    )
+    assert [batch.num_rows for batch in unencoded] == [1, 1]
+
+
+def test_encoded_group_layout_and_concat_helpers_fail_closed() -> None:
+    first = _encoded_delta_group(101, 100 * BOOK_SEQUENCE_FACTOR)
+    valid = _record_batch(first)
+    sequence_index = valid.schema.get_field_index("sequence")
+    noncontiguous = valid.set_column(
+        sequence_index,
+        valid.schema.field(sequence_index),
+        pa.array(
+            [101 * BOOK_SEQUENCE_FACTOR + 1, 101 * BOOK_SEQUENCE_FACTOR + 3],
+            type=pa.int64(),
+        ),
+    )
+    wrong_boundary = valid.set_column(
+        sequence_index,
+        valid.schema.field(sequence_index),
+        pa.array(
+            [101 * BOOK_SEQUENCE_FACTOR + 1, 102 * BOOK_SEQUENCE_FACTOR + 2],
+            type=pa.int64(),
+        ),
+    )
+    nonpositive_provider = valid.set_column(
+        sequence_index,
+        valid.schema.field(sequence_index),
+        pa.array([101 * BOOK_SEQUENCE_FACTOR + 1, 1], type=pa.int64()),
+    )
+    group_zero = valid.set_column(
+        sequence_index,
+        valid.schema.field(sequence_index),
+        pa.array([1, 2], type=pa.int64()),
+    )
+    assert normalized_v3._encoded_l2_group_ranges(valid) == ((0, 2),)
+    assert normalized_v3._encoded_l2_group_ranges(noncontiguous) is None
+    assert normalized_v3._encoded_l2_group_ranges(wrong_boundary) is None
+    assert normalized_v3._encoded_l2_group_ranges(nonpositive_provider) is None
+    assert normalized_v3._encoded_l2_group_ranges(group_zero) is None
+    assert normalized_v3._encoded_l2_group_ranges(valid.slice(0, 0)) is None
+    assert normalized_v3._encoded_l2_group_ranges(_record_batch([trade("trade")])) is None
+
+    assert normalized_v3._concat_record_batches((valid,)) is valid
+    with pytest.raises(ValidationError, match="empty"):
+        normalized_v3._concat_record_batches(())
+    with pytest.raises(ValidationError, match="different schemas"):
+        normalized_v3._concat_record_batches((valid, _record_batch([trade("trade")])))
+
+
+def test_encoded_group_checkpoint_and_time_fallbacks_remain_strict(tmp_path: Path) -> None:
+    initial = snapshot()
+    initial["sequence"] = 100 * BOOK_SEQUENCE_FACTOR
+    group = _encoded_delta_group(101, initial["sequence"])
+    replayed_first = replay_l2([initial, group[0]])
+    stream = ("binance", "BTC-USDT-SPOT", "binance-24x7-BTC-USDT-SPOT")
+    expected = {stream: {group[0]["sequence"]: replayed_first.final_checkpoint.state_sha256}}
+    checkpointed = _strict_batches(
+        tmp_path / "intermediate-checkpoint",
+        [_record_batch([initial]), _record_batch(group)],
+        key="intermediate-checkpoint",
+        expected_l2_checkpoint_hashes=expected,
+    )
+    assert checkpointed.snapshot is not None
+    assert checkpointed.snapshot.l2_checkpoints[0].sequence == group[-1]["sequence"]
+
+    different_time = deepcopy(group)
+    for field in ("event_time", "received_at", "available_at"):
+        different_time[1][field] = "2026-01-02T00:00:02Z"
+    timed = _strict_batches(
+        tmp_path / "different-time",
+        [_record_batch([initial]), _record_batch(different_time)],
+        key="different-time",
+    )
+    assert timed.snapshot is not None
+
+    single = _strict_batches(
+        tmp_path / "single-level",
+        [_record_batch([initial]), _record_batch(group[:1])],
+        key="single-level",
+    )
+    assert single.snapshot is not None
+
+    with pytest.raises(L2ReplayError, match="checkpoint hash mismatch"):
+        _strict_batches(
+            tmp_path / "final-mismatch",
+            [_record_batch([initial]), _record_batch(group)],
+            key="final-mismatch",
+            expected_l2_checkpoint_hashes={stream: {group[-1]["sequence"]: "0" * 64}},
+        )
+    _assert_no_snapshot(tmp_path / "final-mismatch")
+
+
+@pytest.mark.parametrize(
+    ("case", "mutate", "message"),
+    [
+        (
+            "previous-gap",
+            lambda records: records[1].update(previous_sequence=records[0]["previous_sequence"]),
+            "previous_sequence",
+        ),
+        (
+            "negative-quantity",
+            lambda records: records[1]["quantity"].update(units=-1),
+            "non-negative",
+        ),
+        (
+            "price-scale",
+            lambda records: records[1]["price"].update(scale=3),
+            "price scale changed",
+        ),
+        (
+            "pit",
+            lambda records: records[1].update(received_at="2026-01-02T00:00:00Z"),
+            "received_at must not be earlier",
+        ),
+        (
+            "final-cross",
+            lambda records: records[1]["price"].update(units=100_100),
+            "locked or crossed",
+        ),
+    ],
+)
+def test_encoded_atomic_group_negative_gates_publish_nothing(
+    tmp_path: Path,
+    case: str,
+    mutate: Callable[[list[dict[str, Any]]], Any],
+    message: str,
+) -> None:
+    initial = snapshot()
+    initial["sequence"] = 100 * BOOK_SEQUENCE_FACTOR
+    group = _encoded_delta_group(101, initial["sequence"])
+    mutate(group)
+    root = tmp_path / case
+    with pytest.raises(ValidationError, match=message):
+        _strict_batches(
+            root,
+            [_record_batch([initial]), _record_batch(group)],
+            key=case,
+        )
+    _assert_no_snapshot(root)
+
+
+def test_encoded_atomic_group_duplicate_claim_is_not_bypassed(tmp_path: Path) -> None:
+    initial = snapshot()
+    initial["sequence"] = 100 * BOOK_SEQUENCE_FACTOR
+    group = _encoded_delta_group(101, initial["sequence"])
+    group[1]["event_id"] = group[0]["event_id"]
+    with pytest.raises(ValidationError, match="duplicate claims"):
+        _strict_batches(
+            tmp_path,
+            [_record_batch([initial]), _record_batch(group)],
+            key="encoded-duplicate-claim",
+        )
+    _assert_no_snapshot(tmp_path)
 
 
 def test_mixed_l2_batch_uses_serial_semantics_and_checkpoint_contracts(tmp_path: Path) -> None:
