@@ -37,7 +37,7 @@ def crypto_context(provider: str) -> qdk.AdapterContext:
 
 
 def test_public_m2_api_and_version_are_exposed() -> None:
-    assert qdk.__version__ == version("quant-data-kit") == "0.6.1"
+    assert qdk.__version__ == version("quant-data-kit") == "0.7.0"
     for name in (
         "write_raw_bytes",
         "write_normalized_events",
@@ -55,7 +55,7 @@ def test_build_and_runtime_versions_share_one_authoritative_source() -> None:
     project = (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
     assert 'dynamic = ["version"]' in project
     assert 'version = { attr = "quant_data_kit._version.__version__" }' in project
-    assert '\nversion = "0.6.1"\n' not in project
+    assert '\nversion = "0.7.0"\n' not in project
 
 
 def test_raw_to_normalized_duckdb_l2_curated_chain_is_replayable(tmp_path: Path) -> None:

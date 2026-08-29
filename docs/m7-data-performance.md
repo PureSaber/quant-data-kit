@@ -38,19 +38,19 @@ can be rebuilt from immutable partitions; a changed file or manifest fails close
 
 ## 2026 exchange-feed boundary
 
-This release does not implement real network collectors. The following official
-feed semantics are deliberately not folded into the frozen normalized event
-contract:
+The frozen normalized event contract remains independent of network transports. The M7 public-feed
+collector implements the following admission semantics in`capture_v2`and bridges admitted records
+into that existing contract; it does not create a second Normalized schema:
 
 - OKX deprecated the JSON `checksum` for `books`, `books-l2-tbt`, and
   `books50-l2-tbt` on 2026-06-23. The retained field is zero and is not a current
-  integrity signal. A future live adapter must require TLS `wss` transport and
-  strict `seqId`/`prevSeqId` processing. Sources:
+  integrity signal. The collector requires TLS`wss`transport and strict
+  `seqId`/`prevSeqId`processing. Sources:
   [checksum deprecation](https://www.okx.com/en-us/help/okx-order-book-channels-checksum-field-deprecation)
   and [OKX API v5](https://www.okx.com/docs-v5).
 - An OKX no-change heartbeat can have empty `asks`/`bids` and
   `seqId == prevSeqId`. It is transport liveness, not a frozen `BookDelta`, and
-  must not enter the normalized writer. A maintenance reset with
+  does not enter the normalized writer. A maintenance reset with
   `seqId < prevSeqId` must terminate the current admission transaction, discard
   deltas until a fresh snapshot, and start a new normalization transaction.
   The current v2 event contract intentionally rejects both equal-sequence deltas
@@ -58,15 +58,17 @@ contract:
 - Binance USDⓈ-M local-book admission must first bridge
   `U <= lastUpdateId <= u`, then require each event's `pu` to equal the prior `u`.
   Quantities are absolute and zero means deletion. Binance documents that deleting
-  an absent local price can be normal. A future adapter must treat that raw event
-  as a measured no-op before emitting normalized deltas, because the current
+  an absent local price can be normal. The collector audits that raw event as a
+  measured no-op before emitting normalized deltas, because the
   frozen reconstructor rejects an absent-level delete. Source:
   [Binance USDⓈ-M local order book](https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/How-to-manage-a-local-order-book-correctly).
 - Existing OKX CRC32 fixture tests remain historical fixture-integrity tests only.
   They are not labeled as 2026 OKX market-data certification.
 
-These adapter policies require a serial contract review before real market-data
-certification. They are not reasons to weaken the normalized batch gates.
+The collector's exact scope, archive controls and safe CLI are documented in
+[`m7-crypto-l2-capture.md`](m7-crypto-l2-capture.md). These implementation tests do not establish
+continuous30-day evidence or real market-data certification, and they are not reasons to weaken
+the normalized batch gates.
 
 ## Performance gate
 

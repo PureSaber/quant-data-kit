@@ -18,6 +18,13 @@ CORE_THRESHOLDS = {
     "src/quant_data_kit/adapters_v2/binance.py": 90,
     "src/quant_data_kit/adapters_v2/okx.py": 90,
     "src/quant_data_kit/adapters_v2/cn_neutral.py": 90,
+    "src/quant_data_kit/capture_v2/models.py": 90,
+    "src/quant_data_kit/capture_v2/storage.py": 90,
+    "src/quant_data_kit/capture_v2/synchronizers.py": 90,
+    "src/quant_data_kit/capture_v2/epoch.py": 90,
+    "src/quant_data_kit/capture_v2/transport.py": 90,
+    "src/quant_data_kit/capture_v2/collector.py": 90,
+    "src/quant_data_kit/capture_v2/cli.py": 90,
 }
 ALL_SOURCE_THRESHOLD = 80
 
