@@ -1,0 +1,40 @@
+{
+  "schema_version": "puresaber.m7-cli-invocation-evidence@1.0.0",
+  "source_commit": "a4a5a16542a2c4c74edf8205b982c681248517a3",
+  "source_working_tree_dirty": false,
+  "config": {
+    "path": "H:\\Documents\\ChatGPT\\temp\\m7-capture-preflight-a4a5a16.json",
+    "sha256": "e5c898ff99ca93a3a42515a1606c13bdc4f69a7dd693d81816fc0a5fa880f3dd"
+  },
+  "invocations": [
+    {
+      "argv": [
+        ".\\.venv-m7-verify\\Scripts\\qdk-capture.exe",
+        "H:\\Documents\\ChatGPT\\temp\\m7-capture-preflight-a4a5a16.json",
+        "--mode",
+        "preflight"
+      ],
+      "exit_code": 2,
+      "run_id": "capture-15390565f9b349dd951bb7b8cca6212a",
+      "report_sha256": "721b7b76eff58d61eacb364c251f66fea6e026845f1af4f1aa9f982c35a8b697",
+      "status": "PAUSED_PREFLIGHT_FAILED",
+      "websocket_messages": 0,
+      "long_running_capture_started": false
+    },
+    {
+      "argv": [
+        ".\\.venv-m7-verify\\Scripts\\qdk-capture.exe",
+        "H:\\Documents\\ChatGPT\\temp\\m7-capture-preflight-a4a5a16.json",
+        "--mode",
+        "run",
+        "--confirm-long-running"
+      ],
+      "exit_code": 2,
+      "run_id": "capture-5e396eff726440b892118702d3c7bf8c",
+      "report_sha256": "d7292c6dc602c6b637ace07dbb24781d3a1198cb190d38f77b6efb087275c22f",
+      "status": "PAUSED_PREFLIGHT_FAILED",
+      "websocket_messages": 0,
+      "long_running_capture_started": false
+    }
+  ]
+}
