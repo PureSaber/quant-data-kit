@@ -56,8 +56,11 @@ existing strict Arrow-batch path, PIT checks, schemas, quarantine rules and Raw 
 finalize attempt persists an immutable`PREPARED`transaction before publishing a visible snapshot,
 then ends in a content-addressed`COMMITTED`receipt or`ABORTED`failure. Before any network startup,
 the coordinator anchors every journal to the frozen stream configuration, scans all journal
-parents, validates every transaction、terminal-state conflict、journal part、Raw reference、snapshot
-identity and path, and idempotently replays unresolved`PREPARED`or retryable`ABORTED`transactions.
+parents, enforces closed JSON fields, strict types and filename attempt binding for every terminal
+record, then recomputes partition rows, logical hashes, the available-time maximum and the final L2
+state from the immutable journal. A receipt that points to another individually valid snapshot is
+rejected before network startup. Unresolved`PREPARED`or retryable`ABORTED`transactions replay
+idempotently.
 A real spawned-process test terminates with`os._exit`after snapshot publication but before receipt
 publication and proves that a fresh process commits the transaction before any network runner is
 created. A transaction without a durable PREPARED identity blocks startup instead of being skipped.

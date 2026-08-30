@@ -37,7 +37,7 @@ def crypto_context(provider: str) -> qdk.AdapterContext:
 
 
 def test_public_m2_api_and_version_are_exposed() -> None:
-    assert qdk.__version__ == version("quant-data-kit") == "0.7.3"
+    assert qdk.__version__ == version("quant-data-kit") == "0.7.4"
     for name in (
         "write_raw_bytes",
         "write_normalized_events",

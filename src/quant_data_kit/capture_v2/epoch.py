@@ -15,6 +15,7 @@ from typing import Any
 
 import orjson
 import pyarrow as pa
+import pyarrow.parquet as pq
 
 from quant_data_kit import normalized_v3
 from quant_data_kit.capture_v2.models import canonical_json_bytes, utc_text
@@ -46,6 +47,95 @@ _CAPTURE_EVENT_SCHEMAS = {
     "book_delta": BOOK_DELTA_EVENT_SCHEMA_ID,
     "book_snapshot": BOOK_SNAPSHOT_EVENT_SCHEMA_ID,
 }
+_SHA256_HEX_LENGTH = 64
+_PREPARED_FIELDS = frozenset(
+    {
+        "schema_version",
+        "transaction_state",
+        "attempt",
+        "epoch_id",
+        "stream_id",
+        "provider",
+        "venue",
+        "created_at",
+        "records",
+        "raw_references",
+        "journal_parts",
+        "policy",
+        "prepared_sha256",
+    }
+)
+_RECEIPT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "transaction_state",
+        "prepared_sha256",
+        "epoch_id",
+        "stream_id",
+        "provider",
+        "venue",
+        "created_at",
+        "records",
+        "raw_segments",
+        "raw_references",
+        "journal_parts",
+        "policy",
+        "normalized_snapshot_id",
+        "accepted_rows",
+        "quarantined_rows",
+        "receipt_sha256",
+    }
+)
+_ABORT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "transaction_state",
+        "prepared_sha256",
+        "epoch_id",
+        "stream_id",
+        "provider",
+        "venue",
+        "created_at",
+        "reason",
+        "records",
+        "raw_references",
+        "journal_parts",
+        "policy",
+        "retryable",
+        "abort_sha256",
+    }
+)
+_FAILURE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "transaction_state",
+        "prepared_sha256",
+        "epoch_id",
+        "stream_id",
+        "provider",
+        "venue",
+        "created_at",
+        "attempt",
+        "exception",
+        "message",
+        "records",
+        "raw_references",
+        "journal_parts",
+        "policy",
+        "published_snapshot_id",
+        "accepted_rows",
+        "quarantined_rows",
+        "retryable_in_process",
+        "restart_recovery",
+        "failure_sha256",
+    }
+)
+_TERMINAL_FIELDS = {
+    "puresaber.normalized-epoch-receipt@1.3.0": _RECEIPT_FIELDS,
+    "puresaber.normalized-epoch-abort@1.3.0": _ABORT_FIELDS,
+    "puresaber.normalized-epoch-finalize-failure@1.2.0": _FAILURE_FIELDS,
+}
+_RESTART_RECOVERY = "reconcile PREPARED/ABORTED transaction idempotently"
 
 
 @dataclass(frozen=True)
@@ -116,6 +206,8 @@ def _load_hashed_json(
     *,
     hash_field: str,
     description: str,
+    filename_prefix: str | None = None,
+    sequence_field: str | None = None,
 ) -> dict[str, Any]:
     checked = _validate_safe_path(hot_root, path, allow_missing=False)
     try:
@@ -125,12 +217,55 @@ def _load_hashed_json(
     if not isinstance(payload, dict):
         raise ValidationError(f"{description} must be a JSON object")
     digest = payload.pop(hash_field, None)
+    if not _is_sha256_hex(digest):
+        raise ValidationError(f"{description} hash changed")
     if digest != hashlib.sha256(canonical_json_bytes(payload)).hexdigest():
         raise ValidationError(f"{description} hash changed")
-    if f"sha256-{digest}" not in checked.name:
+    if filename_prefix is None:
+        expected_name = None
+    elif sequence_field is None:
+        expected_name = f"{filename_prefix}sha256-{digest}.json"
+    else:
+        sequence = payload.get(sequence_field)
+        expected_name = (
+            f"{filename_prefix}{sequence:04d}-sha256-{digest}.json"
+            if _is_positive_int(sequence)
+            else None
+        )
+    if expected_name is not None and checked.name != expected_name:
         raise ValidationError(f"{description} filename hash changed")
     payload[hash_field] = digest
     return payload
+
+
+def _is_positive_int(value: object) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and value > 0
+
+
+def _is_nonnegative_int(value: object) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and value >= 0
+
+
+def _is_sha256_hex(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == _SHA256_HEX_LENGTH
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _is_snapshot_id(value: object) -> bool:
+    return isinstance(value, str) and value.startswith("sha256-") and _is_sha256_hex(value[7:])
+
+
+def _require_closed_fields(
+    payload: Mapping[str, Any], expected: frozenset[str], description: str
+) -> None:
+    actual = frozenset(payload)
+    if actual != expected:
+        missing = sorted(expected.difference(actual))
+        unknown = sorted(actual.difference(expected))
+        raise ValidationError(f"{description} fields changed: missing={missing}, unknown={unknown}")
 
 
 def _load_epoch_parts(hot_root: Path, root: Path) -> tuple[EpochPart, ...]:
@@ -202,6 +337,11 @@ def _validate_prepared_binding(
     policy: StoragePolicy,
     actual_parts: tuple[EpochPart, ...],
 ) -> tuple[RawObjectReference, ...]:
+    _require_closed_fields(
+        payload,
+        _PREPARED_FIELDS,
+        "Normalized epoch PREPARED transaction",
+    )
     expected_parts = [asdict(item) for item in actual_parts]
     attempt = payload.get("attempt")
     if (
@@ -212,9 +352,8 @@ def _validate_prepared_binding(
         or payload.get("provider") != provider
         or payload.get("venue") != venue
         or payload.get("policy") != asdict(policy)
-        or isinstance(attempt, bool)
-        or not isinstance(attempt, int)
-        or attempt < 1
+        or not _is_positive_int(attempt)
+        or not _is_sha256_hex(payload.get("prepared_sha256"))
     ):
         raise ValidationError("Normalized epoch PREPARED transaction identity changed")
     _parse_created_at(payload.get("created_at"), "Normalized epoch PREPARED transaction")
@@ -248,6 +387,10 @@ def _validate_terminal_binding(
     schema_version: str,
     description: str,
 ) -> tuple[RawObjectReference, ...]:
+    expected_fields = _TERMINAL_FIELDS.get(schema_version)
+    if expected_fields is None:
+        raise ValidationError(f"{description} schema version is unsupported")
+    _require_closed_fields(payload, expected_fields, description)
     expected_identity = {
         "epoch_id": epoch_id,
         "stream_id": stream_id,
@@ -261,6 +404,46 @@ def _validate_terminal_binding(
         payload.get(key) != value for key, value in expected_identity.items()
     ):
         raise ValidationError(f"{description} identity changed")
+    prepared_sha256 = payload.get("prepared_sha256")
+    if prepared_sha256 is not None and not _is_sha256_hex(prepared_sha256):
+        raise ValidationError(f"{description} PREPARED hash is malformed")
+    if schema_version == "puresaber.normalized-epoch-receipt@1.3.0":
+        if (
+            payload.get("transaction_state") != "COMMITTED"
+            or not _is_sha256_hex(prepared_sha256)
+            or not _is_sha256_hex(payload.get("receipt_sha256"))
+        ):
+            raise ValidationError(f"{description} identity changed")
+    elif schema_version == "puresaber.normalized-epoch-abort@1.3.0":
+        if (
+            payload.get("transaction_state") != "ABORTED"
+            or payload.get("retryable") is not False
+            or not isinstance(payload.get("reason"), str)
+            or not payload.get("reason")
+            or not _is_sha256_hex(payload.get("abort_sha256"))
+        ):
+            raise ValidationError(f"{description} identity changed")
+    else:
+        if (
+            payload.get("transaction_state") != "ABORTED"
+            or payload.get("retryable_in_process") is not True
+            or not _is_positive_int(payload.get("attempt"))
+            or not isinstance(payload.get("exception"), str)
+            or not payload.get("exception")
+            or not isinstance(payload.get("message"), str)
+            or payload.get("restart_recovery") != _RESTART_RECOVERY
+            or not _is_sha256_hex(payload.get("failure_sha256"))
+        ):
+            raise ValidationError(f"{description} is not recoverable")
+        published_snapshot_id = payload.get("published_snapshot_id")
+        if published_snapshot_id is not None and not _is_snapshot_id(published_snapshot_id):
+            raise ValidationError(f"{description} snapshot identity is malformed")
+        row_state = (payload.get("accepted_rows"), payload.get("quarantined_rows"))
+        if published_snapshot_id is None:
+            if row_state != (None, None):
+                raise ValidationError(f"{description} snapshot state changed")
+        elif not all(_is_nonnegative_int(value) for value in row_state):
+            raise ValidationError(f"{description} snapshot state changed")
     _parse_created_at(payload.get("created_at"), description)
     records = sum(item.rows for item in actual_parts)
     recorded = payload.get("records")
@@ -280,12 +463,143 @@ def _validate_terminal_binding(
     return references
 
 
+class _CanonicalRowsDigest:
+    def __init__(self) -> None:
+        self._digest = hashlib.sha256(b"[")
+        self._has_rows = False
+
+    def update(self, rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        encoded = canonical_json_bytes(rows)
+        if encoded[:1] != b"[" or encoded[-1:] != b"]":
+            raise ValidationError("Normalized epoch canonical row encoding changed")
+        if self._has_rows:
+            self._digest.update(b",")
+        self._digest.update(encoded[1:-1])
+        self._has_rows = True
+
+    def hexdigest(self) -> str:
+        digest = self._digest.copy()
+        digest.update(b"]")
+        return digest.hexdigest()
+
+
+@dataclass
+class _ExpectedPartitionBinding:
+    rows: int
+    digest: _CanonicalRowsDigest
+
+
+def _expected_snapshot_binding(
+    hot_root: Path,
+    journal_root: Path,
+    parts: tuple[EpochPart, ...],
+    *,
+    provider: str,
+) -> tuple[
+    dict[tuple[str, str, str, str], tuple[int, str]],
+    str | None,
+    tuple[tuple[str, str, str, int, str], ...],
+]:
+    expected: dict[tuple[str, str, str, str], _ExpectedPartitionBinding] = {}
+    last_sequences: dict[tuple[str, str, str, str], int] = {}
+    books: dict[tuple[str, str, str], Any] = {}
+    reached_l2: dict[tuple[str, str, str], set[int]] = {}
+    latest_available: datetime | None = None
+    input_rows = 0
+    source_batches = _iter_epoch_record_batches(
+        journal_root,
+        parts,
+        trusted_root=hot_root,
+    )
+    for batch in normalized_v3._iter_atomic_l2_record_batches(source_batches):
+        identity, _first_sort_key, _last_sort_key = normalized_v3._validate_record_batch(
+            batch,
+            provider=provider,
+            input_offset=input_rows,
+            last_sequences=last_sequences,
+            books=books,
+            expected_l2={},
+            reached_l2=reached_l2,
+        )
+        key = (
+            identity.schema_id,
+            identity.event_type,
+            identity.trading_date,
+            identity.instrument_id,
+        )
+        binding = expected.get(key)
+        if binding is None:
+            binding = _ExpectedPartitionBinding(0, _CanonicalRowsDigest())
+            expected[key] = binding
+        binding.digest.update(normalized_v3._logical_batch_rows(batch, identity.schema_id))
+        binding.rows += batch.num_rows
+        input_rows += batch.num_rows
+        if latest_available is None or identity.latest_available > latest_available:
+            latest_available = identity.latest_available
+    partitions = {
+        key: (binding.rows, binding.digest.hexdigest()) for key, binding in expected.items()
+    }
+    checkpoints = tuple(
+        (
+            stream_key[0],
+            stream_key[1],
+            stream_key[2],
+            int(book.sequence),
+            book.checkpoint().state_sha256,
+        )
+        for stream_key, book in sorted(books.items())
+        if book.sequence is not None
+    )
+    created_at = (
+        utc_text(latest_available, "available_at") if latest_available is not None else None
+    )
+    return partitions, created_at, checkpoints
+
+
+def _actual_snapshot_partitions(
+    hot_root: Path,
+    snapshot_id: str,
+    snapshot: Any,
+) -> dict[tuple[str, str, str, str], tuple[int, str]]:
+    actual: dict[tuple[str, str, str, str], tuple[int, str]] = {}
+    snapshot_root = Path(hot_root) / "normalized" / "snapshots" / snapshot_id
+    for partition in snapshot.partitions:
+        path = _validate_safe_path(
+            hot_root,
+            snapshot_root / partition.relative_path,
+            allow_missing=False,
+        )
+        digest = _CanonicalRowsDigest()
+        rows = 0
+        parquet = pq.ParquetFile(path)
+        try:
+            for batch in parquet.iter_batches(batch_size=_ARROW_BATCH_ROWS):
+                digest.update(normalized_v3._logical_batch_rows(batch, partition.schema_id))
+                rows += batch.num_rows
+        finally:
+            parquet.close()
+        key = (
+            partition.schema_id,
+            partition.event_type,
+            partition.trading_date,
+            partition.instrument_id,
+        )
+        if key in actual:
+            raise ValidationError("Normalized snapshot contains duplicate logical partitions")
+        actual[key] = (rows, digest.hexdigest())
+    return actual
+
+
 def _validate_snapshot_binding(
     hot_root: Path,
     payload: Mapping[str, Any],
     *,
     references: tuple[RawObjectReference, ...],
     description: str,
+    journal_root: Path | None = None,
+    parts: tuple[EpochPart, ...] | None = None,
 ) -> None:
     values = tuple(payload.get(key) for key in ("records", "accepted_rows", "quarantined_rows"))
     if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
@@ -298,7 +612,7 @@ def _validate_snapshot_binding(
         if accepted:
             raise ValidationError(f"{description} snapshot identity is missing")
         return
-    if not isinstance(snapshot_id, str):
+    if not _is_snapshot_id(snapshot_id):
         raise ValidationError(f"{description} snapshot identity is malformed")
     snapshot = normalized_v3.load_normalized_snapshot_v3(hot_root, snapshot_id)
     if (
@@ -308,6 +622,31 @@ def _validate_snapshot_binding(
         or snapshot.upstream_raw_references != references
     ):
         raise ValidationError(f"{description} snapshot identity changed")
+    if journal_root is None or parts is None:
+        raise ValidationError(f"{description} lacks its journal content binding")
+    expected_partitions, expected_created_at, expected_checkpoints = _expected_snapshot_binding(
+        hot_root,
+        journal_root,
+        parts,
+        provider=str(payload.get("provider")),
+    )
+    actual_partitions = _actual_snapshot_partitions(hot_root, snapshot_id, snapshot)
+    actual_checkpoints = tuple(
+        (
+            item.source,
+            item.instrument_id,
+            item.session_id,
+            item.sequence,
+            item.state_sha256,
+        )
+        for item in snapshot.l2_checkpoints
+    )
+    if (
+        expected_partitions != actual_partitions
+        or expected_created_at != snapshot.created_at
+        or expected_checkpoints != actual_checkpoints
+    ):
+        raise ValidationError(f"{description} does not match its journal content")
 
 
 def _open_journal_file(hot_root: Path, path: Path, mode: str):
@@ -480,6 +819,8 @@ class NormalizedEpochJournal:
                 path,
                 hash_field="prepared_sha256",
                 description="Normalized epoch PREPARED transaction",
+                filename_prefix="transaction-prepared-",
+                sequence_field="attempt",
             )
             for path in prepared_paths
         )
@@ -503,6 +844,7 @@ class NormalizedEpochJournal:
                 path,
                 hash_field="receipt_sha256",
                 description="Normalized epoch receipt",
+                filename_prefix="receipt-",
             )
             for path in receipts
         )
@@ -541,6 +883,8 @@ class NormalizedEpochJournal:
                 item,
                 references=references,
                 description="Normalized epoch COMMITTED receipt",
+                journal_root=root,
+                parts=actual_parts,
             )
             terminal_prepared.append(str(item["prepared_sha256"]))
         abort_payloads = tuple(
@@ -549,6 +893,7 @@ class NormalizedEpochJournal:
                 path,
                 hash_field="abort_sha256",
                 description="Normalized epoch explicit ABORTED transaction",
+                filename_prefix="aborted-",
             )
             for path in explicit_aborts
         )
@@ -593,6 +938,8 @@ class NormalizedEpochJournal:
                 path,
                 hash_field="failure_sha256",
                 description="Normalized epoch failure record",
+                filename_prefix="finalize-failure-",
+                sequence_field="attempt",
             )
             for path in failures
         )
@@ -635,6 +982,8 @@ class NormalizedEpochJournal:
                     },
                     references=references,
                     description="Normalized epoch failure record",
+                    journal_root=root,
+                    parts=actual_parts,
                 )
             elif item.get("accepted_rows") is not None or item.get("quarantined_rows") is not None:
                 raise ValidationError("Normalized epoch failure snapshot state changed")
@@ -762,6 +1111,8 @@ class NormalizedEpochJournal:
                         path,
                         hash_field="prepared_sha256",
                         description="Normalized epoch PREPARED transaction",
+                        filename_prefix="transaction-prepared-",
+                        sequence_field="attempt",
                     )
                     for path in prepared_paths
                 )
@@ -792,6 +1143,7 @@ class NormalizedEpochJournal:
                         path,
                         hash_field="receipt_sha256",
                         description="Normalized epoch receipt",
+                        filename_prefix="receipt-",
                     )
                     prepared = prepared_by_hash.get(str(item.get("prepared_sha256")))
                     if (
@@ -828,6 +1180,8 @@ class NormalizedEpochJournal:
                         item,
                         references=references,
                         description="Normalized epoch COMMITTED receipt",
+                        journal_root=epoch_root,
+                        parts=actual_parts,
                     )
                     receipt_payloads.append(item)
                     terminal_prepared.append(str(item["prepared_sha256"]))
@@ -839,6 +1193,7 @@ class NormalizedEpochJournal:
                         path,
                         hash_field="abort_sha256",
                         description="Normalized epoch explicit ABORTED transaction",
+                        filename_prefix="aborted-",
                     )
                     prepared_sha256 = item.get("prepared_sha256")
                     prepared = (
@@ -881,6 +1236,8 @@ class NormalizedEpochJournal:
                         path,
                         hash_field="failure_sha256",
                         description="Normalized epoch failure record",
+                        filename_prefix="finalize-failure-",
+                        sequence_field="attempt",
                     )
                     prepared_sha256 = item.get("prepared_sha256")
                     prepared = (
@@ -924,6 +1281,8 @@ class NormalizedEpochJournal:
                             },
                             references=references,
                             description="Normalized epoch failure record",
+                            journal_root=epoch_root,
+                            parts=actual_parts,
                         )
                     elif (
                         item.get("accepted_rows") is not None
@@ -1074,6 +1433,8 @@ class NormalizedEpochJournal:
             path,
             hash_field="prepared_sha256",
             description="Normalized epoch PREPARED transaction",
+            filename_prefix="transaction-prepared-",
+            sequence_field="attempt",
         )
         if reloaded != payload:
             raise ValidationError("Normalized epoch PREPARED transaction reload mismatch")
@@ -1114,6 +1475,7 @@ class NormalizedEpochJournal:
             receipt_path,
             hash_field="receipt_sha256",
             description="Normalized epoch receipt",
+            filename_prefix="receipt-",
         )
         if reloaded != payload:
             raise ValidationError("Normalized epoch receipt reload mismatch")
@@ -1240,7 +1602,7 @@ class NormalizedEpochJournal:
             "accepted_rows": result.accepted_rows if result is not None else None,
             "quarantined_rows": result.quarantined_rows if result is not None else None,
             "retryable_in_process": True,
-            "restart_recovery": "reconcile PREPARED/ABORTED transaction idempotently",
+            "restart_recovery": _RESTART_RECOVERY,
         }
         digest = hashlib.sha256(canonical_json_bytes(identity)).hexdigest()
         path = self.root / (f"finalize-failure-{self._finalize_failures:04d}-sha256-{digest}.json")
