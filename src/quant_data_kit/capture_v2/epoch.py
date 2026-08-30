@@ -29,6 +29,7 @@ from quant_data_kit.capture_v2.storage import (
 from quant_data_kit.data_lake import (
     RawObjectReference,
     StoragePolicy,
+    validate_raw_reference,
     write_normalized_batches,
 )
 from quant_data_kit.exceptions import ValidationError
@@ -130,6 +131,183 @@ def _load_hashed_json(
         raise ValidationError(f"{description} filename hash changed")
     payload[hash_field] = digest
     return payload
+
+
+def _load_epoch_parts(hot_root: Path, root: Path) -> tuple[EpochPart, ...]:
+    parts: list[EpochPart] = []
+    for path in _validated_glob(hot_root, root, "part-*-sha256-*.ndjson"):
+        digest = _sha256_file(path, trusted_root=hot_root)
+        if f"sha256-{digest}.ndjson" not in path.name:
+            raise ValidationError(f"Normalized recovery part hash changed: {path}")
+        with _open_journal_file(hot_root, path, "rb") as stream:
+            rows = sum(1 for line in stream if line.strip())
+        parts.append(EpochPart(path.name, rows, digest, path.stat().st_size))
+    return tuple(parts)
+
+
+def _parse_created_at(value: object, description: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        normalized = utc_text(parsed, f"{description} created_at")
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(f"{description} created_at is malformed") from exc
+    if normalized != value:
+        raise ValidationError(f"{description} created_at is not canonical UTC")
+    return normalized
+
+
+def _validate_raw_references(
+    hot_root: Path,
+    value: object,
+    *,
+    description: str,
+) -> tuple[RawObjectReference, ...]:
+    if not isinstance(value, list) or not all(isinstance(item, Mapping) for item in value):
+        raise ValidationError(f"{description} Raw lineage is malformed")
+    try:
+        references = tuple(RawObjectReference(**item) for item in value)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(f"{description} Raw lineage is malformed") from exc
+    if any(
+        not all(
+            isinstance(field, str)
+            for field in (
+                reference.source,
+                reference.collection_date,
+                reference.idempotency_key,
+                reference.object_id,
+                reference.content_sha256,
+                reference.manifest_sha256,
+            )
+        )
+        for reference in references
+    ):
+        raise ValidationError(f"{description} Raw lineage is malformed")
+    hashes = [item.manifest_sha256 for item in references]
+    if len(hashes) != len(set(hashes)):
+        raise ValidationError(f"{description} Raw lineage contains duplicates")
+    for reference in references:
+        validate_raw_reference(hot_root, reference, allow_archived=True)
+    return references
+
+
+def _validate_prepared_binding(
+    hot_root: Path,
+    payload: Mapping[str, Any],
+    *,
+    epoch_id: str,
+    stream_id: str,
+    provider: str,
+    venue: str,
+    policy: StoragePolicy,
+    actual_parts: tuple[EpochPart, ...],
+) -> tuple[RawObjectReference, ...]:
+    expected_parts = [asdict(item) for item in actual_parts]
+    attempt = payload.get("attempt")
+    if (
+        payload.get("schema_version") != "puresaber.normalized-epoch-transaction@1.0.0"
+        or payload.get("transaction_state") != "PREPARED"
+        or payload.get("epoch_id") != epoch_id
+        or payload.get("stream_id") != stream_id
+        or payload.get("provider") != provider
+        or payload.get("venue") != venue
+        or payload.get("policy") != asdict(policy)
+        or isinstance(attempt, bool)
+        or not isinstance(attempt, int)
+        or attempt < 1
+    ):
+        raise ValidationError("Normalized epoch PREPARED transaction identity changed")
+    _parse_created_at(payload.get("created_at"), "Normalized epoch PREPARED transaction")
+    if payload.get("journal_parts") != expected_parts:
+        raise ValidationError("Normalized recovery journal part manifest changed")
+    records = sum(item.rows for item in actual_parts)
+    recorded = payload.get("records")
+    if isinstance(recorded, bool) or not isinstance(recorded, int) or recorded != records:
+        raise ValidationError("Normalized recovery record count changed")
+    references = _validate_raw_references(
+        hot_root,
+        payload.get("raw_references"),
+        description="Normalized epoch PREPARED transaction",
+    )
+    if records and not references:
+        raise ValidationError("Normalized epoch records require Raw segment lineage")
+    return references
+
+
+def _validate_terminal_binding(
+    hot_root: Path,
+    payload: Mapping[str, Any],
+    *,
+    prepared: Mapping[str, Any] | None,
+    epoch_id: str,
+    stream_id: str,
+    provider: str,
+    venue: str,
+    policy: StoragePolicy,
+    actual_parts: tuple[EpochPart, ...],
+    schema_version: str,
+    description: str,
+) -> tuple[RawObjectReference, ...]:
+    expected_identity = {
+        "epoch_id": epoch_id,
+        "stream_id": stream_id,
+        "provider": provider,
+        "venue": venue,
+        "policy": asdict(policy),
+    }
+    if prepared is not None:
+        expected_identity["created_at"] = prepared.get("created_at")
+    if payload.get("schema_version") != schema_version or any(
+        payload.get(key) != value for key, value in expected_identity.items()
+    ):
+        raise ValidationError(f"{description} identity changed")
+    _parse_created_at(payload.get("created_at"), description)
+    records = sum(item.rows for item in actual_parts)
+    recorded = payload.get("records")
+    if isinstance(recorded, bool) or not isinstance(recorded, int) or recorded != records:
+        raise ValidationError("Normalized recovery record count changed")
+    if payload.get("journal_parts") != [asdict(item) for item in actual_parts]:
+        raise ValidationError("Normalized recovery journal part manifest changed")
+    if prepared is not None and payload.get("raw_references") != prepared.get("raw_references"):
+        raise ValidationError(f"{description} Raw lineage changed")
+    references = _validate_raw_references(
+        hot_root,
+        payload.get("raw_references"),
+        description=description,
+    )
+    if records and not references:
+        raise ValidationError("Normalized epoch records require Raw segment lineage")
+    return references
+
+
+def _validate_snapshot_binding(
+    hot_root: Path,
+    payload: Mapping[str, Any],
+    *,
+    references: tuple[RawObjectReference, ...],
+    description: str,
+) -> None:
+    values = tuple(payload.get(key) for key in ("records", "accepted_rows", "quarantined_rows"))
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
+        raise ValidationError(f"{description} row counts are malformed")
+    records, accepted, quarantined = values
+    if min(records, accepted, quarantined) < 0 or accepted + quarantined != records:
+        raise ValidationError(f"{description} row counts changed")
+    snapshot_id = payload.get("normalized_snapshot_id")
+    if snapshot_id is None:
+        if accepted:
+            raise ValidationError(f"{description} snapshot identity is missing")
+        return
+    if not isinstance(snapshot_id, str):
+        raise ValidationError(f"{description} snapshot identity is malformed")
+    snapshot = normalized_v3.load_normalized_snapshot_v3(hot_root, snapshot_id)
+    if (
+        snapshot.provider != payload.get("provider")
+        or snapshot.venue != payload.get("venue")
+        or snapshot.rows != accepted
+        or snapshot.upstream_raw_references != references
+    ):
+        raise ValidationError(f"{description} snapshot identity changed")
 
 
 def _open_journal_file(hot_root: Path, path: Path, mode: str):
@@ -295,6 +473,7 @@ class NormalizedEpochJournal:
         explicit_aborts = _validated_glob(hot_root, root, "aborted-sha256-*.json")
         failures = _validated_glob(hot_root, root, "finalize-failure-*.json")
         prepared_paths = _validated_glob(hot_root, root, "transaction-prepared-*.json")
+        actual_parts = _load_epoch_parts(hot_root, root)
         prepared_payloads = tuple(
             _load_hashed_json(
                 hot_root,
@@ -305,17 +484,19 @@ class NormalizedEpochJournal:
             for path in prepared_paths
         )
         for item in prepared_payloads:
-            if (
-                item.get("transaction_state") != "PREPARED"
-                or item.get("epoch_id") != epoch_id
-                or item.get("stream_id") != stream_id
-                or item.get("provider") != provider
-                or item.get("venue") != venue
-                or item.get("policy") != asdict(policy)
-                or int(item.get("attempt", 0)) < 1
-            ):
-                raise ValidationError("Normalized epoch PREPARED transaction identity changed")
+            _validate_prepared_binding(
+                hot_root,
+                item,
+                epoch_id=epoch_id,
+                stream_id=stream_id,
+                provider=provider,
+                venue=venue,
+                policy=policy,
+                actual_parts=actual_parts,
+            )
         prepared_by_hash = {str(item["prepared_sha256"]): item for item in prepared_payloads}
+        if len(prepared_by_hash) != len(prepared_payloads):
+            raise ValidationError("Normalized epoch contains duplicate PREPARED transactions")
         receipt_payloads = tuple(
             _load_hashed_json(
                 hot_root,
@@ -325,14 +506,43 @@ class NormalizedEpochJournal:
             )
             for path in receipts
         )
+        terminal_prepared: list[str] = []
         for item in receipt_payloads:
+            prepared = prepared_by_hash.get(str(item.get("prepared_sha256")))
             if (
                 item.get("transaction_state") != "COMMITTED"
                 or item.get("epoch_id") != epoch_id
                 or item.get("stream_id") != stream_id
-                or str(item.get("prepared_sha256")) not in prepared_by_hash
+                or prepared is None
             ):
                 raise ValidationError("Normalized epoch COMMITTED receipt identity changed")
+            references = _validate_terminal_binding(
+                hot_root,
+                item,
+                prepared=prepared,
+                epoch_id=epoch_id,
+                stream_id=stream_id,
+                provider=provider,
+                venue=venue,
+                policy=policy,
+                actual_parts=actual_parts,
+                schema_version="puresaber.normalized-epoch-receipt@1.3.0",
+                description="Normalized epoch COMMITTED receipt",
+            )
+            raw_segments = item.get("raw_segments")
+            if (
+                isinstance(raw_segments, bool)
+                or not isinstance(raw_segments, int)
+                or raw_segments != len(references)
+            ):
+                raise ValidationError("Normalized epoch COMMITTED receipt Raw count changed")
+            _validate_snapshot_binding(
+                hot_root,
+                item,
+                references=references,
+                description="Normalized epoch COMMITTED receipt",
+            )
+            terminal_prepared.append(str(item["prepared_sha256"]))
         abort_payloads = tuple(
             _load_hashed_json(
                 hot_root,
@@ -343,18 +553,40 @@ class NormalizedEpochJournal:
             for path in explicit_aborts
         )
         for item in abort_payloads:
+            prepared_sha256 = item.get("prepared_sha256")
+            prepared = (
+                prepared_by_hash.get(str(prepared_sha256)) if prepared_sha256 is not None else None
+            )
             if (
                 item.get("transaction_state") != "ABORTED"
                 or item.get("epoch_id") != epoch_id
                 or item.get("stream_id") != stream_id
-                or (
-                    item.get("prepared_sha256") is not None
-                    and str(item.get("prepared_sha256")) not in prepared_by_hash
-                )
+                or (prepared_sha256 is not None and prepared is None)
+                or item.get("retryable") is not False
             ):
                 raise ValidationError("Normalized epoch explicit ABORTED identity changed")
-        if receipts or explicit_aborts:
-            raise ValidationError("Normalized epoch is not a retryable failed finalize")
+            _validate_terminal_binding(
+                hot_root,
+                item,
+                prepared=prepared,
+                epoch_id=epoch_id,
+                stream_id=stream_id,
+                provider=provider,
+                venue=venue,
+                policy=policy,
+                actual_parts=actual_parts,
+                schema_version="puresaber.normalized-epoch-abort@1.3.0",
+                description="Normalized epoch explicit ABORTED transaction",
+            )
+            terminal_prepared.append(
+                str(prepared_sha256) if prepared_sha256 is not None else "ABORTED_WITHOUT_PREPARED"
+            )
+        if (
+            len(receipt_payloads) > 1
+            or len(abort_payloads) > 1
+            or (receipt_payloads and abort_payloads)
+        ):
+            raise ValidationError("Normalized epoch contains conflicting terminal transactions")
         failure_payloads = tuple(
             _load_hashed_json(
                 hot_root,
@@ -365,25 +597,61 @@ class NormalizedEpochJournal:
             for path in failures
         )
         for item in failure_payloads:
-            if item.get("stream_id") != stream_id or not item.get("retryable_in_process"):
-                raise ValidationError("Normalized epoch failure record is not recoverable")
             prepared_sha256 = item.get("prepared_sha256")
-            if not prepared_sha256:
-                continue
-            referenced = prepared_by_hash.get(str(prepared_sha256))
-            if referenced is None:
+            prepared = (
+                prepared_by_hash.get(str(prepared_sha256)) if prepared_sha256 is not None else None
+            )
+            if prepared_sha256 is not None and prepared is None:
                 raise ValidationError("Normalized epoch failure transaction identity changed")
-            if int(item.get("records", -1)) != int(referenced.get("records", -2)):
-                raise ValidationError("Normalized recovery record count changed")
-            if item.get("raw_references", []) != referenced.get("raw_references", []):
-                raise ValidationError("Normalized epoch failure Raw lineage changed")
-        terminal_prepared = {
+            if (
+                item.get("transaction_state") != "ABORTED"
+                or item.get("epoch_id") != epoch_id
+                or item.get("stream_id") != stream_id
+                or item.get("retryable_in_process") is not True
+                or isinstance(item.get("attempt"), bool)
+                or not isinstance(item.get("attempt"), int)
+                or item.get("attempt", 0) < 1
+            ):
+                raise ValidationError("Normalized epoch failure record is not recoverable")
+            references = _validate_terminal_binding(
+                hot_root,
+                item,
+                prepared=prepared,
+                epoch_id=epoch_id,
+                stream_id=stream_id,
+                provider=provider,
+                venue=venue,
+                policy=policy,
+                actual_parts=actual_parts,
+                schema_version="puresaber.normalized-epoch-finalize-failure@1.2.0",
+                description="Normalized epoch failure record",
+            )
+            if item.get("published_snapshot_id") is not None:
+                _validate_snapshot_binding(
+                    hot_root,
+                    {
+                        **item,
+                        "normalized_snapshot_id": item.get("published_snapshot_id"),
+                    },
+                    references=references,
+                    description="Normalized epoch failure record",
+                )
+            elif item.get("accepted_rows") is not None or item.get("quarantined_rows") is not None:
+                raise ValidationError("Normalized epoch failure snapshot state changed")
+            terminal_prepared.append(
+                str(prepared_sha256) if prepared_sha256 is not None else "FAILURE_WITHOUT_PREPARED"
+            )
+        if len(terminal_prepared) != len(set(terminal_prepared)):
+            raise ValidationError("Normalized epoch contains conflicting terminal transactions")
+        if receipts or explicit_aborts:
+            raise ValidationError("Normalized epoch is not a retryable failed finalize")
+        failed_prepared = {
             str(item["prepared_sha256"]) for item in failure_payloads if item.get("prepared_sha256")
         }
         pending = tuple(
             item
             for item in prepared_payloads
-            if str(item["prepared_sha256"]) not in terminal_prepared
+            if str(item["prepared_sha256"]) not in failed_prepared
         )
         if len(pending) > 1:
             raise ValidationError("Normalized epoch contains multiple pending transactions")
@@ -394,18 +662,7 @@ class NormalizedEpochJournal:
             pending[0] if pending else prepared_payloads[-1] if prepared_payloads else None
         )
         if transaction is None:
-            # Legacy failure records did not persist PREPARED. Preserve manual recovery support.
-            transaction = {
-                "epoch_id": epoch_id,
-                "stream_id": stream_id,
-                "provider": provider,
-                "venue": venue,
-                "records": failure.get("records", -1),
-                "raw_references": failure.get("raw_references", []),
-                "journal_parts": None,
-                "policy": asdict(policy),
-                "attempt": len(failure_payloads),
-            }
+            raise ValidationError("Normalized epoch failure has no durable PREPARED transaction")
         self = cls.__new__(cls)
         self.hot_root = hot_root
         self.epoch_id = epoch_id
@@ -421,24 +678,20 @@ class NormalizedEpochJournal:
         self.monotonic = monotonic
         self.normalization_executor = normalization_executor
         self.root = _validate_safe_path(hot_root, root, allow_missing=False)
-        self._parts = []
-        self._records = 0
-        for path in _validated_glob(hot_root, root, "part-*-sha256-*.ndjson"):
-            digest = _sha256_file(path, trusted_root=hot_root)
-            if f"sha256-{digest}.ndjson" not in path.name:
-                raise ValidationError(f"Normalized recovery part hash changed: {path}")
-            with _open_journal_file(hot_root, path, "rb") as stream:
-                rows = sum(1 for line in stream if line.strip())
-            self._parts.append(EpochPart(path.name, rows, digest, path.stat().st_size))
-            self._records += rows
-        self._raw_references = [
-            RawObjectReference(**item) for item in transaction.get("raw_references", [])
-        ]
+        self._parts = list(actual_parts)
+        self._records = sum(item.rows for item in actual_parts)
+        self._raw_references = list(
+            _validate_raw_references(
+                hot_root,
+                transaction.get("raw_references"),
+                description="Normalized epoch recovery transaction",
+            )
+        )
         self._raw_manifest_hashes = {item.manifest_sha256 for item in self._raw_references}
         if int(transaction.get("records", -1)) != self._records:
             raise ValidationError("Normalized recovery record count changed")
         expected_parts = transaction.get("journal_parts")
-        if expected_parts is not None and expected_parts != [asdict(item) for item in self._parts]:
+        if expected_parts != [asdict(item) for item in self._parts]:
             raise ValidationError("Normalized recovery journal part manifest changed")
         self._open_path = root / "part-open.ndjson"
         _validate_safe_path(hot_root, self._open_path, allow_missing=True)
@@ -465,6 +718,7 @@ class NormalizedEpochJournal:
         cls,
         hot_root: Path,
         *,
+        expected_streams: Mapping[str, tuple[str, str]],
         storage_guard: CaptureStorageGuard,
         policy: StoragePolicy = _DEFAULT_POLICY,
         normalization_executor: Executor | None = None,
@@ -480,9 +734,25 @@ class NormalizedEpochJournal:
         for stream_root in _validated_glob(hot_root, base, "stream=*"):
             if not stream_root.is_dir():
                 raise ValidationError("Normalized epoch stream journal is not a directory")
+            stream_id = stream_root.name.removeprefix("stream=")
+            identity = expected_streams.get(stream_id)
+            if identity is None or len(identity) != 2:
+                raise ValidationError(
+                    "Normalized epoch stream lacks an independent identity anchor"
+                )
+            provider, venue = identity
             for epoch_root in _validated_glob(hot_root, stream_root, "epoch=*"):
                 if not epoch_root.is_dir():
                     raise ValidationError("Normalized epoch journal is not a directory")
+                epoch_id = epoch_root.name.removeprefix("epoch=")
+                actual_parts = _load_epoch_parts(hot_root, epoch_root)
+                open_part = epoch_root / "part-open.ndjson"
+                _validate_safe_path(hot_root, open_part, allow_missing=True)
+                if (
+                    open_part.exists()
+                    and _validate_safe_path(hot_root, open_part, allow_missing=False).stat().st_size
+                ):
+                    raise ValidationError("Normalized recovery found an unsealed open part")
                 prepared_paths = _validated_glob(
                     hot_root, epoch_root, "transaction-prepared-*.json"
                 )
@@ -496,17 +766,26 @@ class NormalizedEpochJournal:
                     for path in prepared_paths
                 )
                 for item in prepared_payloads:
-                    if (
-                        item.get("transaction_state") != "PREPARED"
-                        or stream_root.name != f"stream={item.get('stream_id')}"
-                        or epoch_root.name != f"epoch={item.get('epoch_id')}"
-                        or item.get("policy") != asdict(policy)
-                    ):
-                        raise ValidationError(
-                            "Normalized epoch PREPARED transaction identity changed"
-                        )
-                prepared_hashes = {str(item["prepared_sha256"]) for item in prepared_payloads}
+                    _validate_prepared_binding(
+                        hot_root,
+                        item,
+                        epoch_id=epoch_id,
+                        stream_id=stream_id,
+                        provider=provider,
+                        venue=venue,
+                        policy=policy,
+                        actual_parts=actual_parts,
+                    )
+                prepared_by_hash = {
+                    str(item["prepared_sha256"]): item for item in prepared_payloads
+                }
+                if len(prepared_by_hash) != len(prepared_payloads):
+                    raise ValidationError(
+                        "Normalized epoch contains duplicate PREPARED transactions"
+                    )
+                terminal_prepared: list[str] = []
                 receipt_paths = _validated_glob(hot_root, epoch_root, "receipt-sha256-*.json")
+                receipt_payloads: list[dict[str, Any]] = []
                 for path in receipt_paths:
                     item = _load_hashed_json(
                         hot_root,
@@ -514,16 +793,46 @@ class NormalizedEpochJournal:
                         hash_field="receipt_sha256",
                         description="Normalized epoch receipt",
                     )
+                    prepared = prepared_by_hash.get(str(item.get("prepared_sha256")))
                     if (
                         item.get("transaction_state") != "COMMITTED"
-                        or item.get("prepared_sha256") not in prepared_hashes
-                        or stream_root.name != f"stream={item.get('stream_id')}"
-                        or epoch_root.name != f"epoch={item.get('epoch_id')}"
+                        or prepared is None
+                        or item.get("stream_id") != stream_id
+                        or item.get("epoch_id") != epoch_id
                     ):
                         raise ValidationError("Normalized epoch COMMITTED receipt identity changed")
-                if receipt_paths:
-                    continue
+                    references = _validate_terminal_binding(
+                        hot_root,
+                        item,
+                        prepared=prepared,
+                        epoch_id=epoch_id,
+                        stream_id=stream_id,
+                        provider=provider,
+                        venue=venue,
+                        policy=policy,
+                        actual_parts=actual_parts,
+                        schema_version="puresaber.normalized-epoch-receipt@1.3.0",
+                        description="Normalized epoch COMMITTED receipt",
+                    )
+                    raw_segments = item.get("raw_segments")
+                    if (
+                        isinstance(raw_segments, bool)
+                        or not isinstance(raw_segments, int)
+                        or raw_segments != len(references)
+                    ):
+                        raise ValidationError(
+                            "Normalized epoch COMMITTED receipt Raw count changed"
+                        )
+                    _validate_snapshot_binding(
+                        hot_root,
+                        item,
+                        references=references,
+                        description="Normalized epoch COMMITTED receipt",
+                    )
+                    receipt_payloads.append(item)
+                    terminal_prepared.append(str(item["prepared_sha256"]))
                 explicit_aborts = _validated_glob(hot_root, epoch_root, "aborted-sha256-*.json")
+                abort_payloads: list[dict[str, Any]] = []
                 for path in explicit_aborts:
                     item = _load_hashed_json(
                         hot_root,
@@ -531,31 +840,153 @@ class NormalizedEpochJournal:
                         hash_field="abort_sha256",
                         description="Normalized epoch explicit ABORTED transaction",
                     )
+                    prepared_sha256 = item.get("prepared_sha256")
+                    prepared = (
+                        prepared_by_hash.get(str(prepared_sha256))
+                        if prepared_sha256 is not None
+                        else None
+                    )
                     if (
                         item.get("transaction_state") != "ABORTED"
-                        or (
-                            item.get("prepared_sha256") is not None
-                            and item.get("prepared_sha256") not in prepared_hashes
-                        )
-                        or stream_root.name != f"stream={item.get('stream_id')}"
-                        or epoch_root.name != f"epoch={item.get('epoch_id')}"
+                        or item.get("stream_id") != stream_id
+                        or item.get("epoch_id") != epoch_id
+                        or (prepared_sha256 is not None and prepared is None)
+                        or item.get("retryable") is not False
                     ):
                         raise ValidationError("Normalized epoch explicit ABORTED identity changed")
-                if explicit_aborts:
+                    _validate_terminal_binding(
+                        hot_root,
+                        item,
+                        prepared=prepared,
+                        epoch_id=epoch_id,
+                        stream_id=stream_id,
+                        provider=provider,
+                        venue=venue,
+                        policy=policy,
+                        actual_parts=actual_parts,
+                        schema_version="puresaber.normalized-epoch-abort@1.3.0",
+                        description="Normalized epoch explicit ABORTED transaction",
+                    )
+                    abort_payloads.append(item)
+                    terminal_prepared.append(
+                        str(prepared_sha256)
+                        if prepared_sha256 is not None
+                        else "ABORTED_WITHOUT_PREPARED"
+                    )
+                failure_paths = _validated_glob(hot_root, epoch_root, "finalize-failure-*.json")
+                failure_payloads: list[dict[str, Any]] = []
+                for path in failure_paths:
+                    item = _load_hashed_json(
+                        hot_root,
+                        path,
+                        hash_field="failure_sha256",
+                        description="Normalized epoch failure record",
+                    )
+                    prepared_sha256 = item.get("prepared_sha256")
+                    prepared = (
+                        prepared_by_hash.get(str(prepared_sha256))
+                        if prepared_sha256 is not None
+                        else None
+                    )
+                    if prepared_sha256 is not None and prepared is None:
+                        raise ValidationError(
+                            "Normalized epoch failure transaction identity changed"
+                        )
+                    if (
+                        item.get("transaction_state") != "ABORTED"
+                        or item.get("stream_id") != stream_id
+                        or item.get("epoch_id") != epoch_id
+                        or item.get("retryable_in_process") is not True
+                        or isinstance(item.get("attempt"), bool)
+                        or not isinstance(item.get("attempt"), int)
+                        or item.get("attempt", 0) < 1
+                    ):
+                        raise ValidationError("Normalized epoch failure record is not recoverable")
+                    references = _validate_terminal_binding(
+                        hot_root,
+                        item,
+                        prepared=prepared,
+                        epoch_id=epoch_id,
+                        stream_id=stream_id,
+                        provider=provider,
+                        venue=venue,
+                        policy=policy,
+                        actual_parts=actual_parts,
+                        schema_version="puresaber.normalized-epoch-finalize-failure@1.2.0",
+                        description="Normalized epoch failure record",
+                    )
+                    if item.get("published_snapshot_id") is not None:
+                        _validate_snapshot_binding(
+                            hot_root,
+                            {
+                                **item,
+                                "normalized_snapshot_id": item.get("published_snapshot_id"),
+                            },
+                            references=references,
+                            description="Normalized epoch failure record",
+                        )
+                    elif (
+                        item.get("accepted_rows") is not None
+                        or item.get("quarantined_rows") is not None
+                    ):
+                        raise ValidationError("Normalized epoch failure snapshot state changed")
+                    failure_payloads.append(item)
+                    terminal_prepared.append(
+                        str(prepared_sha256)
+                        if prepared_sha256 is not None
+                        else "FAILURE_WITHOUT_PREPARED"
+                    )
+                if (
+                    len(receipt_payloads) > 1
+                    or len(abort_payloads) > 1
+                    or (receipt_payloads and abort_payloads)
+                ):
+                    raise ValidationError(
+                        "Normalized epoch contains conflicting terminal transactions"
+                    )
+                if len(terminal_prepared) != len(set(terminal_prepared)):
+                    raise ValidationError(
+                        "Normalized epoch contains conflicting terminal transactions"
+                    )
+                terminal_hashes = {
+                    str(item["prepared_sha256"])
+                    for item in (*receipt_payloads, *abort_payloads, *failure_payloads)
+                    if item.get("prepared_sha256") is not None
+                }
+                pending = tuple(
+                    item
+                    for item in prepared_payloads
+                    if str(item["prepared_sha256"]) not in terminal_hashes
+                )
+                if len(pending) > 1:
+                    raise ValidationError("Normalized epoch contains multiple pending transactions")
+                if receipt_payloads or abort_payloads:
+                    if pending:
+                        raise ValidationError(
+                            "Normalized epoch contains a terminal state followed by pending work"
+                        )
                     continue
-                if not prepared_paths:
-                    continue
-                latest = prepared_payloads[-1]
+                if any(item.get("prepared_sha256") is None for item in failure_payloads):
+                    raise ValidationError(
+                        "Normalized epoch failure has no durable PREPARED transaction"
+                    )
+                if not pending and not failure_payloads:
+                    raise ValidationError(
+                        "Normalized epoch journal has no durable transaction state"
+                    )
+                latest = pending[0] if pending else prepared_payloads[-1]
                 try:
                     created_at = datetime.fromisoformat(
-                        str(latest["created_at"]).replace("Z", "+00:00")
+                        _parse_created_at(
+                            latest.get("created_at"), "Normalized epoch recovery transaction"
+                        ).replace("Z", "+00:00")
                     )
                     journal = cls.recover(
                         hot_root,
-                        epoch_id=str(latest["epoch_id"]),
-                        stream_id=str(latest["stream_id"]),
-                        provider=str(latest["provider"]),
-                        venue=str(latest["venue"]),
+                        epoch_id=epoch_id,
+                        stream_id=stream_id,
+                        provider=provider,
+                        venue=venue,
                         storage_guard=storage_guard,
                         policy=policy,
                         normalization_executor=normalization_executor,
@@ -571,11 +1002,11 @@ class NormalizedEpochJournal:
         self._require_open()
         prepared: dict[str, Any] | None = None
         result: _NormalizationSummary | None = None
+        created = utc_text(created_at or datetime.now(tz=UTC), "epoch created_at")
         try:
             self._seal_part()
             if self._records and not self._raw_references:
                 raise ValidationError("Normalized epoch records require Raw segment lineage")
-            created = utc_text(created_at or datetime.now(tz=UTC), "epoch created_at")
             prepared = self._prepare_transaction(created)
             result = (
                 self._publish_normalized() if self._records else _NormalizationSummary(None, 0, 0)
@@ -583,7 +1014,12 @@ class NormalizedEpochJournal:
             receipt = self._write_committed_receipt(prepared, result)
         except Exception as exc:
             try:
-                self._record_finalize_failure(exc, prepared=prepared, result=result)
+                self._record_finalize_failure(
+                    exc,
+                    prepared=prepared,
+                    result=result,
+                    created_at=created,
+                )
             except Exception as abort_exc:  # noqa: BLE001 - both failures must be preserved
                 raise ValidationError(
                     "Normalized finalize failed and its durable failure record also failed; "
@@ -652,7 +1088,7 @@ class NormalizedEpochJournal:
         result: _NormalizationSummary,
     ) -> NormalizedEpochReceipt:
         identity = {
-            "schema_version": "puresaber.normalized-epoch-receipt@1.2.0",
+            "schema_version": "puresaber.normalized-epoch-receipt@1.3.0",
             "transaction_state": "COMMITTED",
             "prepared_sha256": str(prepared["prepared_sha256"]),
             "epoch_id": self.epoch_id,
@@ -664,6 +1100,7 @@ class NormalizedEpochJournal:
             "raw_segments": len(self._raw_references),
             "raw_references": [asdict(item) for item in self._raw_references],
             "journal_parts": [asdict(item) for item in self._parts],
+            "policy": asdict(self.policy),
             "normalized_snapshot_id": result.snapshot_id,
             "accepted_rows": result.accepted_rows,
             "quarantined_rows": result.quarantined_rows,
@@ -707,21 +1144,27 @@ class NormalizedEpochJournal:
             raise ValidationError("Normalized epoch is already aborted")
         if self._state in {"OPEN", "PREPARED"}:
             if self._state == "OPEN":
-                self.flush()
+                self._seal_part()
             self._open_stream.close()
+        prepared = self._prepared_transaction
         payload = {
-            "schema_version": "puresaber.normalized-epoch-abort@1.2.0",
+            "schema_version": "puresaber.normalized-epoch-abort@1.3.0",
             "transaction_state": "ABORTED",
-            "prepared_sha256": (
-                str(self._prepared_transaction["prepared_sha256"])
-                if self._prepared_transaction is not None
-                else None
-            ),
+            "prepared_sha256": (str(prepared["prepared_sha256"]) if prepared is not None else None),
             "epoch_id": self.epoch_id,
             "stream_id": self.stream_id,
+            "provider": self.provider,
+            "venue": self.venue,
+            "created_at": (
+                str(prepared["created_at"])
+                if prepared is not None
+                else utc_text(datetime.now(tz=UTC), "epoch abort created_at")
+            ),
             "reason": reason,
             "records": self._records,
             "raw_references": [asdict(item) for item in self._raw_references],
+            "journal_parts": [asdict(item) for item in self._parts],
+            "policy": asdict(self.policy),
             "retryable": False,
         }
         payload["abort_sha256"] = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
@@ -774,20 +1217,28 @@ class NormalizedEpochJournal:
         *,
         prepared: Mapping[str, Any] | None,
         result: _NormalizationSummary | None,
+        created_at: str,
     ) -> Path:
         self._finalize_failures += 1
         identity = {
-            "schema_version": "puresaber.normalized-epoch-finalize-failure@1.1.0",
+            "schema_version": "puresaber.normalized-epoch-finalize-failure@1.2.0",
             "transaction_state": "ABORTED",
             "prepared_sha256": (str(prepared["prepared_sha256"]) if prepared is not None else None),
             "epoch_id": self.epoch_id,
             "stream_id": self.stream_id,
+            "provider": self.provider,
+            "venue": self.venue,
+            "created_at": (str(prepared["created_at"]) if prepared is not None else created_at),
             "attempt": self._finalize_failures,
             "exception": type(exc).__name__,
             "message": str(exc),
             "records": self._records,
             "raw_references": [asdict(item) for item in self._raw_references],
+            "journal_parts": [asdict(item) for item in self._parts],
+            "policy": asdict(self.policy),
             "published_snapshot_id": result.snapshot_id if result is not None else None,
+            "accepted_rows": result.accepted_rows if result is not None else None,
+            "quarantined_rows": result.quarantined_rows if result is not None else None,
             "retryable_in_process": True,
             "restart_recovery": "reconcile PREPARED/ABORTED transaction idempotently",
         }

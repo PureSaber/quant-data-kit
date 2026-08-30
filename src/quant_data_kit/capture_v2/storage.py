@@ -718,8 +718,21 @@ def _validate_safe_path(root: Path, candidate: Path, *, allow_missing: bool) -> 
 def _safe_mkdir(root: Path, path: Path, *, exist_ok: bool = True) -> Path:
     checked = _validate_safe_path(root, path, allow_missing=True)
     lock = Path(root) / ".capture-path-bootstrap.lock"
-    with process_file_lock(lock):
-        _validate_safe_path(root, lock, allow_missing=True)
+    checked_lock = _validate_safe_path(root, lock, allow_missing=True)
+    if not checked_lock.exists():
+        try:
+            with checked_lock.open("xb") as stream:
+                stream.write(b"\0")
+                stream.flush()
+                os.fsync(stream.fileno())
+        except FileExistsError:
+            # A concurrent creator won. Validate its final object before opening it.
+            pass
+    checked_lock = _validate_safe_path(root, checked_lock, allow_missing=False)
+    if not checked_lock.is_file():
+        raise ValidationError(f"storage bootstrap lock is not a regular file: {checked_lock}")
+    with process_file_lock(checked_lock):
+        _validate_safe_path(root, checked_lock, allow_missing=False)
         checked.mkdir(parents=True, exist_ok=exist_ok)
         return _validate_safe_path(root, checked, allow_missing=False)
 

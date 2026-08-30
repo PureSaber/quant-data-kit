@@ -709,6 +709,10 @@ class CryptoL2CaptureCoordinator:
         try:
             reconciled = NormalizedEpochJournal.reconcile_pending(
                 self.config.hot_root,
+                expected_streams={
+                    stream.stream_id: (stream.provider.value, stream.venue)
+                    for stream in self.config.streams
+                },
                 storage_guard=self.storage_guard,
                 policy=self.policy,
                 normalization_executor=self.normalization_executor,

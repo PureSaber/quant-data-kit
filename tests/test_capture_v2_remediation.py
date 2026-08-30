@@ -61,6 +61,20 @@ def _process_publish(
         results.put("ok")
 
 
+def _process_crash_after_epoch_snapshot(root_text: str, epoch_id: str) -> None:
+    journal = _journal_with_lineage(Path(root_text), epoch_id)
+
+    def terminate_after_snapshot(*_args: object, **_kwargs: object) -> None:
+        (Path(root_text) / "receipt-boundary-reached.marker").write_bytes(b"snapshot-published")
+        os._exit(87)
+
+    journal._write_committed_receipt = (  # type: ignore[method-assign]
+        terminate_after_snapshot
+    )
+    journal.finalize(created_at=epoch_fixtures.NOW)
+    os._exit(88)
+
+
 def test_durable_audit_commits_before_state_and_reloads(tmp_path: Path) -> None:
     hot, archive, _restore = collector_fixtures.roots(tmp_path)
     guard = collector_fixtures.storage_guard(hot, archive)
@@ -250,6 +264,32 @@ def _journal_with_lineage(tmp_path: Path, epoch_id: str) -> NormalizedEpochJourn
     return journal
 
 
+def _identity_anchor(journal: NormalizedEpochJournal) -> dict[str, tuple[str, str]]:
+    return {journal.stream_id: (journal.provider, journal.venue)}
+
+
+def _existing_epoch_storage(
+    root: Path,
+) -> tuple[Path, CaptureStorageGuard, dict[str, tuple[str, str]]]:
+    hot, archive = root / "hot", root / "archive"
+
+    def identity(path: Path) -> VolumeIdentity:
+        value = "archive" if path == archive else "hot"
+        return VolumeIdentity(value, (value,))
+
+    guard = CaptureStorageGuard(
+        hot,
+        archive,
+        policy=epoch_fixtures.POLICY,
+        archive_reserve_bytes=1,
+        volume_identity=identity,
+        capacity_probe=lambda _path: DiskCapacity(10**9, 9 * 10**8),
+        hot_size_probe=lambda _path: 0,
+    )
+    stream = epoch_fixtures.stream(Provider.BINANCE, epoch_fixtures.MarketKind.SPOT)
+    return hot, guard, {stream.stream_id: (stream.provider.value, stream.venue)}
+
+
 def test_normalized_finalize_publish_failure_retains_journal_and_retries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -277,29 +317,35 @@ def test_normalized_finalize_publish_failure_retains_journal_and_retries(
     assert receipt.transaction_state == "COMMITTED"
 
 
-def test_normalized_crash_after_publish_reconciles_prepared_transaction(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    journal = _journal_with_lineage(tmp_path, "crash-window")
+def test_normalized_crash_after_publish_reconciles_prepared_transaction(tmp_path: Path) -> None:
+    crash_root = tmp_path / "crash-process"
+    context = multiprocessing.get_context("spawn")
+    process = context.Process(
+        target=_process_crash_after_epoch_snapshot,
+        args=(str(crash_root), "crash-window"),
+    )
+    process.start()
+    process.join(30)
+    assert process.exitcode not in {None, 0, 88}
+    assert (crash_root / "receipt-boundary-reached.marker").read_bytes() == b"snapshot-published"
 
-    def terminate_after_publish(*_args: object, **_kwargs: object):
-        raise SystemExit("injected process termination")
-
-    monkeypatch.setattr(journal, "_write_committed_receipt", terminate_after_publish)
-    with pytest.raises(SystemExit, match="process termination"):
-        journal.finalize(created_at=epoch_fixtures.NOW)
-    prepared = tuple(journal.root.glob("transaction-prepared-*.json"))
+    hot, guard, identities = _existing_epoch_storage(crash_root)
+    stream_id = next(iter(identities))
+    journal_root = (
+        hot / "capture" / "normalized-epoch-journal" / f"stream={stream_id}" / "epoch=crash-window"
+    )
+    prepared = tuple(journal_root.glob("transaction-prepared-*.json"))
     assert len(prepared) == 1
-    assert not tuple(journal.root.glob("receipt-sha256-*.json"))
-    assert not tuple(journal.root.glob("finalize-failure-*.json"))
-    snapshots = tuple((journal.hot_root / "normalized" / "snapshots").glob("sha256-*"))
+    assert not tuple(journal_root.glob("receipt-sha256-*.json"))
+    assert not tuple(journal_root.glob("finalize-failure-*.json"))
+    snapshots = tuple((hot / "normalized" / "snapshots").glob("sha256-*"))
     assert len(snapshots) == 1
-    journal._open_stream.close()
 
     receipts = NormalizedEpochJournal.reconcile_pending(
-        journal.hot_root,
-        storage_guard=journal.storage_guard,
-        policy=journal.policy,
+        hot,
+        expected_streams=identities,
+        storage_guard=guard,
+        policy=epoch_fixtures.POLICY,
     )
     assert len(receipts) == 1
     assert receipts[0].transaction_state == "COMMITTED"
@@ -307,9 +353,10 @@ def test_normalized_crash_after_publish_reconciles_prepared_transaction(
     assert receipts[0].normalized_snapshot_id == snapshots[0].name
     assert (
         NormalizedEpochJournal.reconcile_pending(
-            journal.hot_root,
-            storage_guard=journal.storage_guard,
-            policy=journal.policy,
+            hot,
+            expected_streams=identities,
+            storage_guard=guard,
+            policy=epoch_fixtures.POLICY,
         )
         == ()
     )
@@ -340,10 +387,36 @@ def test_reconciliation_binds_aborts_to_their_prepared_attempt(
     journal._open_stream.close()
     receipts = NormalizedEpochJournal.reconcile_pending(
         journal.hot_root,
+        expected_streams=_identity_anchor(journal),
         storage_guard=journal.storage_guard,
         policy=journal.policy,
     )
     assert len(receipts) == 1 and receipts[0].transaction_state == "COMMITTED"
+
+
+def test_reconciliation_rejects_conflicting_terminal_states(tmp_path: Path) -> None:
+    journal = _journal_with_lineage(tmp_path, "terminal-conflict")
+    receipt = journal.finalize(created_at=epoch_fixtures.NOW)
+    prepared = json.loads(
+        next(journal.root.glob("transaction-prepared-*.json")).read_text(encoding="utf-8")
+    )
+    journal._record_finalize_failure(
+        OSError("impossible post-commit failure"),
+        prepared=prepared,
+        result=epoch_module._NormalizationSummary(
+            receipt.normalized_snapshot_id,
+            receipt.accepted_rows,
+            receipt.quarantined_rows,
+        ),
+        created_at=receipt.created_at,
+    )
+    with pytest.raises(ValidationError, match="conflicting terminal"):
+        NormalizedEpochJournal.reconcile_pending(
+            journal.hot_root,
+            expected_streams=_identity_anchor(journal),
+            storage_guard=journal.storage_guard,
+            policy=journal.policy,
+        )
 
 
 def test_pending_transaction_rejects_mutation_and_malformed_time(
@@ -364,9 +437,10 @@ def test_pending_transaction_rejects_mutation_and_malformed_time(
     journal._open_stream.close()
     prepared = next(journal.root.glob("transaction-prepared-*.json"))
     _rewrite_content_addressed(prepared, "prepared_sha256", created_at="not-a-time")
-    with pytest.raises(ValidationError, match="PREPARED transaction is malformed"):
+    with pytest.raises(ValidationError, match="created_at is malformed"):
         NormalizedEpochJournal.reconcile_pending(
             journal.hot_root,
+            expected_streams=_identity_anchor(journal),
             storage_guard=journal.storage_guard,
             policy=journal.policy,
         )
@@ -427,6 +501,41 @@ def test_epoch_creation_rejects_real_windows_junction(tmp_path: Path) -> None:
         junction.rmdir()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires a real Windows directory junction")
+def test_bootstrap_lock_rejects_real_windows_junction_before_lock_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hot, _archive, _guard = epoch_fixtures.storage(tmp_path)
+    outside = tmp_path / "outside-bootstrap"
+    outside.mkdir()
+    sentinel = outside / "sentinel.bin"
+    sentinel.write_bytes(b"outside-must-not-be-opened")
+    lock = hot / ".capture-path-bootstrap.lock"
+    created = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(lock), str(outside)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert created.returncode == 0, created.stderr
+    lock_opened = False
+
+    def must_not_open_lock(*_args: object, **_kwargs: object):
+        nonlocal lock_opened
+        lock_opened = True
+        raise AssertionError("unsafe bootstrap lock open")
+
+    monkeypatch.setattr(storage_module, "process_file_lock", must_not_open_lock)
+    try:
+        with pytest.raises(ValidationError, match="reparse"):
+            storage_module._safe_mkdir(hot, hot / "capture")
+        assert not lock_opened
+        assert sentinel.read_bytes() == b"outside-must-not-be-opened"
+        assert not (hot / "capture").exists()
+    finally:
+        lock.rmdir()
+
+
 def test_epoch_journal_helpers_and_reconcile_shapes_fail_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -462,7 +571,10 @@ def test_epoch_journal_helpers_and_reconcile_shapes_fail_closed(
     (base / "stream=not-a-directory").write_text("x", encoding="utf-8")
     with pytest.raises(ValidationError, match="stream journal is not a directory"):
         NormalizedEpochJournal.reconcile_pending(
-            hot, storage_guard=guard, policy=epoch_fixtures.POLICY
+            hot,
+            expected_streams={},
+            storage_guard=guard,
+            policy=epoch_fixtures.POLICY,
         )
 
     other_root = tmp_path / "epoch-shape"
@@ -474,6 +586,7 @@ def test_epoch_journal_helpers_and_reconcile_shapes_fail_closed(
     with pytest.raises(ValidationError, match="epoch journal is not a directory"):
         NormalizedEpochJournal.reconcile_pending(
             other_hot,
+            expected_streams={"stream": ("binance", "BINANCE")},
             storage_guard=other_guard,
             policy=epoch_fixtures.POLICY,
         )
@@ -1301,8 +1414,219 @@ def _rewrite_failure(journal: NormalizedEpochJournal, **changes: object) -> None
 
 
 @pytest.mark.parametrize(
+    ("value", "message"),
+    (
+        ({}, "Raw lineage is malformed"),
+        ([{"source": "binance"}], "Raw lineage is malformed"),
+    ),
+)
+def test_epoch_raw_lineage_rejects_non_list_and_malformed_entries(
+    tmp_path: Path, value: object, message: str
+) -> None:
+    journal = _failed_epoch_for_recovery(tmp_path, "malformed-raw-lineage")
+    with pytest.raises(ValidationError, match=message):
+        epoch_module._validate_raw_references(
+            journal.hot_root,
+            value,
+            description="test terminal",
+        )
+
+
+def test_epoch_raw_lineage_rejects_duplicates_and_untrusted_objects(tmp_path: Path) -> None:
+    journal = _failed_epoch_for_recovery(tmp_path, "duplicate-raw-lineage")
+    prepared = json.loads(
+        next(journal.root.glob("transaction-prepared-*.json")).read_text(encoding="utf-8")
+    )
+    reference = prepared["raw_references"][0]
+    with pytest.raises(ValidationError, match="contains duplicates"):
+        epoch_module._validate_raw_references(
+            journal.hot_root,
+            [reference, reference],
+            description="test terminal",
+        )
+
+    unavailable = {**reference, "object_id": "sha256-" + "0" * 64}
+    with pytest.raises(ValidationError):
+        epoch_module._validate_raw_references(
+            journal.hot_root,
+            [unavailable],
+            description="test terminal",
+        )
+
+
+def test_epoch_binding_rejects_noncanonical_time_and_missing_raw_lineage(
+    tmp_path: Path,
+) -> None:
+    journal = _failed_epoch_for_recovery(tmp_path, "binding-negative-paths")
+    prepared = json.loads(
+        next(journal.root.glob("transaction-prepared-*.json")).read_text(encoding="utf-8")
+    )
+    failure = json.loads(
+        next(journal.root.glob("finalize-failure-*.json")).read_text(encoding="utf-8")
+    )
+    parts = epoch_module._load_epoch_parts(journal.hot_root, journal.root)
+
+    with pytest.raises(ValidationError, match="not canonical UTC"):
+        epoch_module._parse_created_at("2026-08-29T01:00:00+00:00", "test transaction")
+    with pytest.raises(ValidationError, match="require Raw segment lineage"):
+        epoch_module._validate_prepared_binding(
+            journal.hot_root,
+            {**prepared, "raw_references": []},
+            epoch_id=journal.epoch_id,
+            stream_id=journal.stream_id,
+            provider=journal.provider,
+            venue=journal.venue,
+            policy=journal.policy,
+            actual_parts=parts,
+        )
+    with pytest.raises(ValidationError, match="require Raw segment lineage"):
+        epoch_module._validate_terminal_binding(
+            journal.hot_root,
+            {**failure, "raw_references": []},
+            prepared=None,
+            epoch_id=journal.epoch_id,
+            stream_id=journal.stream_id,
+            provider=journal.provider,
+            venue=journal.venue,
+            policy=journal.policy,
+            actual_parts=parts,
+            schema_version="puresaber.normalized-epoch-finalize-failure@1.2.0",
+            description="test terminal",
+        )
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    (
+        ({"records": "bad"}, "row counts are malformed"),
+        ({"accepted_rows": -1}, "row counts changed"),
+        ({"normalized_snapshot_id": None}, "snapshot identity is missing"),
+        ({"normalized_snapshot_id": 123}, "snapshot identity is malformed"),
+        ({"provider": "okx"}, "snapshot identity changed"),
+    ),
+)
+def test_epoch_snapshot_binding_rejects_malformed_and_mismatched_state(
+    tmp_path: Path, changes: dict[str, object], message: str
+) -> None:
+    journal = _journal_with_lineage(tmp_path, "snapshot-binding")
+    journal.finalize(created_at=epoch_fixtures.NOW)
+    receipt = json.loads(
+        next(journal.root.glob("receipt-sha256-*.json")).read_text(encoding="utf-8")
+    )
+    references = epoch_module._validate_raw_references(
+        journal.hot_root,
+        receipt["raw_references"],
+        description="test receipt",
+    )
+    with pytest.raises(ValidationError, match=message):
+        epoch_module._validate_snapshot_binding(
+            journal.hot_root,
+            {**receipt, **changes},
+            references=references,
+            description="test receipt",
+        )
+
+
+def test_epoch_snapshot_binding_allows_zero_accepted_rows_without_snapshot(
+    tmp_path: Path,
+) -> None:
+    journal = _journal_with_lineage(tmp_path, "zero-accepted")
+    journal.finalize(created_at=epoch_fixtures.NOW)
+    receipt = json.loads(
+        next(journal.root.glob("receipt-sha256-*.json")).read_text(encoding="utf-8")
+    )
+    references = epoch_module._validate_raw_references(
+        journal.hot_root,
+        receipt["raw_references"],
+        description="test receipt",
+    )
+    epoch_module._validate_snapshot_binding(
+        journal.hot_root,
+        {
+            **receipt,
+            "records": 0,
+            "accepted_rows": 0,
+            "quarantined_rows": 0,
+            "normalized_snapshot_id": None,
+        },
+        references=references,
+        description="test receipt",
+    )
+
+
+def test_epoch_recovery_rejects_duplicate_prepared_transactions(tmp_path: Path) -> None:
+    journal = _failed_epoch_for_recovery(tmp_path, "duplicate-prepared")
+    prepared = next(journal.root.glob("transaction-prepared-*.json"))
+    duplicate = prepared.with_name(prepared.name.replace("prepared-0001-", "prepared-9999-"))
+    duplicate.write_bytes(prepared.read_bytes())
+
+    with pytest.raises(ValidationError, match="duplicate PREPARED"):
+        NormalizedEpochJournal.recover(
+            journal.hot_root,
+            epoch_id=journal.epoch_id,
+            stream_id=journal.stream_id,
+            provider=journal.provider,
+            venue=journal.venue,
+            storage_guard=journal.storage_guard,
+            policy=journal.policy,
+        )
+    with pytest.raises(ValidationError, match="duplicate PREPARED"):
+        NormalizedEpochJournal.reconcile_pending(
+            journal.hot_root,
+            expected_streams=_identity_anchor(journal),
+            storage_guard=journal.storage_guard,
+            policy=journal.policy,
+        )
+
+
+def test_epoch_reconcile_rejects_missing_anchor_open_part_and_orphan_journal(
+    tmp_path: Path,
+) -> None:
+    missing_anchor = _failed_epoch_for_recovery(tmp_path / "anchor", "missing-anchor")
+    with pytest.raises(ValidationError, match="independent identity anchor"):
+        NormalizedEpochJournal.reconcile_pending(
+            missing_anchor.hot_root,
+            expected_streams={},
+            storage_guard=missing_anchor.storage_guard,
+            policy=missing_anchor.policy,
+        )
+
+    opened = _failed_epoch_for_recovery(tmp_path / "open", "open-part")
+    opened._open_path.write_bytes(b'{"partial":true}\n')
+    with pytest.raises(ValidationError, match="unsealed open part"):
+        NormalizedEpochJournal.reconcile_pending(
+            opened.hot_root,
+            expected_streams=_identity_anchor(opened),
+            storage_guard=opened.storage_guard,
+            policy=opened.policy,
+        )
+
+    root = tmp_path / "orphan"
+    root.mkdir()
+    hot, _archive, guard = epoch_fixtures.storage(root)
+    orphan = NormalizedEpochJournal(
+        hot,
+        epoch_id="orphan",
+        stream_id="stream",
+        provider="binance",
+        venue="BINANCE",
+        storage_guard=guard,
+        policy=epoch_fixtures.POLICY,
+    )
+    orphan._open_stream.close()
+    with pytest.raises(ValidationError, match="no durable transaction state"):
+        NormalizedEpochJournal.reconcile_pending(
+            hot,
+            expected_streams=_identity_anchor(orphan),
+            storage_guard=guard,
+            policy=orphan.policy,
+        )
+
+
+@pytest.mark.parametrize(
     ("case", "changes"),
     (
+        ("schema", {"schema_version": "puresaber.normalized-epoch-transaction@9.9.9"}),
         ("state", {"transaction_state": "BROKEN"}),
         ("epoch", {"epoch_id": "different"}),
         ("stream", {"stream_id": "different"}),
@@ -1310,6 +1634,7 @@ def _rewrite_failure(journal: NormalizedEpochJournal, **changes: object) -> None
         ("venue", {"venue": "OKX"}),
         ("policy", {"policy": {}}),
         ("attempt", {"attempt": 0}),
+        ("attempt-type", {"attempt": "1"}),
     ),
 )
 def test_epoch_recovery_rejects_each_prepared_identity_field(
@@ -1331,28 +1656,44 @@ def test_epoch_recovery_rejects_each_prepared_identity_field(
     with pytest.raises(ValidationError, match="transaction identity"):
         NormalizedEpochJournal.reconcile_pending(
             journal.hot_root,
+            expected_streams=_identity_anchor(journal),
             storage_guard=journal.storage_guard,
             policy=journal.policy,
         )
 
 
 @pytest.mark.parametrize(
-    ("case", "changes"),
+    ("case", "changes", "message"),
     (
-        ("state", {"transaction_state": "BROKEN"}),
-        ("epoch", {"epoch_id": "different"}),
-        ("stream", {"stream_id": "different"}),
-        ("prepared", {"prepared_sha256": "0" * 64}),
+        (
+            "schema",
+            {"schema_version": "puresaber.normalized-epoch-receipt@9.9.9"},
+            "receipt identity",
+        ),
+        ("state", {"transaction_state": "BROKEN"}, "receipt identity"),
+        ("epoch", {"epoch_id": "different"}, "receipt identity"),
+        ("stream", {"stream_id": "different"}, "receipt identity"),
+        ("prepared", {"prepared_sha256": "0" * 64}, "receipt identity"),
+        ("provider", {"provider": "okx"}, "receipt identity"),
+        ("venue", {"venue": "OKX"}, "receipt identity"),
+        ("policy", {"policy": {}}, "receipt identity"),
+        ("records", {"records": 999}, "record count changed"),
+        ("raw-lineage", {"raw_references": []}, "Raw lineage changed"),
+        ("journal-parts", {"journal_parts": []}, "part manifest changed"),
+        ("raw-count", {"raw_segments": 0}, "Raw count changed"),
+        ("raw-count-type", {"raw_segments": True}, "Raw count changed"),
+        ("row-counts", {"accepted_rows": 0}, "row counts changed"),
+        ("snapshot", {"normalized_snapshot_id": None}, "snapshot identity is missing"),
     ),
 )
 def test_epoch_recovery_rejects_each_committed_identity_field(
-    tmp_path: Path, case: str, changes: dict[str, object]
+    tmp_path: Path, case: str, changes: dict[str, object], message: str
 ) -> None:
     journal = _journal_with_lineage(tmp_path / case, f"receipt-{case}")
     journal.finalize(created_at=epoch_fixtures.NOW)
     receipt = next(journal.root.glob("receipt-sha256-*.json"))
     _rewrite_content_addressed(receipt, "receipt_sha256", **changes)
-    with pytest.raises(ValidationError, match="COMMITTED receipt identity"):
+    with pytest.raises(ValidationError, match=message):
         NormalizedEpochJournal.recover(
             journal.hot_root,
             epoch_id=journal.epoch_id,
@@ -1362,25 +1703,38 @@ def test_epoch_recovery_rejects_each_committed_identity_field(
             storage_guard=journal.storage_guard,
             policy=journal.policy,
         )
-    with pytest.raises(ValidationError, match="COMMITTED receipt identity"):
+    with pytest.raises(ValidationError, match=message):
         NormalizedEpochJournal.reconcile_pending(
             journal.hot_root,
+            expected_streams=_identity_anchor(journal),
             storage_guard=journal.storage_guard,
             policy=journal.policy,
         )
 
 
 @pytest.mark.parametrize(
-    ("case", "changes"),
+    ("case", "changes", "message"),
     (
-        ("state", {"transaction_state": "BROKEN"}),
-        ("epoch", {"epoch_id": "different"}),
-        ("stream", {"stream_id": "different"}),
-        ("prepared", {"prepared_sha256": "0" * 64}),
+        (
+            "schema",
+            {"schema_version": "puresaber.normalized-epoch-abort@9.9.9"},
+            "ABORTED transaction identity",
+        ),
+        ("state", {"transaction_state": "BROKEN"}, "ABORTED identity"),
+        ("epoch", {"epoch_id": "different"}, "ABORTED identity"),
+        ("stream", {"stream_id": "different"}, "ABORTED identity"),
+        ("prepared", {"prepared_sha256": "0" * 64}, "ABORTED identity"),
+        ("provider", {"provider": "okx"}, "ABORTED transaction identity"),
+        ("venue", {"venue": "OKX"}, "ABORTED transaction identity"),
+        ("policy", {"policy": {}}, "ABORTED transaction identity"),
+        ("records", {"records": 1}, "record count changed"),
+        ("journal-parts", {"journal_parts": [{}]}, "part manifest changed"),
+        ("created-at", {"created_at": "not-a-time"}, "created_at is malformed"),
+        ("retryable", {"retryable": True}, "ABORTED identity"),
     ),
 )
 def test_epoch_recovery_rejects_each_explicit_abort_identity_field(
-    tmp_path: Path, case: str, changes: dict[str, object]
+    tmp_path: Path, case: str, changes: dict[str, object], message: str
 ) -> None:
     root = tmp_path / case
     root.mkdir()
@@ -1396,7 +1750,7 @@ def test_epoch_recovery_rejects_each_explicit_abort_identity_field(
     )
     abort = journal.abort_visible("operator")
     _rewrite_content_addressed(abort, "abort_sha256", **changes)
-    with pytest.raises(ValidationError, match="explicit ABORTED identity"):
+    with pytest.raises(ValidationError, match=message):
         NormalizedEpochJournal.recover(
             hot,
             epoch_id=journal.epoch_id,
@@ -1406,10 +1760,50 @@ def test_epoch_recovery_rejects_each_explicit_abort_identity_field(
             storage_guard=guard,
             policy=journal.policy,
         )
-    with pytest.raises(ValidationError, match="explicit ABORTED identity"):
+    with pytest.raises(ValidationError, match=message):
         NormalizedEpochJournal.reconcile_pending(
             hot,
+            expected_streams=_identity_anchor(journal),
             storage_guard=guard,
+            policy=journal.policy,
+        )
+
+
+@pytest.mark.parametrize(
+    ("case", "changes", "message"),
+    (
+        (
+            "schema",
+            {"schema_version": "puresaber.normalized-epoch-finalize-failure@9.9.9"},
+            "failure record identity changed",
+        ),
+        ("attempt", {"attempt": 0}, "not recoverable"),
+        ("attempt-type", {"attempt": "1"}, "not recoverable"),
+        ("retryable-type", {"retryable_in_process": 1}, "not recoverable"),
+        ("record-type", {"records": True}, "record count changed"),
+        ("snapshot-state", {"accepted_rows": 0}, "snapshot state changed"),
+    ),
+)
+def test_epoch_recovery_rejects_each_failure_schema_and_type_field(
+    tmp_path: Path, case: str, changes: dict[str, object], message: str
+) -> None:
+    journal = _failed_epoch_for_recovery(tmp_path / case, f"failure-{case}")
+    _rewrite_failure(journal, **changes)
+    with pytest.raises(ValidationError, match=message):
+        NormalizedEpochJournal.recover(
+            journal.hot_root,
+            epoch_id=journal.epoch_id,
+            stream_id=journal.stream_id,
+            provider=journal.provider,
+            venue=journal.venue,
+            storage_guard=journal.storage_guard,
+            policy=journal.policy,
+        )
+    with pytest.raises(ValidationError, match=message):
+        NormalizedEpochJournal.reconcile_pending(
+            journal.hot_root,
+            expected_streams=_identity_anchor(journal),
+            storage_guard=journal.storage_guard,
             policy=journal.policy,
         )
 
@@ -1484,25 +1878,23 @@ def test_epoch_legacy_failure_and_pending_manifest_negative_paths(tmp_path: Path
     _rewrite_failure(legacy, prepared_sha256=None)
     for path in legacy.root.glob("transaction-prepared-*.json"):
         path.unlink()
-    recovered = NormalizedEpochJournal.recover(
-        legacy.hot_root,
-        epoch_id=legacy.epoch_id,
-        stream_id=legacy.stream_id,
-        provider=legacy.provider,
-        venue=legacy.venue,
-        storage_guard=legacy.storage_guard,
-        policy=legacy.policy,
-    )
-    assert recovered.records == legacy.records
-    recovered.abort_visible("legacy verified")
-    assert (
-        NormalizedEpochJournal.reconcile_pending(
+    with pytest.raises(ValidationError, match="no durable PREPARED"):
+        NormalizedEpochJournal.recover(
             legacy.hot_root,
+            epoch_id=legacy.epoch_id,
+            stream_id=legacy.stream_id,
+            provider=legacy.provider,
+            venue=legacy.venue,
             storage_guard=legacy.storage_guard,
             policy=legacy.policy,
         )
-        == ()
-    )
+    with pytest.raises(ValidationError, match="no durable PREPARED"):
+        NormalizedEpochJournal.reconcile_pending(
+            legacy.hot_root,
+            expected_streams=_identity_anchor(legacy),
+            storage_guard=legacy.storage_guard,
+            policy=legacy.policy,
+        )
 
     records = _journal_with_lineage(tmp_path / "records", "records")
     monkey = records._write_committed_receipt
@@ -1643,6 +2035,7 @@ def test_epoch_receipt_reload_mismatch_is_audited_and_retryable(
     with pytest.raises(ValidationError, match="receipt hash changed"):
         NormalizedEpochJournal.reconcile_pending(
             journal.hot_root,
+            expected_streams=_identity_anchor(journal),
             storage_guard=journal.storage_guard,
             policy=journal.policy,
         )
