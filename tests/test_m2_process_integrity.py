@@ -198,14 +198,14 @@ def _curated_process(
 
 
 def _curated_hard_exit_process(root: str, normalized_snapshot_id: str) -> None:
-    real_replace = curated_module.os.replace
+    real_replace = lake_module.os.replace
 
     def crash_before_publish(source: Path, destination: Path) -> None:
         if Path(destination).parent.name == "snapshots":
             os._exit(73)
         real_replace(source, destination)
 
-    curated_module.os.replace = crash_before_publish
+    lake_module.os.replace = crash_before_publish
     curate_trade_bars_from_snapshot(
         Path(root),
         normalized_snapshot_id=normalized_snapshot_id,
@@ -256,6 +256,48 @@ def _curated_capacity_window_process(
     try:
         snapshot = _curated_process_once(Path(root), normalized_snapshot_id)
         results.put(("ok", snapshot.snapshot_id))
+    except WORKER_ERRORS as exc:
+        results.put(("error", f"{type(exc).__name__}: {exc}"))
+
+
+def _held_capacity_scan_process(
+    root: str,
+    scan_ready: Any,
+    scan_release: Any,
+    results: Any,
+) -> None:
+    real_tree_size = lake_module._tree_size
+
+    def held_tree_size(path: Path) -> int:
+        scan_ready.set()
+        if not scan_release.wait(20):
+            raise TimeoutError("capacity scan was not released")
+        return real_tree_size(path)
+
+    lake_module._tree_size = held_tree_size
+    try:
+        decision = lake_module.require_collection_capacity(
+            Path(root),
+            projected_write_bytes=0,
+            policy=TEST_POLICY,
+        )
+        results.put(("scan", str(decision.hot_bytes)))
+    except WORKER_ERRORS as exc:
+        results.put(("error", f"{type(exc).__name__}: {exc}"))
+
+
+def _published_tree_remove_process(
+    root: str,
+    relative_path: str,
+    remove_attempted: Any,
+    remove_completed: Any,
+    results: Any,
+) -> None:
+    remove_attempted.set()
+    try:
+        lake_module._remove_tree(Path(root), Path(root) / relative_path)
+        remove_completed.set()
+        results.put(("remove", relative_path))
     except WORKER_ERRORS as exc:
         results.put(("error", f"{type(exc).__name__}: {exc}"))
 
@@ -883,6 +925,55 @@ def test_curated_capacity_scan_waits_for_active_revision_stage(tmp_path: Path) -
     assert len([1 for status, _ in received if status == "ok"]) == 1
     conflicts = [value for status, value in received if status == "error"]
     assert len(conflicts) == 1 and "maps to different content" in conflicts[0]
+
+
+def test_lake_wide_capacity_scan_serializes_published_tree_removal(tmp_path: Path) -> None:
+    root = tmp_path / "capacity-tree-lock"
+    published = root / "curated" / "dataset-a" / "snapshots" / "identity-a"
+    published.mkdir(parents=True)
+    (published / "data.parquet").write_bytes(b"published")
+    relative = published.relative_to(root).as_posix()
+    context = multiprocessing.get_context("spawn")
+    scan_ready = context.Event()
+    scan_release = context.Event()
+    remove_attempted = context.Event()
+    remove_completed = context.Event()
+    results = context.Queue()
+    scanner = context.Process(
+        target=_held_capacity_scan_process,
+        args=(str(root), scan_ready, scan_release, results),
+    )
+    remover = context.Process(
+        target=_published_tree_remove_process,
+        args=(
+            str(root),
+            relative,
+            remove_attempted,
+            remove_completed,
+            results,
+        ),
+    )
+    try:
+        scanner.start()
+        assert scan_ready.wait(20)
+        remover.start()
+        assert remove_attempted.wait(20)
+        assert not remove_completed.wait(0.5)
+    finally:
+        scan_release.set()
+        for process in (scanner, remover):
+            if process.pid is None:
+                continue
+            process.join(30)
+            if process.is_alive():
+                process.terminate()
+                process.join(5)
+    assert scanner.exitcode == 0
+    assert remover.exitcode == 0
+    received = dict(results.get(timeout=5) for _ in range(2))
+    assert received["remove"] == relative
+    assert int(received["scan"]) >= len(b"published")
+    assert not published.exists()
 
 
 def test_atomic_normalized_and_curated_staging_recover_after_hard_exit(tmp_path: Path) -> None:

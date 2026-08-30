@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import stat
+import threading
 import uuid
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -66,6 +67,14 @@ _EVENT_SCHEMAS = {
     "trade": TRADE_EVENT_SCHEMA_ID,
 }
 _GIB = 1024**3
+_CAPACITY_TREE_LOCK_STATE = threading.local()
+_TRANSIENT_LAKE_DIRECTORIES = {
+    ".legacy-staging",
+    ".locks",
+    ".stage-owners",
+    ".staging",
+    "staging",
+}
 
 
 class CollectionStoppedError(ValidationError):
@@ -456,7 +465,7 @@ def _atomic_write_bytes(root: Path, target: Path, body: bytes) -> None:
         checked_stale = _validate_lake_path(root, stale, allow_missing=False)
         if not checked_stale.is_file():
             raise ValidationError(f"Atomic staging entry is not a file: {checked_stale}")
-        checked_stale.unlink()
+        _unlink_tree_entry(root, checked_stale)
     temporary = parent / f"{temporary_prefix}{uuid.uuid4().hex}.tmp"
     _validate_lake_path(root, temporary, allow_missing=True)
     try:
@@ -466,10 +475,10 @@ def _atomic_write_bytes(root: Path, target: Path, body: bytes) -> None:
             os.fsync(stream.fileno())
         if _sha256_file(temporary) != _sha256_bytes(body):
             raise ValidationError(f"Atomic staging verification failed: {temporary}")
-        os.replace(temporary, checked_target)
+        _replace_tree_entry(root, temporary, checked_target)
     finally:
         if temporary.exists():
-            temporary.unlink()
+            _unlink_tree_entry(root, temporary)
 
 
 @contextmanager
@@ -480,6 +489,65 @@ def _lake_lock(root: Path, namespace: str, identity: Mapping[str, Any]) -> Itera
     lock_path = _validate_lake_path(root, lock_root / f"{lock_id}.lock", allow_missing=True)
     with process_file_lock(lock_path):
         yield
+
+
+@contextmanager
+def _capacity_tree_lock(root: Path) -> Iterable[None]:
+    """Serialize lake-wide capacity scans with topology-removing mutations."""
+    key = str(Path(root).absolute())
+    depths = getattr(_CAPACITY_TREE_LOCK_STATE, "depths", None)
+    if depths is None:
+        depths = {}
+        _CAPACITY_TREE_LOCK_STATE.depths = depths
+    if depths.get(key, 0):
+        depths[key] += 1
+        try:
+            yield
+        finally:
+            depths[key] -= 1
+        return
+    with _lake_lock(root, "capacity-tree", {"scope": "lake-wide"}):
+        depths[key] = 1
+        try:
+            yield
+        finally:
+            depths.pop(key, None)
+
+
+def _replace_tree_entry(root: Path, source: Path, target: Path) -> None:
+    """Atomically replace one lake entry without racing a capacity tree scan."""
+    with _capacity_tree_lock(root):
+        os.replace(source, target)
+
+
+def _publish_tree_entry(
+    root: Path,
+    source: Path,
+    target: Path,
+    *,
+    policy: StoragePolicy,
+) -> CapacityDecision:
+    """Capacity-check and publish one staged tree as a single lake-wide transaction."""
+    with _capacity_tree_lock(root):
+        decision = require_collection_capacity(
+            root,
+            projected_write_bytes=_tree_size(source),
+            policy=policy,
+        )
+        os.replace(source, target)
+        return decision
+
+
+def _remove_tree(root: Path, target: Path) -> None:
+    """Remove one lake subtree without racing a capacity tree scan."""
+    with _capacity_tree_lock(root):
+        shutil.rmtree(target)
+
+
+def _unlink_tree_entry(root: Path, target: Path, *, missing_ok: bool = False) -> None:
+    """Remove one lake file without racing a capacity tree scan."""
+    with _capacity_tree_lock(root):
+        target.unlink(missing_ok=missing_ok)
 
 
 @contextmanager
@@ -499,7 +567,7 @@ def _stable_staging_directory(
             checked_stale = _validate_lake_path(root, stale, allow_missing=False)
             if not checked_stale.is_dir():
                 raise ValidationError(f"Stable staging entry is not a directory: {checked_stale}")
-            shutil.rmtree(checked_stale)
+            _remove_tree(root, checked_stale)
         stage = checked_root / f"{prefix}{uuid.uuid4().hex}"
         _validate_lake_path(root, stage, allow_missing=True)
         stage.mkdir(exist_ok=False)
@@ -507,13 +575,22 @@ def _stable_staging_directory(
             yield stage
         finally:
             if stage.exists() and stage.parent == checked_root:
-                shutil.rmtree(stage)
+                _remove_tree(root, stage)
 
 
 def _tree_size(root: Path) -> int:
     if not root.exists():
         return 0
-    return sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
+    total = 0
+    for directory, child_directories, filenames in os.walk(root):
+        child_directories[:] = [
+            name for name in child_directories if name not in _TRANSIENT_LAKE_DIRECTORIES
+        ]
+        for filename in filenames:
+            if filename.startswith(".atomic-") and filename.endswith(".tmp"):
+                continue
+            total += (Path(directory) / filename).stat().st_size
+    return total
 
 
 def _disk_probe_path(root: Path) -> Path:
@@ -535,7 +612,11 @@ def evaluate_capacity(
     """Evaluate the 150GB hot quota and max(20% volume, 100GB) free-space gate."""
     if projected_write_bytes < 0:
         raise ValidationError("projected_write_bytes must be non-negative")
-    hot_bytes = _tree_size(Path(root)) if current_hot_bytes is None else current_hot_bytes
+    if current_hot_bytes is None:
+        with _capacity_tree_lock(Path(root)):
+            hot_bytes = _tree_size(Path(root))
+    else:
+        hot_bytes = current_hot_bytes
     if hot_bytes < 0:
         raise ValidationError("current_hot_bytes must be non-negative")
     if disk_total_bytes is None or disk_free_bytes is None:
@@ -797,7 +878,7 @@ def _relocate_invalid_raw(root: Path, object_dir: Path, *, reason: str) -> Path:
     quarantine_root = _mkdir_in_lake(root, Path(root) / "quarantine" / "raw-unpublished")
     target = quarantine_root / f"{uuid.uuid4().hex}-{object_dir.name}"
     _validate_lake_path(root, target, allow_missing=True)
-    os.replace(object_dir, target)
+    _replace_tree_entry(root, object_dir, target)
     evidence = {
         "schema_version": "2.0.0",
         "layer": "quarantine",
@@ -817,13 +898,15 @@ def _remove_staging_directory(root: Path, stage: Path) -> None:
     staging_root = _validate_lake_path(root, Path(root) / "raw" / ".staging", allow_missing=False)
     if checked.parent != staging_root:
         raise ValidationError("Refused to remove a non-staging Raw path")
-    shutil.rmtree(checked)
+    _remove_tree(root, checked)
 
 
 def _recover_raw_staging(
     root: Path,
     reference: RawObjectReference,
     manifest: RawObjectManifest,
+    *,
+    policy: StoragePolicy = _DEFAULT_STORAGE_POLICY,
 ) -> RawObjectManifest | None:
     staging_root = _mkdir_in_lake(root, Path(root) / "raw" / ".staging")
     object_dir = _raw_object_dir(root, reference)
@@ -850,7 +933,7 @@ def _recover_raw_staging(
             _remove_staging_directory(root, stage)
             recovered = existing
             continue
-        os.replace(stage, object_dir)
+        _publish_tree_entry(root, stage, object_dir, policy=policy)
         recovered = _load_raw_from_dir(root, object_dir, expected=reference)
     return recovered
 
@@ -930,7 +1013,7 @@ def write_raw_bytes(
         if list(key_dir.glob("deleting=*")):
             raise ValidationError(f"Raw idempotency key cleanup is in progress: {resolved_key}")
         object_dir = _raw_object_dir(lake_root, reference)
-        recovered = _recover_raw_staging(lake_root, reference, manifest)
+        recovered = _recover_raw_staging(lake_root, reference, manifest, policy=policy)
         if recovered is not None:
             return recovered
         for existing_dir in key_dir.glob("object=*"):
@@ -969,7 +1052,7 @@ def write_raw_bytes(
                 enforce_directory_identity=False,
             )
             _validate_lake_path(lake_root, object_dir, allow_missing=True)
-            os.replace(stage, object_dir)
+            _publish_tree_entry(lake_root, stage, object_dir, policy=policy)
             return _load_raw_from_dir(lake_root, object_dir, expected=reference)
         finally:
             if stage.exists():
@@ -1016,7 +1099,7 @@ def _verify_archive_restore(root: Path, archive_path: Path) -> tuple[str, str]:
         return archive_hash, _sha256_file(restore_path)
     finally:
         if restore_path.exists():
-            restore_path.unlink()
+            _unlink_tree_entry(root, restore_path)
 
 
 def _read_cleanup_audit(root: Path, reference: RawObjectReference) -> dict[str, Any]:
@@ -1098,7 +1181,7 @@ def _finalize_raw_deleting(
             raise ValidationError("Raw deleting payload length changed")
         if _sha256_file(payload_path) != manifest.content_sha256:
             raise ValidationError("Raw deleting payload hash changed")
-        payload_path.unlink()
+        _unlink_tree_entry(root, payload_path)
     manifest_path = deleting_dir / "manifest.json"
     if manifest_path.exists():
         manifest_path = _validate_lake_path(root, manifest_path, allow_missing=False)
@@ -1110,7 +1193,7 @@ def _finalize_raw_deleting(
             raise ValidationError("Raw deleting manifest is unreadable or malformed") from exc
         if remaining_manifest != manifest:
             raise ValidationError("Raw deleting manifest changed")
-        manifest_path.unlink()
+        _unlink_tree_entry(root, manifest_path)
     deleting_dir.rmdir()
 
 
@@ -1188,7 +1271,7 @@ def cleanup_archived_raw_object(
             if object_dir.exists():
                 if deleting_dir.exists():
                     raise ValidationError("Raw cleanup has both live and deleting states")
-                os.replace(object_dir, deleting_dir)
+                _replace_tree_entry(lake_root, object_dir, deleting_dir)
             if deleting_dir.exists():
                 _finalize_raw_deleting(lake_root, deleting_dir, manifest)
             return tombstone
@@ -1214,7 +1297,7 @@ def cleanup_archived_raw_object(
             current_time=current_time,
         )
         if should_rename:
-            os.replace(object_dir, deleting_dir)
+            _replace_tree_entry(lake_root, object_dir, deleting_dir)
         audit = {
             "schema_version": "2.0.0",
             "action": "verified_local_archive_cleanup",
@@ -1495,7 +1578,7 @@ def _write_quarantine(
         for stale in staging_root.glob(f"{batch_id}-*"):
             if stale.is_dir():
                 checked = _validate_lake_path(lake_root, stale, allow_missing=False)
-                shutil.rmtree(checked)
+                _remove_tree(lake_root, checked)
         require_collection_capacity(
             lake_root,
             projected_write_bytes=len(body) + len(manifest_bytes),
@@ -1515,11 +1598,11 @@ def _write_quarantine(
                 stream.flush()
                 os.fsync(stream.fileno())
             _validate_quarantine_batch(lake_root, stage, manifest)
-            os.replace(stage, batch_dir)
+            _publish_tree_entry(lake_root, stage, batch_dir, policy=policy)
             return _validate_quarantine_batch(lake_root, batch_dir, manifest)
         finally:
             if stage.exists():
-                shutil.rmtree(stage)
+                _remove_tree(lake_root, stage)
 
 
 def _write_normalized_events_legacy(
@@ -1754,8 +1837,7 @@ def _write_normalized_events_legacy(
                     quarantined_rows=len(quarantined),
                     quarantine_manifest=quarantine_manifest,
                 )
-            require_collection_capacity(lake_root, projected_write_bytes=0, policy=policy)
-            os.replace(stage, snapshot_dir)
+            _publish_tree_entry(lake_root, stage, snapshot_dir, policy=policy)
             stage = snapshot_dir
             verified = load_normalized_snapshot(root, snapshot_id)
             return NormalizationResult(

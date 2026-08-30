@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
@@ -22,6 +21,7 @@ from quant_data_kit.data_lake import (
     StoragePolicy,
     _atomic_write_bytes,
     _mkdir_in_lake,
+    _publish_tree_entry,
     _resolved_lake_root,
     _stable_staging_directory,
     _validate_lake_path,
@@ -388,8 +388,7 @@ def _publish_curated_snapshot(
         if existing != snapshot:
             raise ValidationError(f"Curated snapshot collision: {snapshot_dir}")
     else:
-        require_collection_capacity(lake_root, projected_write_bytes=0, policy=policy)
-        os.replace(stage, snapshot_dir)
+        _publish_tree_entry(lake_root, stage, snapshot_dir, policy=policy)
     if not revision_path.exists():
         _atomic_write_bytes(
             lake_root,
