@@ -82,7 +82,9 @@ def test_epoch_group_is_fail_closed_and_preserves_per_journal_counts(
     part = EpochPart("unused.ndjson", 2, "0" * 64, 0)
     job = (tmp_path, tmp_path, (part,), "binance", "BINANCE", (), policy)
 
-    monkeypatch.setattr(epoch_module, "_iter_epoch_record_batches", lambda *_args: iter(()))
+    monkeypatch.setattr(
+        epoch_module, "_iter_epoch_record_batches", lambda *_args, **_kwargs: iter(())
+    )
 
     def accepted(_root, batches, **_kwargs):
         assert list(batches) == []
@@ -148,7 +150,7 @@ def test_epoch_executor_and_journal_decode_negative_branches(
         len(malformed),
     )
     with pytest.raises(ValidationError, match="line is malformed"):
-        list(epoch_module._iter_epoch_records(tmp_path, (malformed_part,)))
+        list(epoch_module._iter_epoch_records(tmp_path, (malformed_part,), trusted_root=tmp_path))
 
     scalar = b"[]\n"
     scalar_path = tmp_path / "scalar.ndjson"
@@ -160,7 +162,7 @@ def test_epoch_executor_and_journal_decode_negative_branches(
         len(scalar),
     )
     with pytest.raises(ValidationError, match="must be an object"):
-        list(epoch_module._iter_epoch_records(tmp_path, (scalar_part,)))
+        list(epoch_module._iter_epoch_records(tmp_path, (scalar_part,), trusted_root=tmp_path))
 
 
 def test_provider_batching_executor_propagates_results_and_failures() -> None:
