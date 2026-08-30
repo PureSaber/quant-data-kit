@@ -1,0 +1,37 @@
+{
+  "schema_version": "puresaber.m7-cli-capacity-refusal-evidence@1.0.0",
+  "source_commit": "13e004a80296bb3a49c4bd54e64cb64670e56b01",
+  "working_tree_dirty": false,
+  "package_version": "0.7.4",
+  "config": {
+    "path": ".m7/m7-remediation-real-config.json",
+    "sha256": "996b67999f3fc4962d5757349976f825db39bf1612a12ecf1d9de857574feff6",
+    "archive_reserve_bytes": 161061273600
+  },
+  "invocations": [
+    {
+      "argv": ["qdk-capture.exe", ".m7/m7-remediation-real-config.json", "--mode", "preflight"],
+      "exit_code": 2,
+      "run_id": "capture-3277ade5b23b458bad3205acd8110708",
+      "status": "PAUSED_PREFLIGHT_FAILED",
+      "report_sha256": "7d67e3bf0af9a8bedb1ffa8140a96bdad13270fa92d853212670ac034bf61581",
+      "report_file_sha256": "14a316e9e0064ecb021fb4d5e5c888db0fc7d5adb62dd13639754d9be9a81643",
+      "websocket_messages": 0,
+      "long_running_capture_started": false
+    },
+    {
+      "argv": ["qdk-capture.exe", ".m7/m7-remediation-real-config.json", "--mode", "run", "--confirm-long-running"],
+      "exit_code": 2,
+      "run_id": "capture-63feda962224425691b3fc8411bf0020",
+      "status": "PAUSED_PREFLIGHT_FAILED",
+      "report_sha256": "a4bf86a784fea977f54e218d95fce36eec4580d5f55e341418f1c5ded095b6e4",
+      "report_file_sha256": "c9fe225f7112d275b68db2766272a7420559968901e4d05696b1541c0c00aff5",
+      "websocket_messages": 0,
+      "long_running_capture_started": false
+    }
+  ],
+  "network_started": false,
+  "public_messages_received": 0,
+  "capacity_floor_bytes": 199710735564,
+  "result": "PASS_FAIL_CLOSED"
+}
