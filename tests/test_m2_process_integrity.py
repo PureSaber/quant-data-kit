@@ -976,6 +976,28 @@ def test_lake_wide_capacity_scan_serializes_published_tree_removal(tmp_path: Pat
     assert not published.exists()
 
 
+def test_capacity_scan_counts_published_dataset_named_staging(tmp_path: Path) -> None:
+    root = tmp_path / "published-staging-dataset"
+    published = root / "curated" / "staging" / "snapshots" / "sha256-demo"
+    published.mkdir(parents=True)
+    payload = b"published-content"
+    (published / "data.parquet").write_bytes(payload)
+    decision = lake_module.evaluate_capacity(
+        root,
+        projected_write_bytes=0,
+        policy=StoragePolicy(
+            hot_quota_bytes=len(payload) - 1,
+            minimum_free_bytes=1,
+            minimum_free_fraction=0.000001,
+        ),
+        disk_total_bytes=10**9,
+        disk_free_bytes=10**9,
+    )
+    assert decision.hot_bytes >= len(payload)
+    assert not decision.allowed
+    assert any("hot quota exceeded" in reason for reason in decision.reasons)
+
+
 def test_atomic_normalized_and_curated_staging_recover_after_hard_exit(tmp_path: Path) -> None:
     root = tmp_path / "staging-hard-exit"
     root.mkdir()

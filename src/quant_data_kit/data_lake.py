@@ -68,12 +68,14 @@ _EVENT_SCHEMAS = {
 }
 _GIB = 1024**3
 _CAPACITY_TREE_LOCK_STATE = threading.local()
-_TRANSIENT_LAKE_DIRECTORIES = {
-    ".legacy-staging",
-    ".locks",
-    ".stage-owners",
-    ".staging",
-    "staging",
+_TRANSIENT_LAKE_RELATIVE_DIRECTORIES = {
+    (".locks",),
+    ("normalized", ".stage-owners"),
+    ("normalized", "event-claim-index-v3", ".legacy-staging"),
+    ("normalized", "event-claim-index-v3", ".staging"),
+    ("normalized", "staging"),
+    ("quarantine", ".staging"),
+    ("raw", ".staging"),
 }
 
 
@@ -544,6 +546,12 @@ def _remove_tree(root: Path, target: Path) -> None:
         shutil.rmtree(target)
 
 
+def _remove_empty_tree(root: Path, target: Path) -> None:
+    """Remove one empty lake directory without racing a capacity tree scan."""
+    with _capacity_tree_lock(root):
+        target.rmdir()
+
+
 def _unlink_tree_entry(root: Path, target: Path, *, missing_ok: bool = False) -> None:
     """Remove one lake file without racing a capacity tree scan."""
     with _capacity_tree_lock(root):
@@ -583,14 +591,24 @@ def _tree_size(root: Path) -> int:
         return 0
     total = 0
     for directory, child_directories, filenames in os.walk(root):
+        relative_directory = Path(directory).relative_to(root)
         child_directories[:] = [
-            name for name in child_directories if name not in _TRANSIENT_LAKE_DIRECTORIES
+            name
+            for name in child_directories
+            if not _is_transient_lake_directory(relative_directory / name)
         ]
         for filename in filenames:
             if filename.startswith(".atomic-") and filename.endswith(".tmp"):
                 continue
             total += (Path(directory) / filename).stat().st_size
     return total
+
+
+def _is_transient_lake_directory(relative_path: Path) -> bool:
+    parts = relative_path.parts
+    return parts in _TRANSIENT_LAKE_RELATIVE_DIRECTORIES or (
+        len(parts) == 3 and parts[0] == "curated" and parts[2] == "staging"
+    )
 
 
 def _disk_probe_path(root: Path) -> Path:
@@ -1194,7 +1212,7 @@ def _finalize_raw_deleting(
         if remaining_manifest != manifest:
             raise ValidationError("Raw deleting manifest changed")
         _unlink_tree_entry(root, manifest_path)
-    deleting_dir.rmdir()
+    _remove_empty_tree(root, deleting_dir)
 
 
 def validate_raw_reference(
@@ -1913,6 +1931,7 @@ def _load_normalized_snapshot(
     snapshot_id: str,
     *,
     verify_event_claim_files: bool,
+    recovery_policy: StoragePolicy | None = None,
 ) -> NormalizedSnapshot:
     lake_root = _resolved_lake_root(root, create=False)
     snapshot_id = _segment(snapshot_id, "snapshot_id")
@@ -1936,6 +1955,7 @@ def _load_normalized_snapshot(
             lake_root,
             snapshot_id,
             payload=payload,
+            recovery_policy=recovery_policy,
         )
     payload["upstream_raw_references"] = tuple(
         RawObjectReference(**item) for item in payload["upstream_raw_references"]
@@ -2018,8 +2038,18 @@ def _load_normalized_snapshot(
     return snapshot
 
 
-def load_normalized_snapshot(root: Path, snapshot_id: str) -> NormalizedSnapshot:
-    return _load_normalized_snapshot(root, snapshot_id, verify_event_claim_files=True)
+def load_normalized_snapshot(
+    root: Path,
+    snapshot_id: str,
+    *,
+    recovery_policy: StoragePolicy | None = None,
+) -> NormalizedSnapshot:
+    return _load_normalized_snapshot(
+        root,
+        snapshot_id,
+        verify_event_claim_files=True,
+        recovery_policy=recovery_policy,
+    )
 
 
 def read_normalized_events(
