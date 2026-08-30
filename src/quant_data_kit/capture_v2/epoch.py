@@ -30,6 +30,7 @@ from quant_data_kit.capture_v2.storage import (
 from quant_data_kit.data_lake import (
     RawObjectReference,
     StoragePolicy,
+    _capacity_tree_lock,
     validate_raw_reference,
     write_normalized_batches,
 )
@@ -1548,16 +1549,17 @@ class NormalizedEpochJournal:
         final_name = f"part-{index:08d}-sha256-{digest}.ndjson"
         final_path = self.root / final_name
         checked_final = _validate_safe_path(self.hot_root, final_path, allow_missing=True)
-        try:
-            os.link(self._open_path, checked_final)
-        except FileExistsError as exc:
-            raise ValidationError(
-                f"Normalized journal part already exists: {checked_final}"
-            ) from exc
+        with _capacity_tree_lock(self.hot_root):
+            try:
+                os.link(self._open_path, checked_final)
+            except FileExistsError as exc:
+                raise ValidationError(
+                    f"Normalized journal part already exists: {checked_final}"
+                ) from exc
+            self._open_path.unlink()
         _validate_safe_path(self.hot_root, checked_final, allow_missing=False)
         if _sha256_file(checked_final, trusted_root=self.hot_root) != digest:
             raise ValidationError(f"Normalized sealed journal part hash changed: {checked_final}")
-        self._open_path.unlink()
         _fsync_directory(self.root)
         self._parts.append(
             EpochPart(

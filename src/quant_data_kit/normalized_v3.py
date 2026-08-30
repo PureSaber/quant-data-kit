@@ -45,6 +45,8 @@ from quant_data_kit.data_lake import (
     _lake_lock,
     _mkdir_in_lake,
     _partition_segment,
+    _publish_tree_entry,
+    _replace_tree_entry,
     _resolved_lake_root,
     _safe_snapshot_partition,
     _segment,
@@ -866,7 +868,7 @@ def _publish_quarantine_file(
             (stage / "manifest.json").write_bytes(manifest_bytes)
             _validate_quarantine_batch(root, stage, manifest)
             _mkdir_in_lake(root, batch_dir.parent)
-            os.replace(stage, batch_dir)
+            _publish_tree_entry(root, stage, batch_dir, policy=policy)
             return _validate_quarantine_batch(root, batch_dir, manifest)
         finally:
             if stage.exists():
@@ -1339,6 +1341,7 @@ def _publish_or_validate_claim_index(
     snapshot_id: str,
     snapshot_logical_sha256: str,
     expected: EventClaimIndexManifest,
+    policy: StoragePolicy | None = None,
 ) -> tuple[Path, ...]:
     final = _claim_index_root(root, snapshot_id)
     with _lake_lock(root, "normalized-claim-index", {"snapshot_id": snapshot_id}):
@@ -1351,13 +1354,17 @@ def _publish_or_validate_claim_index(
                     expected,
                 )
             except _ClaimIndexMissingError:
+                if policy is None:
+                    raise ValidationError(
+                        "Normalized claim-index recovery requires an explicit StoragePolicy"
+                    )
                 evidence_root = _mkdir_in_lake(
                     root,
                     root / "normalized" / "event-claim-index-v3" / "recovery-evidence",
                 )
                 evidence = evidence_root / f"{snapshot_id}-{uuid.uuid4().hex}"
-                os.replace(final, evidence)
-                os.replace(staged_index, final)
+                _replace_tree_entry(root, final, evidence)
+                _publish_tree_entry(root, staged_index, final, policy=policy)
                 return _validate_claim_index(
                     root,
                     snapshot_id,
@@ -1366,7 +1373,11 @@ def _publish_or_validate_claim_index(
                 )
         _mkdir_in_lake(root, final.parent)
         _validate_lake_path(root, final, allow_missing=True)
-        os.replace(staged_index, final)
+        if policy is None:
+            raise ValidationError(
+                "Normalized claim-index recovery requires an explicit StoragePolicy"
+            )
+        _publish_tree_entry(root, staged_index, final, policy=policy)
         return _validate_claim_index(
             root,
             snapshot_id,
@@ -1409,6 +1420,7 @@ def _index_for_snapshot(
     snapshot_id: str,
     snapshot_logical_sha256: str,
     expected: EventClaimIndexManifest,
+    policy: StoragePolicy | None = None,
 ) -> tuple[Path, ...]:
     final = _claim_index_root(root, snapshot_id)
     verification_root = _mkdir_in_lake(
@@ -1455,6 +1467,7 @@ def _index_for_snapshot(
             snapshot_id=snapshot_id,
             snapshot_logical_sha256=snapshot_logical_sha256,
             expected=expected,
+            policy=policy,
         )
     finally:
         if connection is not None:
@@ -1500,7 +1513,12 @@ def iter_event_claims_v3(
         connection.close()
 
 
-def _historical_index_paths(root: Path, candidate_snapshot_id: str) -> tuple[Path, ...]:
+def _historical_index_paths(
+    root: Path,
+    candidate_snapshot_id: str,
+    *,
+    policy: StoragePolicy | None = None,
+) -> tuple[Path, ...]:
     snapshots_root = root / "normalized" / "snapshots"
     paths: list[Path] = []
     if not snapshots_root.exists():
@@ -1514,6 +1532,7 @@ def _historical_index_paths(root: Path, candidate_snapshot_id: str) -> tuple[Pat
             root,
             snapshot_dir.name,
             verify_event_claim_files=True,
+            recovery_policy=policy,
         )
         if snapshot.layout_version != LAYOUT_VERSION or snapshot.event_claim_index is None:
             legacy_root = _mkdir_in_lake(
@@ -1553,6 +1572,7 @@ def _historical_index_paths(root: Path, candidate_snapshot_id: str) -> tuple[Pat
                         snapshot_id=snapshot.snapshot_id,
                         snapshot_logical_sha256=snapshot.logical_sha256,
                         expected=expected,
+                        policy=policy,
                     )
                 )
             finally:
@@ -1577,8 +1597,13 @@ def _assert_lake_wide_claims(
     candidate_paths: tuple[Path, ...],
     *,
     candidate_snapshot_id: str,
+    policy: StoragePolicy | None = None,
 ) -> None:
-    historical_paths = _historical_index_paths(root, candidate_snapshot_id)
+    historical_paths = _historical_index_paths(
+        root,
+        candidate_snapshot_id,
+        policy=policy,
+    )
     if not historical_paths:
         return
     connection = duckdb.connect(database=":memory:")
@@ -1604,6 +1629,7 @@ def load_normalized_snapshot_v3(
     snapshot_id: str,
     *,
     payload: Mapping[str, Any] | None = None,
+    recovery_policy: StoragePolicy | None = None,
     _trusted_publish: bool = False,
 ) -> NormalizedSnapshot:
     lake_root = _resolved_lake_root(root, create=False)
@@ -1750,6 +1776,7 @@ def load_normalized_snapshot_v3(
             snapshot_id=snapshot_id,
             snapshot_logical_sha256=logical_sha256,
             expected=claim_index,
+            policy=recovery_policy,
         )
     claims = EventClaimSequence(lake_root, snapshot_id, claim_index)
     return NormalizedSnapshot(
@@ -2508,6 +2535,7 @@ def _finalize_strict_batch_snapshot(
             lake_root,
             candidate_paths,
             candidate_snapshot_id=snapshot_id,
+            policy=policy,
         )
         require_collection_capacity(lake_root, projected_write_bytes=0, policy=policy)
         _mkdir_in_lake(lake_root, snapshot_dir.parent)
@@ -2520,12 +2548,13 @@ def _finalize_strict_batch_snapshot(
             snapshot_id=snapshot_id,
             snapshot_logical_sha256=logical_sha256,
             expected=claim_index,
+            policy=policy,
         )
         try:
-            os.replace(snapshot_stage, snapshot_dir)
+            _publish_tree_entry(lake_root, snapshot_stage, snapshot_dir, policy=policy)
         except OSError:
             if not index_preexisted and index_root.exists():
-                os.replace(index_root, staged_index)
+                _replace_tree_entry(lake_root, index_root, staged_index)
             raise
     verified = load_normalized_snapshot_v3(
         lake_root,
@@ -2883,6 +2912,7 @@ def write_normalized_events_v3(
                 lake_root,
                 candidate_paths,
                 candidate_snapshot_id=snapshot_id,
+                policy=policy,
             )
             require_collection_capacity(lake_root, projected_write_bytes=0, policy=policy)
             _mkdir_in_lake(lake_root, snapshot_dir.parent)
@@ -2895,12 +2925,13 @@ def write_normalized_events_v3(
                 snapshot_id=snapshot_id,
                 snapshot_logical_sha256=logical_sha256,
                 expected=claim_index,
+                policy=policy,
             )
             try:
-                os.replace(snapshot_stage, snapshot_dir)
+                _publish_tree_entry(lake_root, snapshot_stage, snapshot_dir, policy=policy)
             except OSError:
                 if not index_preexisted and index_root.exists():
-                    os.replace(index_root, staged_index)
+                    _replace_tree_entry(lake_root, index_root, staged_index)
                 raise
         verified = load_normalized_snapshot_v3(
             lake_root,

@@ -252,8 +252,15 @@ def test_claim_index_schema_logical_shape_and_missing_manifest_paths(
         / f"snapshot={recovery.snapshot.snapshot_id}"
     )
     (recovery_index / "manifest.json").unlink()
+    with pytest.raises(ValidationError, match="explicit StoragePolicy"):
+        load_normalized_snapshot(recovery_root, recovery.snapshot.snapshot_id)
     assert (
-        load_normalized_snapshot(recovery_root, recovery.snapshot.snapshot_id) == recovery.snapshot
+        load_normalized_snapshot(
+            recovery_root,
+            recovery.snapshot.snapshot_id,
+            recovery_policy=TEST_POLICY,
+        )
+        == recovery.snapshot
     )
     assert (recovery_index / "manifest.json").is_file()
 
