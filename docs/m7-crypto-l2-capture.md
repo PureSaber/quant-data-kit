@@ -55,18 +55,23 @@ Admitted snapshots and deltas are spooled in bounded Normalized epochs. Publicat
 existing strict Arrow-batch path, PIT checks, schemas, quarantine rules and Raw references. Every
 finalize attempt persists an immutable`PREPARED`transaction before publishing a visible snapshot,
 then ends in a content-addressed`COMMITTED`receipt or`ABORTED`failure. Before any network startup,
-the coordinator scans all journal parents, validates every transaction and path, and idempotently
-replays unresolved`PREPARED`or retryable`ABORTED`transactions. A process termination after snapshot
-publication but before receipt publication therefore cannot leave an unaudited snapshot. Gaps or
-connection failures explicitly abort the current epoch before resynchronization.
+the coordinator anchors every journal to the frozen stream configuration, scans all journal
+parents, validates every transaction、terminal-state conflict、journal part、Raw reference、snapshot
+identity and path, and idempotently replays unresolved`PREPARED`or retryable`ABORTED`transactions.
+A real spawned-process test terminates with`os._exit`after snapshot publication but before receipt
+publication and proves that a fresh process commits the transaction before any network runner is
+created. A transaction without a durable PREPARED identity blocks startup instead of being skipped.
+Gaps or connection failures explicitly abort the current epoch before resynchronization.
 
 ## Capacity and independent archive controls
 
 `hot_root`、`archive_root`and`restore_root`must be explicit absolute existing directories. The hot
 and archive roots are resolved through an injectable physical-volume probe; different path strings
 on the same physical device fail preflight. All three roots and each final parent reject symbolic
-links、Windows junctions/reparse points and resolved escapes. This applies to journal creation,
-parts, transaction recovery, receipts and abort records as well as Raw/archive paths. Collection takes an exact startup
+links、Windows junctions/reparse points and resolved escapes. The bootstrap lock itself is created
+and checked as a regular non-reparse object before the file-lock backend may open it. These rules
+apply to journal creation, parts, transaction recovery, receipts and abort records as well as
+Raw/archive paths. Collection takes an exact startup
 baseline, reserves every projected write under a thread-safe incremental counter, and repeats real
 tree/capacity probes at bounded message、byte or monotonic-time intervals. It pauses if projected
 hot data exceeds150GiB or if free space falls below
