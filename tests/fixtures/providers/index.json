@@ -4,7 +4,7 @@
   "market_data_certified": false,
   "provider_integrity": {
     "binance": "U/u/pu continuity plus immutable Raw SHA-256; provider has no books checksum field",
-    "okx": "signed CRC32 books checksum plus immutable Raw SHA-256",
+    "okx": "current live prerequisite is TLS plus strict seqId/prevSeqId continuity; checksum=0 is not an integrity signal; bundled nonzero signed CRC32 books values are historical golden-fixture checks only; immutable Raw SHA-256 remains mandatory; not market-data-certified",
     "cn_neutral": "desensitized replay fixture only; not market-data-certified"
   },
   "l2_checkpoint_sha256": {

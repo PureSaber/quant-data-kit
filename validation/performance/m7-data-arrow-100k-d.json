@@ -1,0 +1,251 @@
+{
+  "benchmark": "quant-data-kit-normalized-v3-synthetic-l2",
+  "environment": {
+    "duckdb": "1.5.5",
+    "git": {
+      "branch": "codex/cross-asset-v2-m7-data-performance",
+      "commit": "edf1351690dc60691cc6330390adcdbf8bc79c5f",
+      "dirty": true
+    },
+    "jsonschema_rs": "0.52.0",
+    "logical_cpu_count": 16,
+    "orjson": "3.12.0",
+    "platform": "Windows-11-10.0.22631-SP0",
+    "psutil": "7.2.2",
+    "pyarrow": "23.0.1",
+    "python": "3.12.5 (tags/v3.12.5:ff3bc82, Aug  6 2024, 20:45:27) [MSC v.1940 64 bit (AMD64)]",
+    "quant_data_kit": "0.6.1"
+  },
+  "fixture": "one valid snapshot followed by same-book sequential upsert deltas",
+  "gates": {
+    "all_rows_accepted": true,
+    "deterministic_artifacts": true,
+    "maximum_peak_rss": true,
+    "minimum_throughput": false
+  },
+  "input_contract": "Iterable[pyarrow.RecordBatch]",
+  "measurement_scope": "write_normalized_batches end-to-end from generated schema-exact RecordBatch: vector validation, PIT/sequence/L2 reconstruction, Parquet, claims, immutable publish, and verified reload; Raw admission setup excluded",
+  "passed": false,
+  "record_batch_rows": 65536,
+  "rows_per_run": 100000,
+  "run_results": [
+    {
+      "accepted_rows": 100000,
+      "claim_index": {
+        "claim_version": "3.1.0",
+        "format": "streaming-parquet-v2",
+        "rows": 100000,
+        "shards": [
+          {
+            "logical_sha256": "ca3729758321a18aa10a4dfd76e9b84c47217b8ff4618a6d78106e8a815a24d9",
+            "rows": 6353,
+            "shard": "0"
+          },
+          {
+            "logical_sha256": "9f99733c82b0e2233ec652c003f6b6e09783c1f695f0c22d8fd873c965589bb1",
+            "rows": 6224,
+            "shard": "1"
+          },
+          {
+            "logical_sha256": "ef67fceca0a503e57fb10f21ffdccac7f310716278b3727ceb80b0058d148377",
+            "rows": 6021,
+            "shard": "2"
+          },
+          {
+            "logical_sha256": "a782ed11b9375dfa0f41b00aa92888ca59da96bfd83b66b19026f6efe35a6d4c",
+            "rows": 6372,
+            "shard": "3"
+          },
+          {
+            "logical_sha256": "b38ff6775f64e0a2a6ad4254a78e73a17b48899958e21208f739b8719e8c3964",
+            "rows": 6312,
+            "shard": "4"
+          },
+          {
+            "logical_sha256": "317d549f1fc27e3f633ec49f32b0905437738326aad7b21c4f0bea4bad97ae26",
+            "rows": 6247,
+            "shard": "5"
+          },
+          {
+            "logical_sha256": "e0d1f6f9f915e49107cef016552b91fa6e62ab39813941e23da67154101089d9",
+            "rows": 6276,
+            "shard": "6"
+          },
+          {
+            "logical_sha256": "20db4b85ce7297b54e38f3a0bc92c8a428874ee360bd5e9bab2347306bdb463c",
+            "rows": 6306,
+            "shard": "7"
+          },
+          {
+            "logical_sha256": "b78d16356c49a8a0dd0f2409d1fd72ec549d3e695d6b721b52b0b42a83a3bd40",
+            "rows": 6148,
+            "shard": "8"
+          },
+          {
+            "logical_sha256": "92f6864ba7c023fd82e8e8a7baa65d44138921cf0116850e9fc2418d0c79feaf",
+            "rows": 6270,
+            "shard": "9"
+          },
+          {
+            "logical_sha256": "5796eae88288e2357becf27dfa9ba7748f45d8ce79b80e364dd7ce2e585e1684",
+            "rows": 6315,
+            "shard": "a"
+          },
+          {
+            "logical_sha256": "24a2d605eafe596326ac0bdfedefac576730545230d38add8e2b7bfce702c5e1",
+            "rows": 6303,
+            "shard": "b"
+          },
+          {
+            "logical_sha256": "e0a78dd0b46bdfc0b51782ccee774657965190af8aa1b01c94b8564797f25422",
+            "rows": 6204,
+            "shard": "c"
+          },
+          {
+            "logical_sha256": "77ec2706e80848d7b3dc064939eff7fac999938824e1898460b32413a52b9a31",
+            "rows": 6175,
+            "shard": "d"
+          },
+          {
+            "logical_sha256": "32e1c2ec2fa1672a1c45b390d6e5bec5b873832751887c63a0bafde0b8a4391e",
+            "rows": 6260,
+            "shard": "e"
+          },
+          {
+            "logical_sha256": "98058e272cf79b41a95b247aa24610e466ba732ebf466b2d476e88d083c1d0f6",
+            "rows": 6214,
+            "shard": "f"
+          }
+        ]
+      },
+      "elapsed_seconds": 3.5555067999994208,
+      "events_per_second": 28125.38566935557,
+      "final_l2_checkpoint": {
+        "instrument_id": "BTC-USDT-SPOT",
+        "sequence": 100000,
+        "session_id": "binance-24x7-BTC-USDT-SPOT",
+        "source": "binance",
+        "state_sha256": "724ae0d3ae5dd7de305e9c6de8b4a3a801cfd756a07cf34c687ac56c2f8237f6"
+      },
+      "partition_manifests": [
+        {
+          "content_sha256": "42ba0cc9b96be842eed886cade01b053ea87fa18d659474d652706a13c4e3b29",
+          "event_type": "book_delta",
+          "instrument_id": "BTC-USDT-SPOT",
+          "logical_sha256": "1280da328530931403ba87847b201d4447fbcdf9c2acca91faff9d9c9e174540",
+          "provider": "binance",
+          "relative_path": "provider=binance/venue=BINANCE/event_type=book_delta/date=2026-01-02/instrument=BTC-USDT-SPOT/data.parquet",
+          "rows": 99999,
+          "schema_id": "puresaber.book-delta-event",
+          "trading_date": "2026-01-02",
+          "venue": "BINANCE"
+        },
+        {
+          "content_sha256": "2660c39d2ea03a9221d2f19dc956f65c32b4e77dbdd3dfc6574c18dcd9e91016",
+          "event_type": "book_snapshot",
+          "instrument_id": "BTC-USDT-SPOT",
+          "logical_sha256": "92b49432a855331ebb7ca2e78fc2df6d4f3c962c2ebc7b069e6703facb168c16",
+          "provider": "binance",
+          "relative_path": "provider=binance/venue=BINANCE/event_type=book_snapshot/date=2026-01-02/instrument=BTC-USDT-SPOT/data.parquet",
+          "rows": 1,
+          "schema_id": "puresaber.book-snapshot-event",
+          "trading_date": "2026-01-02",
+          "venue": "BINANCE"
+        }
+      ],
+      "peak_rss_bytes": 301142016,
+      "peak_rss_gib": 0.2804603576660156,
+      "quarantined_rows": 0,
+      "retained_bytes": 11060226,
+      "rows": 100000,
+      "run": 1,
+      "snapshot_id": "sha256-6c804f1733179c989fa534a38b8c07bd0cecc211ec605cfef2ed50d77062a6dc",
+      "snapshot_logical_sha256": "6c804f1733179c989fa534a38b8c07bd0cecc211ec605cfef2ed50d77062a6dc",
+      "snapshot_manifest_sha256": "40b9fece00975848ec2d19d28b83b66ef1f7681eb3b2ab1ea9f57105a0be3532",
+      "stage_timings": {
+        "_InputSpool.flush": {
+          "calls": 0,
+          "seconds": 0.0
+        },
+        "_JsonArrayDigest.update": {
+          "calls": 3,
+          "seconds": 0.07457110000177636
+        },
+        "_OpenPartition.flush": {
+          "calls": 4,
+          "seconds": 3.900004230672494e-06
+        },
+        "_arrow_ready_rows": {
+          "calls": 0,
+          "seconds": 0.0
+        },
+        "_assert_lake_wide_claims": {
+          "calls": 1,
+          "seconds": 8.70000003487803e-05
+        },
+        "_build_claim_index_files": {
+          "calls": 1,
+          "seconds": 0.8506331999997201
+        },
+        "_claim_database": {
+          "calls": 0,
+          "seconds": 0.0
+        },
+        "_claim_shard_manifests": {
+          "calls": 0,
+          "seconds": 0.0
+        },
+        "_claim_shard_manifests_from_paths": {
+          "calls": 3,
+          "seconds": 0.2016373999977077
+        },
+        "_duplicate_event_ids": {
+          "calls": 0,
+          "seconds": 0.0
+        },
+        "_export_claim_index": {
+          "calls": 0,
+          "seconds": 0.0
+        },
+        "_logical_rows": {
+          "calls": 4,
+          "seconds": 0.3082023000024492
+        },
+        "_partition_manifests": {
+          "calls": 1,
+          "seconds": 0.029647700001078192
+        },
+        "_publish_or_validate_claim_index": {
+          "calls": 1,
+          "seconds": 0.1011237999991863
+        },
+        "_write_claim_index_manifest": {
+          "calls": 1,
+          "seconds": 0.007497099999454804
+        },
+        "load_normalized_snapshot_v3": {
+          "calls": 1,
+          "seconds": 0.11618589999852702
+        }
+      }
+    }
+  ],
+  "runs": 1,
+  "schema_version": "1.0.0",
+  "summary": {
+    "maximum_peak_rss_gib": 0.2804603576660156,
+    "median_events_per_second": 28125.38566935557,
+    "minimum_events_per_second": 28125.38566935557,
+    "retained_bytes": 11060226
+  },
+  "thresholds": {
+    "maximum_peak_rss_gib": 16.0,
+    "minimum_events_per_second": 100000.0,
+    "storage_policy": {
+      "hot_quota_bytes": 161061273600,
+      "hot_retention_days": 30,
+      "minimum_free_bytes": 107374182400,
+      "minimum_free_fraction": 0.2
+    }
+  }
+}

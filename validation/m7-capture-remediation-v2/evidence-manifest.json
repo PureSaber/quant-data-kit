@@ -1,0 +1,81 @@
+{
+  "schema_version": "puresaber.m7-capture-core-remediation-evidence@2.0.0",
+  "source_commit": "a11a0c2c7fe50f4e0cb7d2bcc0a8466d4a11d21c",
+  "source_working_tree_dirty": false,
+  "package_version": "0.7.1",
+  "certification": {
+    "software_fixture": "PASS_PENDING_INDEPENDENT_VALIDATION",
+    "performance": "PASS_PENDING_INDEPENDENT_VALIDATION",
+    "public_network": "NOT_RUN",
+    "continuous_days": 0,
+    "market_data_certified": false
+  },
+  "artifacts": [
+    {
+      "label": "dense-round-01",
+      "path": "artifacts/dense-round-01-sha256-574c03c09c86751fe383b97105c8807a23269e634320b1eeec3f5f451907e1b7.json",
+      "sha256": "574c03c09c86751fe383b97105c8807a23269e634320b1eeec3f5f451907e1b7",
+      "bytes": 4581
+    },
+    {
+      "label": "dense-round-02",
+      "path": "artifacts/dense-round-02-sha256-14774e80b042a4909695a4d25a15255ef202915befa63c34836cefebf4ca171e.json",
+      "sha256": "14774e80b042a4909695a4d25a15255ef202915befa63c34836cefebf4ca171e",
+      "bytes": 4579
+    },
+    {
+      "label": "dense-round-03",
+      "path": "artifacts/dense-round-03-sha256-737ccd9b17207b90ea98fbc8e91292e7dcefde45ffb4d60e3cfdaa6411e4c59a.json",
+      "sha256": "737ccd9b17207b90ea98fbc8e91292e7dcefde45ffb4d60e3cfdaa6411e4c59a",
+      "bytes": 4584
+    },
+    {
+      "label": "sparse-round-01",
+      "path": "artifacts/sparse-round-01-sha256-00f1aea7fb6e0fcb40dc97200e2d8b46d01e2612428bbca3f7ba1c5324355954.json",
+      "sha256": "00f1aea7fb6e0fcb40dc97200e2d8b46d01e2612428bbca3f7ba1c5324355954",
+      "bytes": 4406
+    },
+    {
+      "label": "sparse-round-02",
+      "path": "artifacts/sparse-round-02-sha256-fec8522d1cbb5c0ca4af930ceb982ea6d3c0366bbbdedcfc5932c42d8bff2481.json",
+      "sha256": "fec8522d1cbb5c0ca4af930ceb982ea6d3c0366bbbdedcfc5932c42d8bff2481",
+      "bytes": 4408
+    },
+    {
+      "label": "sparse-round-03",
+      "path": "artifacts/sparse-round-03-sha256-917d0b3f9dc78d13c7735ca9eaf0e9c4aba8c37fe7028ef9afbb3f53a839cf6d.json",
+      "sha256": "917d0b3f9dc78d13c7735ca9eaf0e9c4aba8c37fe7028ef9afbb3f53a839cf6d",
+      "bytes": 4407
+    },
+    {
+      "label": "full-coverage",
+      "path": "artifacts/full-coverage-sha256-9b489a35d455bee31134d35cfd702f4b0e69f890bf088ed115c2d2a4e742d2a6.json",
+      "sha256": "9b489a35d455bee31134d35cfd702f4b0e69f890bf088ed115c2d2a4e742d2a6",
+      "bytes": 1120982
+    },
+    {
+      "label": "full-pytest-junit",
+      "path": "artifacts/full-pytest-junit-sha256-d310dd43d01e46972125d4a9e4cfb7626e8394ddf8e8425861ee9104a53528e7.xml",
+      "sha256": "d310dd43d01e46972125d4a9e4cfb7626e8394ddf8e8425861ee9104a53528e7",
+      "bytes": 51130
+    },
+    {
+      "label": "data-10m-3run",
+      "path": "artifacts/data-10m-3run-sha256-0ac53846ebe895382a5cc246df1586f906e34cef611d28ad5301629d7305903b.json",
+      "sha256": "0ac53846ebe895382a5cc246df1586f906e34cef611d28ad5301629d7305903b",
+      "bytes": 24509
+    },
+    {
+      "label": "capacity-preflight-refusal",
+      "path": "artifacts/capacity-preflight-refusal-sha256-a9f126306738036d79c7c2564006f4af4fc1c2d6224296cb98f2d914e64a25ee.json",
+      "sha256": "a9f126306738036d79c7c2564006f4af4fc1c2d6224296cb98f2d914e64a25ee",
+      "bytes": 6583
+    },
+    {
+      "label": "capacity-run-refusal",
+      "path": "artifacts/capacity-run-refusal-sha256-f1929a03c857ddcd2205d0f2d5f8bbadcc6a85aa1a6d9d52b5274f0048a431fc.json",
+      "sha256": "f1929a03c857ddcd2205d0f2d5f8bbadcc6a85aa1a6d9d52b5274f0048a431fc",
+      "bytes": 6583
+    }
+  ]
+}

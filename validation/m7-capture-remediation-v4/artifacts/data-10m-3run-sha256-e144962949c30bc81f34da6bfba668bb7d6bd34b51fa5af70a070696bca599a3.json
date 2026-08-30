@@ -1,0 +1,703 @@
+{
+  "benchmark": "quant-data-kit-normalized-v3-synthetic-l2",
+  "environment": {
+    "duckdb": "1.5.5",
+    "git": {
+      "branch": "codex/cross-asset-v2-m7-data-performance",
+      "commit": "dfb53b02d1bf01ff592b4948475ebdc8e6dd301c",
+      "dirty": false
+    },
+    "jsonschema_rs": "0.52.0",
+    "logical_cpu_count": 16,
+    "orjson": "3.12.0",
+    "platform": "Windows-11-10.0.22631-SP0",
+    "psutil": "7.2.2",
+    "pyarrow": "25.0.1",
+    "python": "3.12.5 (tags/v3.12.5:ff3bc82, Aug  6 2024, 20:45:27) [MSC v.1940 64 bit (AMD64)]",
+    "quant_data_kit": "0.7.3",
+    "temp_environment": {
+      "TEMP": "F:\\puresaber-m7-temp-dfb53b0",
+      "TMP": "F:\\puresaber-m7-temp-dfb53b0",
+      "tempfile_gettempdir": "F:\\puresaber-m7-temp-dfb53b0"
+    }
+  },
+  "execution": {
+    "data_retention": {
+      "cleanup_performed": false,
+      "cleanup_requested": false,
+      "generated_bytes": 3310487778,
+      "work_root_exists_after": true
+    },
+    "disk_usage_after": {
+      "C:\\": {
+        "free_bytes": 9091108864,
+        "total_bytes": 321320923136,
+        "used_bytes": 312229814272
+      },
+      "F:\\": {
+        "free_bytes": 303526764544,
+        "total_bytes": 594535321600,
+        "used_bytes": 291008557056
+      },
+      "H:\\": {
+        "free_bytes": 220745609216,
+        "total_bytes": 998553677824,
+        "used_bytes": 777808068608
+      }
+    },
+    "disk_usage_before": {
+      "C:\\": {
+        "free_bytes": 9092079616,
+        "total_bytes": 321320923136,
+        "used_bytes": 312228843520
+      },
+      "F:\\": {
+        "free_bytes": 303526764544,
+        "total_bytes": 594535321600,
+        "used_bytes": 291008557056
+      },
+      "H:\\": {
+        "free_bytes": 224056848384,
+        "total_bytes": 998553677824,
+        "used_bytes": 774496829440
+      }
+    },
+    "independent_processes": true,
+    "work_root": "H:\\Documents\\ChatGPT\\temp\\m7-dfb53b0-10m\\retained-data"
+  },
+  "fixture": "one valid snapshot followed by same-book sequential upsert deltas",
+  "gates": {
+    "all_rows_accepted": true,
+    "deterministic_artifacts": true,
+    "maximum_peak_rss": true,
+    "minimum_throughput": true
+  },
+  "input_contract": "Iterable[pyarrow.RecordBatch]",
+  "measurement_scope": "write_normalized_batches end-to-end from generated schema-exact RecordBatch: vector validation, PIT/sequence/L2 reconstruction, Parquet, claims, immutable publish, and verified reload; Raw admission setup excluded",
+  "passed": true,
+  "record_batch_rows": 262144,
+  "rows_per_run": 10000000,
+  "run_results": [
+    {
+      "accepted_rows": 10000000,
+      "claim_index": {
+        "claim_version": "3.1.0",
+        "format": "streaming-parquet-v2",
+        "rows": 10000000,
+        "shards": [
+          {
+            "logical_sha256": "5c65bc91a1a3ce62ee298fa5df7b098a9f339b13f84e73f2696c292a3467f155",
+            "rows": 624610,
+            "shard": "0"
+          },
+          {
+            "logical_sha256": "019e60b745378c3393ee696334df827bf87f39a57a9fc3527e3236feb0a42073",
+            "rows": 625057,
+            "shard": "1"
+          },
+          {
+            "logical_sha256": "7aece1b81f518ab08814ade82c6c5190f204b03d161f8667ab7c02454404874e",
+            "rows": 625543,
+            "shard": "2"
+          },
+          {
+            "logical_sha256": "9c176b677a0b0bd2ab32f632965f2e5010cb59de3dd9333deac9849a62ae17ef",
+            "rows": 624009,
+            "shard": "3"
+          },
+          {
+            "logical_sha256": "ac60d0522f25638493973825c7dfd2c8f5ac14c9b7be0290fcda33ef67f28ecc",
+            "rows": 624267,
+            "shard": "4"
+          },
+          {
+            "logical_sha256": "fa565628e9b4779c80534cad30d8af9cc1d7da329a61f1885e518d124f5e04a7",
+            "rows": 625707,
+            "shard": "5"
+          },
+          {
+            "logical_sha256": "8fa9c875b7b1a9824aab65ecb6ad6261c77c00b668ae500daf2ee9c9302b1a6d",
+            "rows": 624931,
+            "shard": "6"
+          },
+          {
+            "logical_sha256": "8fa0e66bafe81bc289ab005027a67df228dff4fbb1ee364cdf8fb915766d3b2f",
+            "rows": 626182,
+            "shard": "7"
+          },
+          {
+            "logical_sha256": "057a08eccf7aa76130d293af3808eb3599f7c3c21dbd6dc9376ca66de1611fe6",
+            "rows": 624581,
+            "shard": "8"
+          },
+          {
+            "logical_sha256": "c24c20558436a79b7678445619d15de6ff9797fdbc558c604a67aa3c37a6a12e",
+            "rows": 625214,
+            "shard": "9"
+          },
+          {
+            "logical_sha256": "08583e0f305469247937e3f30c191e27a491a0f52f5e33019dac0d0a6f50c293",
+            "rows": 625176,
+            "shard": "a"
+          },
+          {
+            "logical_sha256": "5228165f69616f2642fef98b5315859f8b7b93d66b30b9adf68ab5a34384b880",
+            "rows": 625646,
+            "shard": "b"
+          },
+          {
+            "logical_sha256": "7eb3ce01b216500bf447abd83295717ae37e5223fb3643e798f807b95109c491",
+            "rows": 624807,
+            "shard": "c"
+          },
+          {
+            "logical_sha256": "56bef2b5c16b9b0a9bcb599eca09c6f5daa65b50e77bf8d461a0f50009e7a596",
+            "rows": 625371,
+            "shard": "d"
+          },
+          {
+            "logical_sha256": "4450b33660421503337dfa7ec6597cccb70563b23c8319d192773e4fe56a8bc0",
+            "rows": 624799,
+            "shard": "e"
+          },
+          {
+            "logical_sha256": "3e8c3fdafd4070cb9b93e9c1ae3e2434b9549b7d42dd378cbce1f0f7cabd7f87",
+            "rows": 624100,
+            "shard": "f"
+          }
+        ]
+      },
+      "elapsed_seconds": 53.010462300000654,
+      "events_per_second": 188642.00699490742,
+      "final_l2_checkpoint": {
+        "instrument_id": "BTC-USDT-SPOT",
+        "sequence": 10000000,
+        "session_id": "binance-24x7-BTC-USDT-SPOT",
+        "source": "binance",
+        "state_sha256": "3b4334614477d065224e446933cf5084c16b8c63caf17db7e2ffdb34cbb9710c"
+      },
+      "partition_manifests": [
+        {
+          "content_sha256": "a1a4cca6beeb45cd154469f885d76674d0986ab34fea67802e02e86138cf5eaf",
+          "event_type": "book_delta",
+          "instrument_id": "BTC-USDT-SPOT",
+          "logical_sha256": "d9afdc8f75d80c72b1776ab1e51334214b14605c61b850e434038875205fc261",
+          "provider": "binance",
+          "relative_path": "provider=binance/venue=BINANCE/event_type=book_delta/date=2026-01-02/instrument=BTC-USDT-SPOT/data.parquet",
+          "rows": 9999999,
+          "schema_id": "puresaber.book-delta-event",
+          "trading_date": "2026-01-02",
+          "venue": "BINANCE"
+        },
+        {
+          "content_sha256": "d3bb612cc544a65e91cf519f23d255ddddc946c058bc0297ecc863491ce84df7",
+          "event_type": "book_snapshot",
+          "instrument_id": "BTC-USDT-SPOT",
+          "logical_sha256": "63084efe6baa4556f7c63dc5aeeb5acc9af83208557399d5f0d6bb86c2b07f64",
+          "provider": "binance",
+          "relative_path": "provider=binance/venue=BINANCE/event_type=book_snapshot/date=2026-01-02/instrument=BTC-USDT-SPOT/data.parquet",
+          "rows": 1,
+          "schema_id": "puresaber.book-snapshot-event",
+          "trading_date": "2026-01-02",
+          "venue": "BINANCE"
+        }
+      ],
+      "peak_rss_bytes": 3352682496,
+      "peak_rss_gib": 3.1224288940429688,
+      "quarantined_rows": 0,
+      "retained_bytes": 1103495926,
+      "rows": 10000000,
+      "run": 1,
+      "snapshot_id": "sha256-bc73be94fc984ec61fa6874b15b278a68a3b1e791919eb0fe434428c0d59bb6f",
+      "snapshot_logical_sha256": "bc73be94fc984ec61fa6874b15b278a68a3b1e791919eb0fe434428c0d59bb6f",
+      "snapshot_manifest_sha256": "16c1b30dea551950c8d2f564c2adfab5a9f2c11ef83c8f895b90c6d5cbee58e4",
+      "stage_timings": {
+        "_InputSpool.flush": {
+          "calls": 0,
+          "seconds": 0.0
+        },
+        "_JsonArrayDigest.update": {
+          "calls": 0,
+          "seconds": 0.0
+        },
+        "_OpenPartition.flush": {
+          "calls": 4,
+          "seconds": 4.499994247453287e-06
+        },
+        "_arrow_ready_rows": {
+          "calls": 0,
+          "seconds": 0.0
+        },
+        "_assert_lake_wide_claims": {
+          "calls": 1,
+          "seconds": 6.489999941550195e-05
+        },
+        "_build_claim_index_files": {
+          "calls": 1,
+          "seconds": 14.164676299998973
+        },
+        "_claim_database": {
+          "calls": 1,
+          "seconds": 21.18545769999764
+        },
+        "_claim_shard_manifests": {
+          "calls": 1,
+          "seconds": 1.073015400001168
+        },
+        "_claim_shard_manifests_from_paths": {
+          "calls": 4,
+          "seconds": 3.3873180000009597
+        },
+        "_duplicate_event_ids": {
+          "calls": 0,
+          "seconds": 0.0
+        },
+        "_export_claim_index": {
+          "calls": 0,
+          "seconds": 0.0
+        },
+        "_logical_rows": {
+          "calls": 1,
+          "seconds": 6.0599999414989725e-05
+        },
+        "_partition_manifests": {
+          "calls": 1,
+          "seconds": 1.4585753999999724
+        },
+        "_publish_or_validate_claim_index": {
+          "calls": 1,
+          "seconds": 1.5021808000019519
+        },
+        "_write_claim_index_manifest": {
+          "calls": 1,
+          "seconds": 0.6435899999996764
+        },
+        "load_normalized_snapshot_v3": {
+          "calls": 2,
+          "seconds": 27.019399700002396
+        }
+      },
+      "strict_reload_verified": true
+    },
+    {
+      "accepted_rows": 10000000,
+      "claim_index": {
+        "claim_version": "3.1.0",
+        "format": "streaming-parquet-v2",
+        "rows": 10000000,
+        "shards": [
+          {
+            "logical_sha256": "5c65bc91a1a3ce62ee298fa5df7b098a9f339b13f84e73f2696c292a3467f155",
+            "rows": 624610,
+            "shard": "0"
+          },
+          {
+            "logical_sha256": "019e60b745378c3393ee696334df827bf87f39a57a9fc3527e3236feb0a42073",
+            "rows": 625057,
+            "shard": "1"
+          },
+          {
+            "logical_sha256": "7aece1b81f518ab08814ade82c6c5190f204b03d161f8667ab7c02454404874e",
+            "rows": 625543,
+            "shard": "2"
+          },
+          {
+            "logical_sha256": "9c176b677a0b0bd2ab32f632965f2e5010cb59de3dd9333deac9849a62ae17ef",
+            "rows": 624009,
+            "shard": "3"
+          },
+          {
+            "logical_sha256": "ac60d0522f25638493973825c7dfd2c8f5ac14c9b7be0290fcda33ef67f28ecc",
+            "rows": 624267,
+            "shard": "4"
+          },
+          {
+            "logical_sha256": "fa565628e9b4779c80534cad30d8af9cc1d7da329a61f1885e518d124f5e04a7",
+            "rows": 625707,
+            "shard": "5"
+          },
+          {
+            "logical_sha256": "8fa9c875b7b1a9824aab65ecb6ad6261c77c00b668ae500daf2ee9c9302b1a6d",
+            "rows": 624931,
+            "shard": "6"
+          },
+          {
+            "logical_sha256": "8fa0e66bafe81bc289ab005027a67df228dff4fbb1ee364cdf8fb915766d3b2f",
+            "rows": 626182,
+            "shard": "7"
+          },
+          {
+            "logical_sha256": "057a08eccf7aa76130d293af3808eb3599f7c3c21dbd6dc9376ca66de1611fe6",
+            "rows": 624581,
+            "shard": "8"
+          },
+          {
+            "logical_sha256": "c24c20558436a79b7678445619d15de6ff9797fdbc558c604a67aa3c37a6a12e",
+            "rows": 625214,
+            "shard": "9"
+          },
+          {
+            "logical_sha256": "08583e0f305469247937e3f30c191e27a491a0f52f5e33019dac0d0a6f50c293",
+            "rows": 625176,
+            "shard": "a"
+          },
+          {
+            "logical_sha256": "5228165f69616f2642fef98b5315859f8b7b93d66b30b9adf68ab5a34384b880",
+            "rows": 625646,
+            "shard": "b"
+          },
+          {
+            "logical_sha256": "7eb3ce01b216500bf447abd83295717ae37e5223fb3643e798f807b95109c491",
+            "rows": 624807,
+            "shard": "c"
+          },
+          {
+            "logical_sha256": "56bef2b5c16b9b0a9bcb599eca09c6f5daa65b50e77bf8d461a0f50009e7a596",
+            "rows": 625371,
+            "shard": "d"
+          },
+          {
+            "logical_sha256": "4450b33660421503337dfa7ec6597cccb70563b23c8319d192773e4fe56a8bc0",
+            "rows": 624799,
+            "shard": "e"
+          },
+          {
+            "logical_sha256": "3e8c3fdafd4070cb9b93e9c1ae3e2434b9549b7d42dd378cbce1f0f7cabd7f87",
+            "rows": 624100,
+            "shard": "f"
+          }
+        ]
+      },
+      "elapsed_seconds": 53.09497259999989,
+      "events_per_second": 188341.74895119958,
+      "final_l2_checkpoint": {
+        "instrument_id": "BTC-USDT-SPOT",
+        "sequence": 10000000,
+        "session_id": "binance-24x7-BTC-USDT-SPOT",
+        "source": "binance",
+        "state_sha256": "3b4334614477d065224e446933cf5084c16b8c63caf17db7e2ffdb34cbb9710c"
+      },
+      "partition_manifests": [
+        {
+          "content_sha256": "a1a4cca6beeb45cd154469f885d76674d0986ab34fea67802e02e86138cf5eaf",
+          "event_type": "book_delta",
+          "instrument_id": "BTC-USDT-SPOT",
+          "logical_sha256": "d9afdc8f75d80c72b1776ab1e51334214b14605c61b850e434038875205fc261",
+          "provider": "binance",
+          "relative_path": "provider=binance/venue=BINANCE/event_type=book_delta/date=2026-01-02/instrument=BTC-USDT-SPOT/data.parquet",
+          "rows": 9999999,
+          "schema_id": "puresaber.book-delta-event",
+          "trading_date": "2026-01-02",
+          "venue": "BINANCE"
+        },
+        {
+          "content_sha256": "d3bb612cc544a65e91cf519f23d255ddddc946c058bc0297ecc863491ce84df7",
+          "event_type": "book_snapshot",
+          "instrument_id": "BTC-USDT-SPOT",
+          "logical_sha256": "63084efe6baa4556f7c63dc5aeeb5acc9af83208557399d5f0d6bb86c2b07f64",
+          "provider": "binance",
+          "relative_path": "provider=binance/venue=BINANCE/event_type=book_snapshot/date=2026-01-02/instrument=BTC-USDT-SPOT/data.parquet",
+          "rows": 1,
+          "schema_id": "puresaber.book-snapshot-event",
+          "trading_date": "2026-01-02",
+          "venue": "BINANCE"
+        }
+      ],
+      "peak_rss_bytes": 3336343552,
+      "peak_rss_gib": 3.1072120666503906,
+      "quarantined_rows": 0,
+      "retained_bytes": 1103495926,
+      "rows": 10000000,
+      "run": 2,
+      "snapshot_id": "sha256-bc73be94fc984ec61fa6874b15b278a68a3b1e791919eb0fe434428c0d59bb6f",
+      "snapshot_logical_sha256": "bc73be94fc984ec61fa6874b15b278a68a3b1e791919eb0fe434428c0d59bb6f",
+      "snapshot_manifest_sha256": "16c1b30dea551950c8d2f564c2adfab5a9f2c11ef83c8f895b90c6d5cbee58e4",
+      "stage_timings": {
+        "_InputSpool.flush": {
+          "calls": 0,
+          "seconds": 0.0
+        },
+        "_JsonArrayDigest.update": {
+          "calls": 0,
+          "seconds": 0.0
+        },
+        "_OpenPartition.flush": {
+          "calls": 4,
+          "seconds": 4.900000931229442e-06
+        },
+        "_arrow_ready_rows": {
+          "calls": 0,
+          "seconds": 0.0
+        },
+        "_assert_lake_wide_claims": {
+          "calls": 1,
+          "seconds": 6.289999873843044e-05
+        },
+        "_build_claim_index_files": {
+          "calls": 1,
+          "seconds": 14.006779399998777
+        },
+        "_claim_database": {
+          "calls": 1,
+          "seconds": 21.532636700001603
+        },
+        "_claim_shard_manifests": {
+          "calls": 1,
+          "seconds": 1.0989669000009599
+        },
+        "_claim_shard_manifests_from_paths": {
+          "calls": 4,
+          "seconds": 3.3260793999979796
+        },
+        "_duplicate_event_ids": {
+          "calls": 0,
+          "seconds": 0.0
+        },
+        "_export_claim_index": {
+          "calls": 0,
+          "seconds": 0.0
+        },
+        "_logical_rows": {
+          "calls": 1,
+          "seconds": 6.370000119204633e-05
+        },
+        "_partition_manifests": {
+          "calls": 1,
+          "seconds": 1.4484437000028265
+        },
+        "_publish_or_validate_claim_index": {
+          "calls": 1,
+          "seconds": 1.4537172000018472
+        },
+        "_write_claim_index_manifest": {
+          "calls": 1,
+          "seconds": 0.6802170000009937
+        },
+        "load_normalized_snapshot_v3": {
+          "calls": 2,
+          "seconds": 27.4038006999981
+        }
+      },
+      "strict_reload_verified": true
+    },
+    {
+      "accepted_rows": 10000000,
+      "claim_index": {
+        "claim_version": "3.1.0",
+        "format": "streaming-parquet-v2",
+        "rows": 10000000,
+        "shards": [
+          {
+            "logical_sha256": "5c65bc91a1a3ce62ee298fa5df7b098a9f339b13f84e73f2696c292a3467f155",
+            "rows": 624610,
+            "shard": "0"
+          },
+          {
+            "logical_sha256": "019e60b745378c3393ee696334df827bf87f39a57a9fc3527e3236feb0a42073",
+            "rows": 625057,
+            "shard": "1"
+          },
+          {
+            "logical_sha256": "7aece1b81f518ab08814ade82c6c5190f204b03d161f8667ab7c02454404874e",
+            "rows": 625543,
+            "shard": "2"
+          },
+          {
+            "logical_sha256": "9c176b677a0b0bd2ab32f632965f2e5010cb59de3dd9333deac9849a62ae17ef",
+            "rows": 624009,
+            "shard": "3"
+          },
+          {
+            "logical_sha256": "ac60d0522f25638493973825c7dfd2c8f5ac14c9b7be0290fcda33ef67f28ecc",
+            "rows": 624267,
+            "shard": "4"
+          },
+          {
+            "logical_sha256": "fa565628e9b4779c80534cad30d8af9cc1d7da329a61f1885e518d124f5e04a7",
+            "rows": 625707,
+            "shard": "5"
+          },
+          {
+            "logical_sha256": "8fa9c875b7b1a9824aab65ecb6ad6261c77c00b668ae500daf2ee9c9302b1a6d",
+            "rows": 624931,
+            "shard": "6"
+          },
+          {
+            "logical_sha256": "8fa0e66bafe81bc289ab005027a67df228dff4fbb1ee364cdf8fb915766d3b2f",
+            "rows": 626182,
+            "shard": "7"
+          },
+          {
+            "logical_sha256": "057a08eccf7aa76130d293af3808eb3599f7c3c21dbd6dc9376ca66de1611fe6",
+            "rows": 624581,
+            "shard": "8"
+          },
+          {
+            "logical_sha256": "c24c20558436a79b7678445619d15de6ff9797fdbc558c604a67aa3c37a6a12e",
+            "rows": 625214,
+            "shard": "9"
+          },
+          {
+            "logical_sha256": "08583e0f305469247937e3f30c191e27a491a0f52f5e33019dac0d0a6f50c293",
+            "rows": 625176,
+            "shard": "a"
+          },
+          {
+            "logical_sha256": "5228165f69616f2642fef98b5315859f8b7b93d66b30b9adf68ab5a34384b880",
+            "rows": 625646,
+            "shard": "b"
+          },
+          {
+            "logical_sha256": "7eb3ce01b216500bf447abd83295717ae37e5223fb3643e798f807b95109c491",
+            "rows": 624807,
+            "shard": "c"
+          },
+          {
+            "logical_sha256": "56bef2b5c16b9b0a9bcb599eca09c6f5daa65b50e77bf8d461a0f50009e7a596",
+            "rows": 625371,
+            "shard": "d"
+          },
+          {
+            "logical_sha256": "4450b33660421503337dfa7ec6597cccb70563b23c8319d192773e4fe56a8bc0",
+            "rows": 624799,
+            "shard": "e"
+          },
+          {
+            "logical_sha256": "3e8c3fdafd4070cb9b93e9c1ae3e2434b9549b7d42dd378cbce1f0f7cabd7f87",
+            "rows": 624100,
+            "shard": "f"
+          }
+        ]
+      },
+      "elapsed_seconds": 52.58502859999862,
+      "events_per_second": 190168.1955156389,
+      "final_l2_checkpoint": {
+        "instrument_id": "BTC-USDT-SPOT",
+        "sequence": 10000000,
+        "session_id": "binance-24x7-BTC-USDT-SPOT",
+        "source": "binance",
+        "state_sha256": "3b4334614477d065224e446933cf5084c16b8c63caf17db7e2ffdb34cbb9710c"
+      },
+      "partition_manifests": [
+        {
+          "content_sha256": "a1a4cca6beeb45cd154469f885d76674d0986ab34fea67802e02e86138cf5eaf",
+          "event_type": "book_delta",
+          "instrument_id": "BTC-USDT-SPOT",
+          "logical_sha256": "d9afdc8f75d80c72b1776ab1e51334214b14605c61b850e434038875205fc261",
+          "provider": "binance",
+          "relative_path": "provider=binance/venue=BINANCE/event_type=book_delta/date=2026-01-02/instrument=BTC-USDT-SPOT/data.parquet",
+          "rows": 9999999,
+          "schema_id": "puresaber.book-delta-event",
+          "trading_date": "2026-01-02",
+          "venue": "BINANCE"
+        },
+        {
+          "content_sha256": "d3bb612cc544a65e91cf519f23d255ddddc946c058bc0297ecc863491ce84df7",
+          "event_type": "book_snapshot",
+          "instrument_id": "BTC-USDT-SPOT",
+          "logical_sha256": "63084efe6baa4556f7c63dc5aeeb5acc9af83208557399d5f0d6bb86c2b07f64",
+          "provider": "binance",
+          "relative_path": "provider=binance/venue=BINANCE/event_type=book_snapshot/date=2026-01-02/instrument=BTC-USDT-SPOT/data.parquet",
+          "rows": 1,
+          "schema_id": "puresaber.book-snapshot-event",
+          "trading_date": "2026-01-02",
+          "venue": "BINANCE"
+        }
+      ],
+      "peak_rss_bytes": 3330072576,
+      "peak_rss_gib": 3.1013717651367188,
+      "quarantined_rows": 0,
+      "retained_bytes": 1103495926,
+      "rows": 10000000,
+      "run": 3,
+      "snapshot_id": "sha256-bc73be94fc984ec61fa6874b15b278a68a3b1e791919eb0fe434428c0d59bb6f",
+      "snapshot_logical_sha256": "bc73be94fc984ec61fa6874b15b278a68a3b1e791919eb0fe434428c0d59bb6f",
+      "snapshot_manifest_sha256": "16c1b30dea551950c8d2f564c2adfab5a9f2c11ef83c8f895b90c6d5cbee58e4",
+      "stage_timings": {
+        "_InputSpool.flush": {
+          "calls": 0,
+          "seconds": 0.0
+        },
+        "_JsonArrayDigest.update": {
+          "calls": 0,
+          "seconds": 0.0
+        },
+        "_OpenPartition.flush": {
+          "calls": 4,
+          "seconds": 4.599998646881431e-06
+        },
+        "_arrow_ready_rows": {
+          "calls": 0,
+          "seconds": 0.0
+        },
+        "_assert_lake_wide_claims": {
+          "calls": 1,
+          "seconds": 6.330000178422779e-05
+        },
+        "_build_claim_index_files": {
+          "calls": 1,
+          "seconds": 13.967041700001573
+        },
+        "_claim_database": {
+          "calls": 1,
+          "seconds": 21.088539199998195
+        },
+        "_claim_shard_manifests": {
+          "calls": 1,
+          "seconds": 1.0714885000015784
+        },
+        "_claim_shard_manifests_from_paths": {
+          "calls": 4,
+          "seconds": 3.359349899998051
+        },
+        "_duplicate_event_ids": {
+          "calls": 0,
+          "seconds": 0.0
+        },
+        "_export_claim_index": {
+          "calls": 0,
+          "seconds": 0.0
+        },
+        "_logical_rows": {
+          "calls": 1,
+          "seconds": 0.00010099999781232327
+        },
+        "_partition_manifests": {
+          "calls": 1,
+          "seconds": 1.4479047999993782
+        },
+        "_publish_or_validate_claim_index": {
+          "calls": 1,
+          "seconds": 1.4674919999997655
+        },
+        "_write_claim_index_manifest": {
+          "calls": 1,
+          "seconds": 0.6702760999978636
+        },
+        "load_normalized_snapshot_v3": {
+          "calls": 2,
+          "seconds": 26.95934169999964
+        }
+      },
+      "strict_reload_verified": true
+    }
+  ],
+  "runs": 3,
+  "schema_version": "1.0.0",
+  "summary": {
+    "maximum_peak_rss_gib": 3.1224288940429688,
+    "median_events_per_second": 188642.00699490742,
+    "minimum_events_per_second": 188341.74895119958,
+    "retained_bytes": 3310487778
+  },
+  "thresholds": {
+    "maximum_peak_rss_gib": 16.0,
+    "minimum_events_per_second": 100000.0,
+    "storage_policy": {
+      "hot_quota_bytes": 161061273600,
+      "hot_retention_days": 30,
+      "minimum_free_bytes": 107374182400,
+      "minimum_free_fraction": 0.2
+    }
+  }
+}

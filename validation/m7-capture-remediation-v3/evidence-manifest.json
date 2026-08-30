@@ -1,0 +1,102 @@
+{
+  "schema_version": "puresaber.m7-capture-core-remediation-evidence@3.0.0",
+  "source_commit": "a4a5a16542a2c4c74edf8205b982c681248517a3",
+  "source_working_tree_dirty": false,
+  "package_version": "0.7.2",
+  "requirements_lock_sha256": "fac9239809b2bb42c2d7ee99417a3053075a177eb9b08131a954288566de6d88",
+  "certification": {
+    "software_fixture": "PASS_PENDING_INDEPENDENT_VALIDATION",
+    "performance": "PASS_PENDING_INDEPENDENT_VALIDATION",
+    "public_network": "NOT_RUN",
+    "continuous_days": 0,
+    "market_data_certified": false
+  },
+  "quality": {
+    "pytest_passed": 380,
+    "pytest_skipped": 1,
+    "pytest_failed": 0,
+    "mutually_exclusive_partitions": 2,
+    "source_branch_coverage": "2105/2420=86.98%",
+    "configured_core_modules_at_least_90_percent": true
+  },
+  "artifacts": [
+    {
+      "label": "dense-round-01",
+      "path": "artifacts/dense-round-01-sha256-e11140d81b1b41f0e1ebdb5d4a3dd4c96ee351d9852c296f7814c9f2f1bfc933.json",
+      "sha256": "e11140d81b1b41f0e1ebdb5d4a3dd4c96ee351d9852c296f7814c9f2f1bfc933",
+      "bytes": 4583
+    },
+    {
+      "label": "dense-round-02",
+      "path": "artifacts/dense-round-02-sha256-fe6d140242a0e6c0602902bc843ea8fad5ae188983508ccbfa3a195dbb79d7c5.json",
+      "sha256": "fe6d140242a0e6c0602902bc843ea8fad5ae188983508ccbfa3a195dbb79d7c5",
+      "bytes": 4582
+    },
+    {
+      "label": "dense-round-03",
+      "path": "artifacts/dense-round-03-sha256-659935e7d5ecab5b337e7a4fb291701b5d91e9c426d2de265316d6140e727a73.json",
+      "sha256": "659935e7d5ecab5b337e7a4fb291701b5d91e9c426d2de265316d6140e727a73",
+      "bytes": 4585
+    },
+    {
+      "label": "sparse-round-01",
+      "path": "artifacts/sparse-round-01-sha256-252e65e25377d069aaa898f313585bd3681e1b93be5a5e87bc67e3edbb20867f.json",
+      "sha256": "252e65e25377d069aaa898f313585bd3681e1b93be5a5e87bc67e3edbb20867f",
+      "bytes": 4407
+    },
+    {
+      "label": "sparse-round-02",
+      "path": "artifacts/sparse-round-02-sha256-f54ceca2bf61ac9b381dc392d1e529f5c0de322463d3b023cfcc94c0aab3d41d.json",
+      "sha256": "f54ceca2bf61ac9b381dc392d1e529f5c0de322463d3b023cfcc94c0aab3d41d",
+      "bytes": 4408
+    },
+    {
+      "label": "sparse-round-03",
+      "path": "artifacts/sparse-round-03-sha256-c411d80d9252d800f828dbd6b26e08a419287db5d453777f4e9b842fb1a90038.json",
+      "sha256": "c411d80d9252d800f828dbd6b26e08a419287db5d453777f4e9b842fb1a90038",
+      "bytes": 4405
+    },
+    {
+      "label": "full-coverage",
+      "path": "artifacts/full-coverage-sha256-125261fe2ba6168facd2da277ea67259a5f8e8259b4a507226573434da9ed748.json",
+      "sha256": "125261fe2ba6168facd2da277ea67259a5f8e8259b4a507226573434da9ed748",
+      "bytes": 1146594
+    },
+    {
+      "label": "pytest-main-junit",
+      "path": "artifacts/pytest-main-junit-sha256-a79429a870d642e2f8396ba512fcfa64307eab701e67ae70f39758ffe60b5181.xml",
+      "sha256": "a79429a870d642e2f8396ba512fcfa64307eab701e67ae70f39758ffe60b5181",
+      "bytes": 54674
+    },
+    {
+      "label": "pytest-hardexit-junit",
+      "path": "artifacts/pytest-hardexit-junit-sha256-1fc5c0bc8c5bbf944ec667bfaba10e345db3d15016bbebefc632c4f5793efa11.xml",
+      "sha256": "1fc5c0bc8c5bbf944ec667bfaba10e345db3d15016bbebefc632c4f5793efa11",
+      "bytes": 395
+    },
+    {
+      "label": "data-10m-3run",
+      "path": "artifacts/data-10m-3run-sha256-5ae10ab5c4f06a72e0d3e4c60f6b5e6fee66264a7d8cfb02e14a93f86f13f70f.json",
+      "sha256": "5ae10ab5c4f06a72e0d3e4c60f6b5e6fee66264a7d8cfb02e14a93f86f13f70f",
+      "bytes": 24500
+    },
+    {
+      "label": "capacity-preflight-refusal",
+      "path": "artifacts/capacity-preflight-refusal-sha256-2ebe6c138edbc64270ce28964b2517849cbea0abdbb6d374c28892c0348b7446.json",
+      "sha256": "2ebe6c138edbc64270ce28964b2517849cbea0abdbb6d374c28892c0348b7446",
+      "bytes": 6583
+    },
+    {
+      "label": "capacity-run-refusal",
+      "path": "artifacts/capacity-run-refusal-sha256-54e0a2420a093ce23059ae55252d9544811936f8ba2236bded44184d814678d5.json",
+      "sha256": "54e0a2420a093ce23059ae55252d9544811936f8ba2236bded44184d814678d5",
+      "bytes": 6583
+    },
+    {
+      "label": "cli-invocation-results",
+      "path": "artifacts/cli-invocation-results-sha256-99f803ab40c032e4e5b0c7b7ea47de3630438bd46469e637a29d5e511fc75380.json",
+      "sha256": "99f803ab40c032e4e5b0c7b7ea47de3630438bd46469e637a29d5e511fc75380",
+      "bytes": 1396
+    }
+  ]
+}

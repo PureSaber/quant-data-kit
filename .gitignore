@@ -3,8 +3,12 @@
 __pycache__/
 *.py[cod]
 .venv/
+.venv-m7-verify/
+.m7/
+validation/performance/work-*/
 .pytest_cache/
 .coverage
+coverage.json
 *.egg-info/
 data/
 dist/
