@@ -1,0 +1,48 @@
+{
+  "schema_version": "puresaber.m7-cli-invocation-evidence@1.0.0",
+  "source_commit": "dfb53b02d1bf01ff592b4948475ebdc8e6dd301c",
+  "working_directory": "H:\\Documents\\ChatGPT\\temp\\puresaber-quant-platform\\.worktrees\\quant-data-kit-m7",
+  "executable": ".\\.venv-m7-verify\\Scripts\\qdk-capture.exe",
+  "config": {
+    "path": "H:\\Documents\\ChatGPT\\temp\\m7-dfb53b0-capacity\\capture-config.json",
+    "sha256": "4f7d4ac7987ee1818b342c0dbbbecbe60cff85b4b1f4dd3639fb463760a0b764",
+    "collector_commit": "dfb53b02d1bf01ff592b4948475ebdc8e6dd301c"
+  },
+  "invocations": [
+    {
+      "mode": "preflight",
+      "argv": [
+        ".\\.venv-m7-verify\\Scripts\\qdk-capture.exe",
+        "H:\\Documents\\ChatGPT\\temp\\m7-dfb53b0-capacity\\capture-config.json",
+        "--mode",
+        "preflight"
+      ],
+      "exit_code": 2,
+      "run_id": "capture-5708cac137c949408a9c3a6bca9649e1",
+      "status": "PAUSED_PREFLIGHT_FAILED",
+      "report_file_sha256": "9f2a567f2e97cc326681288a8d74c19524d591f321f23e909661b9ad3174996b",
+      "embedded_report_sha256": "4e3f17d9d5743b39bf67104cac64a1931398a9471d03b9a6ea6cd9a92955e0e3",
+      "websocket_messages": 0,
+      "long_running_capture_started": false
+    },
+    {
+      "mode": "run",
+      "argv": [
+        ".\\.venv-m7-verify\\Scripts\\qdk-capture.exe",
+        "H:\\Documents\\ChatGPT\\temp\\m7-dfb53b0-capacity\\capture-config.json",
+        "--mode",
+        "run",
+        "--confirm-long-running"
+      ],
+      "exit_code": 2,
+      "run_id": "capture-9f26e703a03b44c4ad716cfea4d1682e",
+      "status": "PAUSED_PREFLIGHT_FAILED",
+      "report_file_sha256": "e7a94af705ddc6e5d267ba7b2e2f5c897a99a663f0e4f3c769f521e617c945eb",
+      "embedded_report_sha256": "bc2a2abc94ba9bbf7123ec6bafd9d1e1e91f92ffdd5c3561778df59dce4bda6c",
+      "websocket_messages": 0,
+      "long_running_capture_started": false
+    }
+  ],
+  "network_connections_started": 0,
+  "orders_sent": 0
+}
