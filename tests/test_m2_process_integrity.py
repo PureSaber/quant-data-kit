@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -215,6 +216,48 @@ def _curated_hard_exit_process(root: str, normalized_snapshot_id: str) -> None:
         session_starts={"binance-24x7-BTC-USDT-SPOT": datetime(2026, 1, 2, tzinfo=timezone.utc)},
         policy=TEST_POLICY,
     )
+
+
+def _curated_capacity_window_process(
+    root: str,
+    normalized_snapshot_id: str,
+    role: str,
+    publisher_ready: Any,
+    publisher_release: Any,
+    contender_transition: Any,
+    results: Any,
+) -> None:
+    real_capacity_check = curated_module.require_collection_capacity
+    real_publish = curated_module._publish_curated_snapshot
+    real_staging_directory = curated_module._stable_staging_directory
+
+    def controlled_capacity_check(*args: Any, **kwargs: Any) -> Any:
+        if role == "contender":
+            contender_transition.put("capacity-check")
+        return real_capacity_check(*args, **kwargs)
+
+    def controlled_publish(*args: Any, **kwargs: Any) -> Any:
+        if role == "publisher":
+            publisher_ready.set()
+            if not publisher_release.wait(20):
+                raise TimeoutError("publisher capacity window was not released")
+        return real_publish(*args, **kwargs)
+
+    @contextmanager
+    def tracked_staging_directory(*args: Any, **kwargs: Any):
+        if role == "contender":
+            contender_transition.put("revision-stage-lock")
+        with real_staging_directory(*args, **kwargs) as stage:
+            yield stage
+
+    curated_module.require_collection_capacity = controlled_capacity_check
+    curated_module._publish_curated_snapshot = controlled_publish
+    curated_module._stable_staging_directory = tracked_staging_directory
+    try:
+        snapshot = _curated_process_once(Path(root), normalized_snapshot_id)
+        results.put(("ok", snapshot.snapshot_id))
+    except WORKER_ERRORS as exc:
+        results.put(("error", f"{type(exc).__name__}: {exc}"))
 
 
 def _hold_staging_process(
@@ -773,6 +816,73 @@ def _curated_process_once(root: Path, normalized_snapshot_id: str):
         session_starts={"binance-24x7-BTC-USDT-SPOT": datetime(2026, 1, 2, tzinfo=timezone.utc)},
         policy=TEST_POLICY,
     )
+
+
+def test_curated_capacity_scan_waits_for_active_revision_stage(tmp_path: Path) -> None:
+    root = tmp_path / "curated-capacity-window"
+    first_snapshot = _normalized(
+        root,
+        key="capacity-window-1",
+        record=trade("capacity-window-1", timestamp="2026-01-02T00:00:01Z"),
+    )
+    second_snapshot = _normalized(
+        root,
+        key="capacity-window-2",
+        record=trade("capacity-window-2", timestamp="2026-01-02T00:00:02Z"),
+    )
+    context = multiprocessing.get_context("spawn")
+    publisher_ready = context.Event()
+    publisher_release = context.Event()
+    contender_transition = context.Queue()
+    results = context.Queue()
+    publisher = context.Process(
+        target=_curated_capacity_window_process,
+        args=(
+            str(root),
+            first_snapshot.snapshot_id,
+            "publisher",
+            publisher_ready,
+            publisher_release,
+            contender_transition,
+            results,
+        ),
+    )
+    contender = context.Process(
+        target=_curated_capacity_window_process,
+        args=(
+            str(root),
+            second_snapshot.snapshot_id,
+            "contender",
+            publisher_ready,
+            publisher_release,
+            contender_transition,
+            results,
+        ),
+    )
+    try:
+        publisher.start()
+        assert publisher_ready.wait(20)
+        active_stages = list(
+            (root / "curated" / "concurrent-bars" / "staging").glob("curated-revision-*-*")
+        )
+        assert len(active_stages) == 1 and active_stages[0].is_dir()
+        contender.start()
+        assert contender_transition.get(timeout=20) == "revision-stage-lock"
+    finally:
+        publisher_release.set()
+        for process in (publisher, contender):
+            if process.pid is None:
+                continue
+            process.join(30)
+            if process.is_alive():
+                process.terminate()
+                process.join(5)
+    assert publisher.exitcode == 0
+    assert contender.exitcode == 0
+    received = [results.get(timeout=5), results.get(timeout=5)]
+    assert len([1 for status, _ in received if status == "ok"]) == 1
+    conflicts = [value for status, value in received if status == "error"]
+    assert len(conflicts) == 1 and "maps to different content" in conflicts[0]
 
 
 def test_atomic_normalized_and_curated_staging_recover_after_hard_exit(tmp_path: Path) -> None:

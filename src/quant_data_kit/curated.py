@@ -429,11 +429,6 @@ def _write_curated_bars(
         groups[(str(record["trading_day"]), str(record["instrument_id"]))].append(record)
 
     estimated_bytes = sum(len(_canonical(_json_value(item))) for item in records)
-    require_collection_capacity(
-        lake_root,
-        projected_write_bytes=estimated_bytes,
-        policy=policy,
-    )
     curated_root = _mkdir_in_lake(lake_root, lake_root / "curated" / dataset)
     staging_root = curated_root / "staging"
     partition_items: list[CuratedPartition] = []
@@ -444,6 +439,11 @@ def _write_curated_bars(
         namespace="curated-revision",
         identity=revision_identity,
     ) as stage:
+        require_collection_capacity(
+            lake_root,
+            projected_write_bytes=estimated_bytes,
+            policy=policy,
+        )
         for (trading_date, instrument_id), group in sorted(groups.items()):
             ordered = sorted(group, key=lambda row: (row["event_time"], row["event_id"]))
             table = pa.Table.from_pylist(
