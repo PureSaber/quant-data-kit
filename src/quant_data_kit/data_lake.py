@@ -11,7 +11,7 @@ import shutil
 import stat
 import uuid
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -187,6 +187,89 @@ class EventClaimReference:
 
 
 @dataclass(frozen=True)
+class EventClaimShardManifest:
+    shard: str
+    rows: int
+    logical_sha256: str
+
+
+@dataclass(frozen=True)
+class EventClaimIndexManifest:
+    format: str
+    claim_version: str
+    rows: int
+    shards: tuple[EventClaimShardManifest, ...]
+
+
+@dataclass(frozen=True)
+class L2CheckpointManifest:
+    source: str
+    instrument_id: str
+    session_id: str
+    sequence: int
+    state_sha256: str
+
+
+class EventClaimSequence(Sequence[EventClaimReference]):
+    """Lazy, immutable view of one normalized-v3 sharded claim index."""
+
+    def __init__(
+        self,
+        root: Path,
+        snapshot_id: str,
+        index: EventClaimIndexManifest,
+    ) -> None:
+        self._root = Path(root)
+        self._snapshot_id = snapshot_id
+        self._index = index
+
+    def __len__(self) -> int:
+        return self._index.rows
+
+    def __iter__(self) -> Iterator[EventClaimReference]:
+        from quant_data_kit.normalized_v3 import iter_event_claims_v3
+
+        return iter_event_claims_v3(self._root, self._snapshot_id, self._index)
+
+    def __getitem__(
+        self, index: int | slice
+    ) -> EventClaimReference | tuple[EventClaimReference, ...]:
+        if isinstance(index, slice):
+            start, stop, step = index.indices(len(self))
+            if step < 0:
+                requested = range(start, stop, step)
+                positions = set(requested)
+                selected = {
+                    position: claim for position, claim in enumerate(self) if position in positions
+                }
+                return tuple(selected[position] for position in requested)
+            selected: list[EventClaimReference] = []
+            for position, claim in enumerate(self):
+                if position >= stop:
+                    break
+                if position >= start and (position - start) % step == 0:
+                    selected.append(claim)
+            return tuple(selected)
+        position = index if index >= 0 else len(self) + index
+        if position < 0 or position >= len(self):
+            raise IndexError(index)
+        for current, claim in enumerate(self):
+            if current == position:
+                return claim
+        raise IndexError(index)
+
+    def __eq__(self, other: object) -> bool:
+        if self is other:
+            return True
+        if not isinstance(other, Sequence) or len(self) != len(other):
+            return False
+        return all(left == right for left, right in zip(self, other, strict=True))
+
+    def __repr__(self) -> str:
+        return f"EventClaimSequence(snapshot_id={self._snapshot_id!r}, rows={self._index.rows})"
+
+
+@dataclass(frozen=True)
 class NormalizedSnapshot:
     schema_version: str
     layer: str
@@ -197,8 +280,12 @@ class NormalizedSnapshot:
     logical_sha256: str
     rows: int
     upstream_raw_references: tuple[RawObjectReference, ...]
-    event_claims: tuple[EventClaimReference, ...]
+    event_claims: Sequence[EventClaimReference]
     partitions: tuple[PartitionManifest, ...]
+    layout_version: str = "2.0.0"
+    partition_logical_hash_version: str = "canonical-json-array-v1"
+    event_claim_index: EventClaimIndexManifest | None = None
+    l2_checkpoints: tuple[L2CheckpointManifest, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1435,7 +1522,7 @@ def _write_quarantine(
                 shutil.rmtree(stage)
 
 
-def write_normalized_events(
+def _write_normalized_events_legacy(
     root: Path,
     records: Iterable[Mapping[str, Any]],
     *,
@@ -1679,6 +1766,54 @@ def write_normalized_events(
             )
 
 
+def write_normalized_events(
+    root: Path,
+    records: Iterable[Mapping[str, Any]],
+    *,
+    provider: str,
+    venue: str,
+    upstream_raw_references: Iterable[RawObjectReference],
+    expected_l2_checkpoint_hashes: Mapping[tuple[str, str, str], Mapping[int, str]] | None = None,
+    policy: StoragePolicy = _DEFAULT_STORAGE_POLICY,
+) -> NormalizationResult:
+    """Stream events into the normalized-v3 layout without changing frozen event schemas."""
+    from quant_data_kit.normalized_v3 import write_normalized_events_v3
+
+    return write_normalized_events_v3(
+        root,
+        records,
+        provider=provider,
+        venue=venue,
+        upstream_raw_references=upstream_raw_references,
+        expected_l2_checkpoint_hashes=expected_l2_checkpoint_hashes,
+        policy=policy,
+    )
+
+
+def write_normalized_batches(
+    root: Path,
+    batches: Iterable[pa.RecordBatch] | pa.RecordBatchReader,
+    *,
+    provider: str,
+    venue: str,
+    upstream_raw_references: Iterable[RawObjectReference],
+    expected_l2_checkpoint_hashes: Mapping[tuple[str, str, str], Mapping[int, str]] | None = None,
+    policy: StoragePolicy = _DEFAULT_STORAGE_POLICY,
+) -> NormalizationResult:
+    """Write homogeneous, already-standardized Arrow event batches fail closed."""
+    from quant_data_kit.normalized_v3 import write_normalized_batches_v3
+
+    return write_normalized_batches_v3(
+        root,
+        batches,
+        provider=provider,
+        venue=venue,
+        upstream_raw_references=upstream_raw_references,
+        expected_l2_checkpoint_hashes=expected_l2_checkpoint_hashes,
+        policy=policy,
+    )
+
+
 def _safe_snapshot_partition(root: Path, snapshot_dir: Path, relative_path: str) -> Path:
     relative = Path(relative_path)
     if relative.is_absolute() or ".." in relative.parts:
@@ -1712,6 +1847,14 @@ def _load_normalized_snapshot(
     if not manifest_path.is_file():
         raise ValidationError(f"Normalized snapshot manifest missing: {manifest_path}")
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if payload.get("layout_version") == "3.0.0":
+        from quant_data_kit.normalized_v3 import load_normalized_snapshot_v3
+
+        return load_normalized_snapshot_v3(
+            lake_root,
+            snapshot_id,
+            payload=payload,
+        )
     payload["upstream_raw_references"] = tuple(
         RawObjectReference(**item) for item in payload["upstream_raw_references"]
     )

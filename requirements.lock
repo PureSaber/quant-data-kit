@@ -18,18 +18,24 @@ iniconfig==2.3.0
     # via pytest
 jsonschema==4.26.0
     # via quant-data-kit (pyproject.toml)
+jsonschema-rs==0.52.0
+    # via quant-data-kit (pyproject.toml)
 jsonschema-specifications==2025.9.1
     # via jsonschema
 numpy==2.2.6
     # via
     #   pandas
     #   quant-data-kit (pyproject.toml)
+orjson==3.12.0
+    # via quant-data-kit (pyproject.toml)
 packaging==26.3
     # via pytest
 pandas==2.3.3
     # via quant-data-kit (pyproject.toml)
 pluggy==1.6.0
     # via pytest
+psutil==7.2.2
+    # via quant-data-kit (pyproject.toml)
 pyarrow==25.0.1
     # via quant-data-kit (pyproject.toml)
 pygments==2.21.0
@@ -61,6 +67,8 @@ typing-extensions==4.16.0
     #   referencing
 tzdata==2026.3
     # via pandas
+websockets==15.0.1
+    # via quant-data-kit (pyproject.toml)
 
 # The following packages are considered to be unsafe in a requirements file:
 setuptools==84.0.0

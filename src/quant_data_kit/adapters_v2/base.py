@@ -13,7 +13,7 @@ from quant_data_kit.exceptions import ValidationError
 from quant_data_kit.fixed_point import FixedPoint
 from quant_data_kit.schemas_v2 import validate_event_stream
 
-_SEQUENCE_FACTOR = 1_000_000
+BOOK_SEQUENCE_FACTOR = 1_000_000
 
 
 @dataclass(frozen=True)
@@ -132,10 +132,51 @@ class BookSequenceNormalizer:
         previous = self._provider_sequence.get(provider_symbol)
         if previous is not None and provider_sequence <= previous:
             raise ValidationError("provider BookSnapshot sequence did not advance")
-        emitted = provider_sequence * _SEQUENCE_FACTOR
+        emitted = provider_sequence * BOOK_SEQUENCE_FACTOR
         self._provider_sequence[provider_symbol] = provider_sequence
         self._emitted_sequence[provider_symbol] = emitted
         return emitted
+
+    def heartbeat(self, provider_symbol: str, provider_sequence: int) -> None:
+        """Validate a provider no-change heartbeat without emitting a v2 sequence."""
+        if provider_symbol not in self._provider_sequence:
+            raise ValidationError("provider heartbeat arrived before BookSnapshot")
+        expected_provider = self._provider_sequence[provider_symbol]
+        if provider_sequence != expected_provider:
+            raise ValidationError(
+                f"provider heartbeat gap: expected sequence={expected_provider}, "
+                f"actual={provider_sequence}"
+            )
+
+    def reset(self, provider_symbol: str) -> None:
+        """Discard continuity after a provider reset until a fresh snapshot arrives."""
+        self._provider_sequence.pop(provider_symbol, None)
+        self._emitted_sequence.pop(provider_symbol, None)
+
+    def advance_without_levels(
+        self,
+        provider_symbol: str,
+        *,
+        provider_previous_sequence: int,
+        provider_sequence: int,
+    ) -> None:
+        """Advance provider continuity when a live update has no material local-book change.
+
+        Current market feeds may send no-change updates or deletes for price levels that are
+        already absent. Those messages remain in Raw and advance provider continuity, but they
+        must not manufacture a BookDelta that the strict L2 reconstructor would reject.
+        """
+        if provider_symbol not in self._provider_sequence:
+            raise ValidationError("provider no-change update arrived before BookSnapshot")
+        expected_provider = self._provider_sequence[provider_symbol]
+        if provider_previous_sequence != expected_provider:
+            raise ValidationError(
+                f"provider no-change gap: expected previous={expected_provider}, "
+                f"actual={provider_previous_sequence}"
+            )
+        if provider_sequence <= provider_previous_sequence:
+            raise ValidationError("provider no-change sequence did not advance")
+        self._provider_sequence[provider_symbol] = provider_sequence
 
     def delta(
         self,
@@ -155,12 +196,12 @@ class BookSequenceNormalizer:
             )
         if provider_sequence <= provider_previous_sequence:
             raise ValidationError("provider BookDelta sequence did not advance")
-        if not 0 < level_count < _SEQUENCE_FACTOR:
+        if not 0 < level_count < BOOK_SEQUENCE_FACTOR:
             raise ValidationError("provider BookDelta level count is unsupported")
         previous_emitted = self._emitted_sequence[provider_symbol]
         pairs: list[tuple[int, int]] = []
         for index in range(1, level_count + 1):
-            emitted = provider_sequence * _SEQUENCE_FACTOR + index
+            emitted = provider_sequence * BOOK_SEQUENCE_FACTOR + index
             pairs.append((previous_emitted, emitted))
             previous_emitted = emitted
         self._provider_sequence[provider_symbol] = provider_sequence

@@ -36,11 +36,16 @@ class BinanceFixtureAdapter:
         "Binance publishes no books checksum field"
     )
 
-    def __init__(self, context: AdapterContext) -> None:
+    def __init__(self, context: AdapterContext, *, event_id_namespace: str | None = None) -> None:
         if context.provider != "binance":
             raise ValidationError("Binance adapter context provider must be binance")
         self.context = context
+        self._event_id_namespace = event_id_namespace
         self._book_sequences = BookSequenceNormalizer()
+
+    def _event_id(self, event: str, symbol: str, suffix: str | int) -> str:
+        namespace = f"-{self._event_id_namespace}" if self._event_id_namespace else ""
+        return f"binance-{event}-{symbol}{namespace}-{suffix}"
 
     @contextmanager
     def transaction(self) -> Iterable[None]:
@@ -65,7 +70,7 @@ class BinanceFixtureAdapter:
                     symbol,
                     event_time=event_time,
                     received_at=received_at,
-                    event_id=f"binance-trade-{symbol}-{message['t']}",
+                    event_id=self._event_id("trade", symbol, message["t"]),
                     sequence=int(message["t"]),
                 ),
                 price=fixed(message["p"], instrument.price_scale, "p"),
@@ -80,7 +85,7 @@ class BinanceFixtureAdapter:
                     symbol,
                     event_time=event_time,
                     received_at=received_at,
-                    event_id=f"binance-bbo-{symbol}-{message['u']}",
+                    event_id=self._event_id("bbo", symbol, message["u"]),
                     sequence=int(message["u"]),
                 ),
                 bid_price=fixed(message["b"], instrument.price_scale, "b"),
@@ -99,7 +104,7 @@ class BinanceFixtureAdapter:
                         symbol,
                         event_time=event_time,
                         received_at=received_at,
-                        event_id=f"binance-book-snapshot-{symbol}-{provider_sequence}",
+                        event_id=self._event_id("book-snapshot", symbol, provider_sequence),
                         sequence=sequence,
                     ),
                     bids=tuple(
@@ -130,6 +135,13 @@ class BinanceFixtureAdapter:
                 changes = [(BookSide.BID, item) for item in message["b"]] + [
                     (BookSide.ASK, item) for item in message["a"]
                 ]
+                if not changes:
+                    self._book_sequences.advance_without_levels(
+                        symbol,
+                        provider_previous_sequence=provider_previous,
+                        provider_sequence=provider_sequence,
+                    )
+                    return []
                 pairs = self._book_sequences.delta(
                     symbol,
                     provider_previous_sequence=provider_previous,
@@ -148,7 +160,9 @@ class BinanceFixtureAdapter:
                             symbol,
                             event_time=event_time,
                             received_at=received_at,
-                            event_id=f"binance-book-delta-{symbol}-{message['u']}-{index}",
+                            event_id=self._event_id(
+                                "book-delta", symbol, f"{message['u']}-{index}"
+                            ),
                             sequence=sequence,
                         ),
                         side=side,
@@ -166,7 +180,7 @@ class BinanceFixtureAdapter:
                     symbol,
                     event_time=event_time,
                     received_at=received_at,
-                    event_id=f"binance-funding-{symbol}-{message['T']}",
+                    event_id=self._event_id("funding", symbol, message["T"]),
                     sequence=int(message["T"]),
                 ),
                 rate=float(message["r"]),
@@ -181,7 +195,7 @@ class BinanceFixtureAdapter:
                     symbol,
                     event_time=event_time,
                     received_at=received_at,
-                    event_id=f"binance-mark-{symbol}-{message['E']}",
+                    event_id=self._event_id("mark", symbol, message["E"]),
                     sequence=int(message["E"]),
                 ),
                 price=fixed(message["p"], instrument.price_scale, "p"),

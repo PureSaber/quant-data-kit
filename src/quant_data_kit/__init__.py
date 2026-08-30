@@ -1,7 +1,6 @@
 """Shared quant data utilities: Parquet cache, calendar, validation, AKShare providers."""
 
-__version__ = "0.6.0"
-
+from quant_data_kit._version import __version__
 from quant_data_kit.adapters_v2 import (
     AdapterContext,
     AdapterInstrument,
@@ -12,6 +11,20 @@ from quant_data_kit.adapters_v2 import (
     adapt_fixture_messages,
 )
 from quant_data_kit.calendar import trading_days_between
+from quant_data_kit.capture_v2 import (
+    M7_CAPABILITIES,
+    M7_PROVIDERS,
+    CaptureConfig,
+    CapturePausedError,
+    CaptureState,
+    CaptureStorageGuard,
+    CryptoL2CaptureCoordinator,
+    LocalArchiveController,
+    RawSegmentWriter,
+    StreamConfig,
+    VolumeIdentity,
+    default_crypto_l2_streams,
+)
 from quant_data_kit.curated import (
     CuratedSnapshot,
     Curator,
@@ -36,6 +49,7 @@ from quant_data_kit.data_lake import (
     read_normalized_events,
     require_collection_capacity,
     validate_raw_reference,
+    write_normalized_batches,
     write_normalized_events,
     write_raw_bytes,
 )
@@ -110,6 +124,8 @@ from quant_data_kit.temporal_v2 import (
 from quant_data_kit.validate import validate_price_frame
 
 __all__ = [
+    "M7_CAPABILITIES",
+    "M7_PROVIDERS",
     "SCHEMA_VERSION_V2",
     "AdapterContext",
     "AdapterInstrument",
@@ -127,8 +143,13 @@ __all__ = [
     "BookSnapshotEvent",
     "CNNeutralFixtureAdapter",
     "CapacityDecision",
+    "CaptureConfig",
+    "CapturePausedError",
+    "CaptureState",
+    "CaptureStorageGuard",
     "CollectionStoppedError",
     "CorporateActionEvent",
+    "CryptoL2CaptureCoordinator",
     "CuratedSnapshot",
     "Curator",
     "DataManifest",
@@ -140,6 +161,7 @@ __all__ = [
     "L2BookReconstructor",
     "L2ReplayError",
     "L2ReplayResult",
+    "LocalArchiveController",
     "MarginMode",
     "MarkPriceEvent",
     "MarketClock",
@@ -151,13 +173,16 @@ __all__ = [
     "QuoteEvent",
     "RawObjectManifest",
     "RawObjectReference",
+    "RawSegmentWriter",
     "SessionPhase",
     "StatusEvent",
     "StoragePolicy",
+    "StreamConfig",
     "SymbolMapping",
     "TemporalAudit",
     "TradeEvent",
     "TradingSession",
+    "VolumeIdentity",
     "__version__",
     "adapt_fixture_messages",
     "add_industry_relative_strength",
@@ -168,6 +193,7 @@ __all__ = [
     "create_snapshot",
     "curate_trade_bars_from_snapshot",
     "dataclass_payload",
+    "default_crypto_l2_streams",
     "ensure_utc_datetime",
     "evaluate_capacity",
     "get_arrow_schema",
@@ -199,6 +225,7 @@ __all__ = [
     "validate_price_frame",
     "validate_raw_reference",
     "write_manifest",
+    "write_normalized_batches",
     "write_normalized_events",
     "write_raw_bytes",
 ]
