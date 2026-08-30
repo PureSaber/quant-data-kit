@@ -16,6 +16,7 @@ import pytest
 import quant_data_kit.capture_v2.collector as collector_module
 import quant_data_kit.capture_v2.epoch as epoch_module
 import quant_data_kit.capture_v2.storage as storage_module
+import quant_data_kit.data_lake as lake_module
 from quant_data_kit.capture_v2.collector import CaptureStreamRunner, CryptoL2CaptureCoordinator
 from quant_data_kit.capture_v2.epoch import NormalizedEpochJournal
 from quant_data_kit.capture_v2.models import (
@@ -228,6 +229,61 @@ def test_normalized_append_uses_bounded_fsync_batches(
     assert calls - before_append == 3
     journal.abort_visible("test-complete")
     assert calls > before_append + 3
+
+
+def test_epoch_seal_waits_for_lake_capacity_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hot, _archive, guard = epoch_fixtures.storage(tmp_path)
+    config = epoch_fixtures.stream(Provider.BINANCE, epoch_fixtures.MarketKind.SPOT)
+    journal = NormalizedEpochJournal(
+        hot,
+        epoch_id="capacity-scan-seal",
+        stream_id=config.stream_id,
+        provider=config.provider.value,
+        venue=config.venue,
+        storage_guard=guard,
+        policy=epoch_fixtures.POLICY,
+        max_part_rows=100,
+    )
+    journal.append(({"value": 1},))
+    open_path = journal._open_path
+    assert open_path.is_file()
+    scan_ready = threading.Event()
+    scan_release = threading.Event()
+    seal_started = threading.Event()
+    real_tree_size = lake_module._tree_size
+
+    def held_tree_size(root: Path) -> int:
+        scan_ready.set()
+        if not scan_release.wait(20):
+            raise TimeoutError("capacity scan was not released")
+        return real_tree_size(root)
+
+    def seal() -> None:
+        seal_started.set()
+        journal._seal_part()
+
+    monkeypatch.setattr(lake_module, "_tree_size", held_tree_size)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        scan = executor.submit(
+            lake_module.evaluate_capacity,
+            hot,
+            projected_write_bytes=0,
+            policy=epoch_fixtures.POLICY,
+        )
+        assert scan_ready.wait(20)
+        sealed = executor.submit(seal)
+        assert seal_started.wait(20)
+        assert not sealed.done()
+        scan_release.set()
+        assert scan.result(timeout=20).allowed
+        sealed.result(timeout=20)
+    assert journal._open_path == open_path
+    assert journal._open_path.is_file() and journal._open_path.stat().st_size == 0
+    assert len(tuple(journal.root.glob("part-[0-9]*-sha256-*.ndjson"))) == 1
+    journal.abort_visible("test-complete")
 
 
 def _journal_with_lineage(tmp_path: Path, epoch_id: str) -> NormalizedEpochJournal:
