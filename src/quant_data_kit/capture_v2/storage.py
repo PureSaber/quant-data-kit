@@ -715,12 +715,12 @@ def _validate_safe_path(root: Path, candidate: Path, *, allow_missing: bool) -> 
     return lexical_candidate
 
 
-def _safe_mkdir(root: Path, path: Path) -> Path:
+def _safe_mkdir(root: Path, path: Path, *, exist_ok: bool = True) -> Path:
     checked = _validate_safe_path(root, path, allow_missing=True)
     lock = Path(root) / ".capture-path-bootstrap.lock"
     with process_file_lock(lock):
         _validate_safe_path(root, lock, allow_missing=True)
-        checked.mkdir(parents=True, exist_ok=True)
+        checked.mkdir(parents=True, exist_ok=exist_ok)
         return _validate_safe_path(root, checked, allow_missing=False)
 
 

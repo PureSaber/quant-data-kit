@@ -706,6 +706,29 @@ class CryptoL2CaptureCoordinator:
                 status="PAUSED_PREFLIGHT_FAILED",
                 long_running_capture_started=False,
             )
+        try:
+            reconciled = NormalizedEpochJournal.reconcile_pending(
+                self.config.hot_root,
+                storage_guard=self.storage_guard,
+                policy=self.policy,
+                normalization_executor=self.normalization_executor,
+            )
+        except Exception as exc:  # noqa: BLE001 - unresolved publication blocks every stream
+            error = f"{type(exc).__name__}: {exc}"
+            self.alert_sink(f"CAPTURE_PAUSED:EPOCH_RECOVERY_FAILED:{error}")
+            reports = tuple(
+                self._empty_stream_report(stream, errors=(error,)) for stream in self.config.streams
+            )
+            return self._write_report(
+                run_id,
+                started,
+                reports,
+                preflight=preflight,
+                status="CAPTURE_FAILED",
+                long_running_capture_started=False,
+            )
+        if reconciled:
+            self.alert_sink(f"CAPTURE_EPOCH_RECOVERY_COMMITTED:{len(reconciled)}")
         runners: list[CaptureStreamRunner] = []
         try:
             for stream in self.config.streams:

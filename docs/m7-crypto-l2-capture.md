@@ -52,17 +52,21 @@ collector commit and previous-segment lineage. A segment is never one file per n
 an existing immutable path cannot be overwritten with different bytes.
 
 Admitted snapshots and deltas are spooled in bounded Normalized epochs. Publication uses the
-existing`write_normalized_events`path, PIT checks, schemas, quarantine rules and Raw references.
-Gaps or connection failures abort the current epoch visibly before resynchronization. Finalization
-retains the journal until both Normalized publication and an immutable receipt succeed; failed
-publish/receipt attempts produce content-addressed failure records and remain retryable.
+existing strict Arrow-batch path, PIT checks, schemas, quarantine rules and Raw references. Every
+finalize attempt persists an immutable`PREPARED`transaction before publishing a visible snapshot,
+then ends in a content-addressed`COMMITTED`receipt or`ABORTED`failure. Before any network startup,
+the coordinator scans all journal parents, validates every transaction and path, and idempotently
+replays unresolved`PREPARED`or retryable`ABORTED`transactions. A process termination after snapshot
+publication but before receipt publication therefore cannot leave an unaudited snapshot. Gaps or
+connection failures explicitly abort the current epoch before resynchronization.
 
 ## Capacity and independent archive controls
 
 `hot_root`、`archive_root`and`restore_root`must be explicit absolute existing directories. The hot
 and archive roots are resolved through an injectable physical-volume probe; different path strings
 on the same physical device fail preflight. All three roots and each final parent reject symbolic
-links、Windows junctions/reparse points and resolved escapes. Collection takes an exact startup
+links、Windows junctions/reparse points and resolved escapes. This applies to journal creation,
+parts, transaction recovery, receipts and abort records as well as Raw/archive paths. Collection takes an exact startup
 baseline, reserves every projected write under a thread-safe incremental counter, and repeats real
 tree/capacity probes at bounded message、byte or monotonic-time intervals. It pauses if projected
 hot data exceeds150GiB or if free space falls below
