@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -197,14 +198,14 @@ def _curated_process(
 
 
 def _curated_hard_exit_process(root: str, normalized_snapshot_id: str) -> None:
-    real_replace = curated_module.os.replace
+    real_replace = lake_module.os.replace
 
     def crash_before_publish(source: Path, destination: Path) -> None:
         if Path(destination).parent.name == "snapshots":
             os._exit(73)
         real_replace(source, destination)
 
-    curated_module.os.replace = crash_before_publish
+    lake_module.os.replace = crash_before_publish
     curate_trade_bars_from_snapshot(
         Path(root),
         normalized_snapshot_id=normalized_snapshot_id,
@@ -215,6 +216,90 @@ def _curated_hard_exit_process(root: str, normalized_snapshot_id: str) -> None:
         session_starts={"binance-24x7-BTC-USDT-SPOT": datetime(2026, 1, 2, tzinfo=timezone.utc)},
         policy=TEST_POLICY,
     )
+
+
+def _curated_capacity_window_process(
+    root: str,
+    normalized_snapshot_id: str,
+    role: str,
+    publisher_ready: Any,
+    publisher_release: Any,
+    contender_transition: Any,
+    results: Any,
+) -> None:
+    real_capacity_check = curated_module.require_collection_capacity
+    real_publish = curated_module._publish_curated_snapshot
+    real_staging_directory = curated_module._stable_staging_directory
+
+    def controlled_capacity_check(*args: Any, **kwargs: Any) -> Any:
+        if role == "contender":
+            contender_transition.put("capacity-check")
+        return real_capacity_check(*args, **kwargs)
+
+    def controlled_publish(*args: Any, **kwargs: Any) -> Any:
+        if role == "publisher":
+            publisher_ready.set()
+            if not publisher_release.wait(20):
+                raise TimeoutError("publisher capacity window was not released")
+        return real_publish(*args, **kwargs)
+
+    @contextmanager
+    def tracked_staging_directory(*args: Any, **kwargs: Any):
+        if role == "contender":
+            contender_transition.put("revision-stage-lock")
+        with real_staging_directory(*args, **kwargs) as stage:
+            yield stage
+
+    curated_module.require_collection_capacity = controlled_capacity_check
+    curated_module._publish_curated_snapshot = controlled_publish
+    curated_module._stable_staging_directory = tracked_staging_directory
+    try:
+        snapshot = _curated_process_once(Path(root), normalized_snapshot_id)
+        results.put(("ok", snapshot.snapshot_id))
+    except WORKER_ERRORS as exc:
+        results.put(("error", f"{type(exc).__name__}: {exc}"))
+
+
+def _held_capacity_scan_process(
+    root: str,
+    scan_ready: Any,
+    scan_release: Any,
+    results: Any,
+) -> None:
+    real_tree_size = lake_module._tree_size
+
+    def held_tree_size(path: Path) -> int:
+        scan_ready.set()
+        if not scan_release.wait(20):
+            raise TimeoutError("capacity scan was not released")
+        return real_tree_size(path)
+
+    lake_module._tree_size = held_tree_size
+    try:
+        decision = lake_module.require_collection_capacity(
+            Path(root),
+            projected_write_bytes=0,
+            policy=TEST_POLICY,
+        )
+        results.put(("scan", str(decision.hot_bytes)))
+    except WORKER_ERRORS as exc:
+        results.put(("error", f"{type(exc).__name__}: {exc}"))
+
+
+def _published_tree_remove_process(
+    root: str,
+    relative_path: str,
+    remove_attempted: Any,
+    remove_completed: Any,
+    results: Any,
+) -> None:
+    remove_attempted.set()
+    try:
+        lake_module._remove_tree(Path(root), Path(root) / relative_path)
+        remove_completed.set()
+        results.put(("remove", relative_path))
+    except WORKER_ERRORS as exc:
+        results.put(("error", f"{type(exc).__name__}: {exc}"))
 
 
 def _hold_staging_process(
@@ -773,6 +858,144 @@ def _curated_process_once(root: Path, normalized_snapshot_id: str):
         session_starts={"binance-24x7-BTC-USDT-SPOT": datetime(2026, 1, 2, tzinfo=timezone.utc)},
         policy=TEST_POLICY,
     )
+
+
+def test_curated_capacity_scan_waits_for_active_revision_stage(tmp_path: Path) -> None:
+    root = tmp_path / "curated-capacity-window"
+    first_snapshot = _normalized(
+        root,
+        key="capacity-window-1",
+        record=trade("capacity-window-1", timestamp="2026-01-02T00:00:01Z"),
+    )
+    second_snapshot = _normalized(
+        root,
+        key="capacity-window-2",
+        record=trade("capacity-window-2", timestamp="2026-01-02T00:00:02Z"),
+    )
+    context = multiprocessing.get_context("spawn")
+    publisher_ready = context.Event()
+    publisher_release = context.Event()
+    contender_transition = context.Queue()
+    results = context.Queue()
+    publisher = context.Process(
+        target=_curated_capacity_window_process,
+        args=(
+            str(root),
+            first_snapshot.snapshot_id,
+            "publisher",
+            publisher_ready,
+            publisher_release,
+            contender_transition,
+            results,
+        ),
+    )
+    contender = context.Process(
+        target=_curated_capacity_window_process,
+        args=(
+            str(root),
+            second_snapshot.snapshot_id,
+            "contender",
+            publisher_ready,
+            publisher_release,
+            contender_transition,
+            results,
+        ),
+    )
+    try:
+        publisher.start()
+        assert publisher_ready.wait(20)
+        active_stages = list(
+            (root / "curated" / "concurrent-bars" / "staging").glob("curated-revision-*-*")
+        )
+        assert len(active_stages) == 1 and active_stages[0].is_dir()
+        contender.start()
+        assert contender_transition.get(timeout=20) == "revision-stage-lock"
+    finally:
+        publisher_release.set()
+        for process in (publisher, contender):
+            if process.pid is None:
+                continue
+            process.join(30)
+            if process.is_alive():
+                process.terminate()
+                process.join(5)
+    assert publisher.exitcode == 0
+    assert contender.exitcode == 0
+    received = [results.get(timeout=5), results.get(timeout=5)]
+    assert len([1 for status, _ in received if status == "ok"]) == 1
+    conflicts = [value for status, value in received if status == "error"]
+    assert len(conflicts) == 1 and "maps to different content" in conflicts[0]
+
+
+def test_lake_wide_capacity_scan_serializes_published_tree_removal(tmp_path: Path) -> None:
+    root = tmp_path / "capacity-tree-lock"
+    published = root / "curated" / "dataset-a" / "snapshots" / "identity-a"
+    published.mkdir(parents=True)
+    (published / "data.parquet").write_bytes(b"published")
+    relative = published.relative_to(root).as_posix()
+    context = multiprocessing.get_context("spawn")
+    scan_ready = context.Event()
+    scan_release = context.Event()
+    remove_attempted = context.Event()
+    remove_completed = context.Event()
+    results = context.Queue()
+    scanner = context.Process(
+        target=_held_capacity_scan_process,
+        args=(str(root), scan_ready, scan_release, results),
+    )
+    remover = context.Process(
+        target=_published_tree_remove_process,
+        args=(
+            str(root),
+            relative,
+            remove_attempted,
+            remove_completed,
+            results,
+        ),
+    )
+    try:
+        scanner.start()
+        assert scan_ready.wait(20)
+        remover.start()
+        assert remove_attempted.wait(20)
+        assert not remove_completed.wait(0.5)
+    finally:
+        scan_release.set()
+        for process in (scanner, remover):
+            if process.pid is None:
+                continue
+            process.join(30)
+            if process.is_alive():
+                process.terminate()
+                process.join(5)
+    assert scanner.exitcode == 0
+    assert remover.exitcode == 0
+    received = dict(results.get(timeout=5) for _ in range(2))
+    assert received["remove"] == relative
+    assert int(received["scan"]) >= len(b"published")
+    assert not published.exists()
+
+
+def test_capacity_scan_counts_published_dataset_named_staging(tmp_path: Path) -> None:
+    root = tmp_path / "published-staging-dataset"
+    published = root / "curated" / "staging" / "snapshots" / "sha256-demo"
+    published.mkdir(parents=True)
+    payload = b"published-content"
+    (published / "data.parquet").write_bytes(payload)
+    decision = lake_module.evaluate_capacity(
+        root,
+        projected_write_bytes=0,
+        policy=StoragePolicy(
+            hot_quota_bytes=len(payload) - 1,
+            minimum_free_bytes=1,
+            minimum_free_fraction=0.000001,
+        ),
+        disk_total_bytes=10**9,
+        disk_free_bytes=10**9,
+    )
+    assert decision.hot_bytes >= len(payload)
+    assert not decision.allowed
+    assert any("hot quota exceeded" in reason for reason in decision.reasons)
 
 
 def test_atomic_normalized_and_curated_staging_recover_after_hard_exit(tmp_path: Path) -> None:

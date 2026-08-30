@@ -30,6 +30,8 @@ from quant_data_kit.capture_v2.models import (
 from quant_data_kit.data_lake import (
     RawObjectManifest,
     StoragePolicy,
+    _capacity_tree_lock,
+    _unlink_tree_entry,
     evaluate_capacity,
     load_raw_object,
     write_raw_bytes,
@@ -758,6 +760,21 @@ def _atomic_immutable_write(path: Path, body: bytes, *, root: Path | None = None
     temporary = parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     _validate_safe_path(trusted_root, temporary, allow_missing=True)
     expected_hash = hashlib.sha256(body).hexdigest()
+    relative = checked_path.relative_to(trusted_root)
+    coordinated = bool(
+        relative.parts
+        and relative.parts[0] in {"capture", "curated", "normalized", "quarantine", "raw"}
+    )
+
+    def publish_link() -> None:
+        try:
+            os.link(temporary, checked_path)
+            _fsync_directory(parent)
+        except FileExistsError:
+            pass
+        if coordinated and temporary.exists():
+            temporary.unlink()
+
     try:
         with temporary.open("xb") as stream:
             stream.write(body)
@@ -766,11 +783,11 @@ def _atomic_immutable_write(path: Path, body: bytes, *, root: Path | None = None
         if _sha256_file(temporary) != expected_hash:
             raise ValidationError(f"immutable staging hash mismatch: {temporary}")
         _validate_safe_path(trusted_root, parent, allow_missing=False)
-        try:
-            os.link(temporary, checked_path)
-            _fsync_directory(parent)
-        except FileExistsError:
-            pass
+        if coordinated:
+            with _capacity_tree_lock(trusted_root):
+                publish_link()
+        else:
+            publish_link()
         _validate_safe_path(trusted_root, checked_path, allow_missing=False)
         if not checked_path.is_file() or _sha256_file(checked_path) != expected_hash:
             raise ValidationError(
@@ -778,7 +795,10 @@ def _atomic_immutable_write(path: Path, body: bytes, *, root: Path | None = None
             )
     finally:
         if temporary.exists():
-            temporary.unlink()
+            if coordinated:
+                _unlink_tree_entry(trusted_root, temporary)
+            else:
+                temporary.unlink()
 
 
 class DurableAuditStore:

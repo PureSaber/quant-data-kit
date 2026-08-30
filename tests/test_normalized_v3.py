@@ -211,7 +211,13 @@ def test_missing_claim_index_recovers_but_tampering_fails_closed(tmp_path: Path)
         tmp_path / "normalized" / "event-claim-index-v3" / f"snapshot={result.snapshot.snapshot_id}"
     )
     next(index_root.rglob("*.parquet")).unlink()
-    recovered = load_normalized_snapshot(tmp_path, result.snapshot.snapshot_id)
+    with pytest.raises(ValidationError, match="explicit StoragePolicy"):
+        load_normalized_snapshot(tmp_path, result.snapshot.snapshot_id)
+    recovered = load_normalized_snapshot(
+        tmp_path,
+        result.snapshot.snapshot_id,
+        recovery_policy=TEST_POLICY,
+    )
     assert recovered.snapshot_id == result.snapshot.snapshot_id
     assert list(index_root.rglob("*.parquet"))
     assert list((tmp_path / "normalized" / "event-claim-index-v3" / "recovery-evidence").iterdir())
@@ -222,7 +228,13 @@ def test_missing_claim_index_recovers_but_tampering_fails_closed(tmp_path: Path)
         load_normalized_snapshot(tmp_path, result.snapshot.snapshot_id)
 
     shutil.rmtree(index_root)
-    recovered_again = load_normalized_snapshot(tmp_path, result.snapshot.snapshot_id)
+    with pytest.raises(ValidationError, match="explicit StoragePolicy"):
+        load_normalized_snapshot(tmp_path, result.snapshot.snapshot_id)
+    recovered_again = load_normalized_snapshot(
+        tmp_path,
+        result.snapshot.snapshot_id,
+        recovery_policy=TEST_POLICY,
+    )
     assert recovered_again.snapshot_id == result.snapshot.snapshot_id
 
 
