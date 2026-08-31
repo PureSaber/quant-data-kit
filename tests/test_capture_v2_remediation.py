@@ -1301,11 +1301,14 @@ def test_coordinator_reports_reconciled_epoch_before_network(
         http=collector_fixtures.FakeHttp(),
         websockets=collector_fixtures.FakeConnector(streams),
         clock=collector_fixtures.FakeClock(),
+        monotonic=lambda: 0.0,
         alert_sink=alerts.append,
         policy=collector_fixtures.POLICY,
     )
     report = asyncio.run(coordinator.run(maximum_websocket_messages=3))
-    assert report.status == "BOUNDED_PROBE_COMPLETE"
+    assert report.status == "BOUNDED_PROBE_COMPLETE", [
+        (item.stream_id, item.errors) for item in report.streams if item.errors
+    ]
     assert "CAPTURE_EPOCH_RECOVERY_COMMITTED:1" in alerts
 
 
