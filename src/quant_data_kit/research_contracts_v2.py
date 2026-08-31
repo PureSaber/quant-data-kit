@@ -5,8 +5,8 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Mapping
-from dataclasses import InitVar, dataclass, field
-from typing import Any, Literal
+from dataclasses import dataclass
+from typing import Any, Literal, NoReturn
 
 import pyarrow as pa
 from pyarrow import ipc
@@ -30,7 +30,6 @@ _SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 _CANONICAL_NONNEGATIVE = re.compile(r"^(?:0|[1-9][0-9]*)$")
 _CANONICAL_POSITIVE = re.compile(r"^[1-9][0-9]*$")
 _INT64_MAX = 2**63 - 1
-_VERIFIED_INPUT_FACTORY_TOKEN = object()
 
 
 def _required_text(value: str, field_name: str) -> str:
@@ -381,103 +380,30 @@ class CuratedAggregation:
         )
 
 
-@dataclass(frozen=True, eq=False)
 class VerifiedFactorInput:
-    layer: Literal["curated", "normalized"]
-    source_snapshot_id: str
-    source_logical_sha256: str
-    selection_logical_sha256: str
-    event_schemas: tuple[EventSchemaRef, ...]
-    table: pa.Table = field(repr=False)
-    calendar_id: str = ""
-    session_policy_version: str = ""
-    market_context_snapshot_id: str = ""
-    market_context_logical_sha256: str = ""
-    lineage: tuple[LineageRef, ...] = ()
-    aggregation: CuratedAggregation | None = None
-    schema_id: str = VERIFIED_FACTOR_INPUT_SCHEMA_ID
-    _factory_token: InitVar[object] = None
+    """Opaque immutable value created only after a complete certified loader succeeds."""
 
-    def __post_init__(self, _factory_token: object) -> None:
-        if _factory_token is not _VERIFIED_INPUT_FACTORY_TOKEN:
-            raise ValidationError("VerifiedFactorInput can only be created by a certified factory")
-        if self.schema_id != VERIFIED_FACTOR_INPUT_SCHEMA_ID:
-            raise ValidationError("unsupported VerifiedFactorInput schema")
-        if self.layer not in {"curated", "normalized"}:
-            raise ValidationError("unsupported verified input layer")
-        _require_snapshot_id(self.source_snapshot_id, "source_snapshot_id")
-        _require_hash(self.source_logical_sha256, "source_logical_sha256")
-        _require_hash(self.selection_logical_sha256, "selection_logical_sha256")
-        _required_text(self.calendar_id, "calendar_id")
-        _required_text(self.session_policy_version, "session_policy_version")
-        _require_snapshot_id(self.market_context_snapshot_id, "market_context_snapshot_id")
-        _require_hash(self.market_context_logical_sha256, "market_context_logical_sha256")
-        schemas = tuple(self.event_schemas)
-        if not schemas or schemas != tuple(sorted(set(schemas))):
-            raise ValidationError("event_schemas must be non-empty, unique, and sorted")
-        if not isinstance(self.table, pa.Table) or self.table.num_rows <= 0:
-            raise ValidationError("verified input table must be a non-empty Arrow table")
-        if self.selection_logical_sha256 != _arrow_table_logical_sha256(self.table):
-            raise ValidationError("verified input selection hash does not match its Arrow table")
-        lineage = tuple(self.lineage)
-        if not lineage or lineage != tuple(sorted(lineage)):
-            raise ValidationError("lineage must be non-empty and canonically ordered")
-        lineage_keys = [(item.role, item.snapshot_id) for item in lineage]
-        if len(lineage_keys) != len(set(lineage_keys)):
-            raise ValidationError("lineage roles and snapshots must be unique")
-        source_lineage = [item for item in lineage if item.role == "market"]
-        if len(source_lineage) != 1 or (
-            source_lineage[0].snapshot_id,
-            source_lineage[0].logical_sha256,
-        ) != (self.source_snapshot_id, self.source_logical_sha256):
-            raise ValidationError("source snapshot differs from its market lineage")
-        context_lineage = [item for item in lineage if item.role == "market_context"]
-        if len(context_lineage) != 1 or (
-            context_lineage[0].snapshot_id,
-            context_lineage[0].logical_sha256,
-        ) != (self.market_context_snapshot_id, self.market_context_logical_sha256):
-            raise ValidationError("market context differs from its lineage")
-        if self.layer == "curated":
-            if self.aggregation is None:
-                raise ValidationError("Curated verified input requires aggregation metadata")
-            if schemas != (EventSchemaRef(BAR_EVENT_SCHEMA_ID, SCHEMA_VERSION_V2),):
-                raise ValidationError("Curated verified input requires the frozen Bar schema")
-            if self.table.schema != get_arrow_schema(BAR_EVENT_SCHEMA_ID):
-                raise ValidationError("Curated verified input table is not the frozen Bar schema")
-            context_values = (
-                self.calendar_id,
-                self.session_policy_version,
-                self.market_context_snapshot_id,
-                self.market_context_logical_sha256,
-            )
-            aggregation_values = (
-                self.aggregation.calendar_id,
-                self.aggregation.session_policy_version,
-                self.aggregation.market_context_snapshot_id,
-                self.aggregation.market_context_logical_sha256,
-            )
-            if context_values != aggregation_values:
-                raise ValidationError("verified input context differs from its aggregation")
-        elif self.aggregation is not None:
-            raise ValidationError("Normalized verified input cannot contain aggregation metadata")
-        elif any(
-            item.schema_id == BAR_EVENT_SCHEMA_ID or item.schema_version != SCHEMA_VERSION_V2
-            for item in schemas
-        ):
-            raise ValidationError("Normalized verified input requires non-Bar v2 event schemas")
-        if self.layer == "normalized":
-            if "event_schema_id" not in self.table.column_names:
-                raise ValidationError("Normalized verified input lacks event_schema_id")
-            actual_schema_ids = set(self.table.column("event_schema_id").to_pylist())
-            expected_schema_ids = {item.schema_id for item in schemas}
-            if actual_schema_ids != expected_schema_ids:
-                raise ValidationError("Normalized table event schemas differ from its contract")
-        object.__setattr__(self, "event_schemas", schemas)
-        object.__setattr__(self, "lineage", lineage)
+    __slots__ = (
+        "aggregation",
+        "calendar_id",
+        "event_schemas",
+        "layer",
+        "lineage",
+        "market_context_logical_sha256",
+        "market_context_snapshot_id",
+        "schema_id",
+        "selection_logical_sha256",
+        "session_policy_version",
+        "source_logical_sha256",
+        "source_snapshot_id",
+        "table",
+    )
 
-    @classmethod
-    def _from_certified_factory(cls, **values: Any) -> VerifiedFactorInput:
-        return cls(_factory_token=_VERIFIED_INPUT_FACTORY_TOKEN, **values)
+    def __new__(cls, *_args: Any, **_kwargs: Any) -> NoReturn:
+        raise ValidationError("VerifiedFactorInput can only be created by a certified loader")
+
+    def __setattr__(self, _name: str, _value: Any) -> None:
+        raise ValidationError("VerifiedFactorInput is immutable")
 
     @property
     def arrow_schema_sha256(self) -> str:
@@ -500,6 +426,97 @@ class VerifiedFactorInput:
             "arrow_schema_sha256": self.arrow_schema_sha256,
             "aggregation": self.aggregation.to_contract() if self.aggregation else None,
         }
+
+
+def _validate_verified_factor_input_values(values: Mapping[str, Any]) -> None:
+    expected = set(VerifiedFactorInput.__slots__)
+    if set(values) != expected:
+        raise ValidationError("VerifiedFactorInput fields must be closed and complete")
+    schema_id = values["schema_id"]
+    layer = values["layer"]
+    source_snapshot_id = values["source_snapshot_id"]
+    source_logical_sha256 = values["source_logical_sha256"]
+    selection_logical_sha256 = values["selection_logical_sha256"]
+    event_schemas = values["event_schemas"]
+    table = values["table"]
+    calendar_id = values["calendar_id"]
+    session_policy_version = values["session_policy_version"]
+    market_context_snapshot_id = values["market_context_snapshot_id"]
+    market_context_logical_sha256 = values["market_context_logical_sha256"]
+    lineage = values["lineage"]
+    aggregation = values["aggregation"]
+
+    if schema_id != VERIFIED_FACTOR_INPUT_SCHEMA_ID:
+        raise ValidationError("unsupported VerifiedFactorInput schema")
+    if layer not in {"curated", "normalized"}:
+        raise ValidationError("unsupported verified input layer")
+    _require_snapshot_id(source_snapshot_id, "source_snapshot_id")
+    _require_hash(source_logical_sha256, "source_logical_sha256")
+    _require_hash(selection_logical_sha256, "selection_logical_sha256")
+    _required_text(calendar_id, "calendar_id")
+    _required_text(session_policy_version, "session_policy_version")
+    _require_snapshot_id(market_context_snapshot_id, "market_context_snapshot_id")
+    _require_hash(market_context_logical_sha256, "market_context_logical_sha256")
+    schemas = tuple(event_schemas)
+    if not schemas or schemas != tuple(sorted(set(schemas))):
+        raise ValidationError("event_schemas must be non-empty, unique, and sorted")
+    if not isinstance(table, pa.Table) or table.num_rows <= 0:
+        raise ValidationError("verified input table must be a non-empty Arrow table")
+    if selection_logical_sha256 != _arrow_table_logical_sha256(table):
+        raise ValidationError("verified input selection hash does not match its Arrow table")
+    canonical_lineage = tuple(lineage)
+    if not canonical_lineage or canonical_lineage != tuple(sorted(canonical_lineage)):
+        raise ValidationError("lineage must be non-empty and canonically ordered")
+    lineage_keys = [(item.role, item.snapshot_id) for item in canonical_lineage]
+    if len(lineage_keys) != len(set(lineage_keys)):
+        raise ValidationError("lineage roles and snapshots must be unique")
+    source_lineage = [item for item in canonical_lineage if item.role == "market"]
+    if len(source_lineage) != 1 or (
+        source_lineage[0].snapshot_id,
+        source_lineage[0].logical_sha256,
+    ) != (source_snapshot_id, source_logical_sha256):
+        raise ValidationError("source snapshot differs from its market lineage")
+    context_lineage = [item for item in canonical_lineage if item.role == "market_context"]
+    if len(context_lineage) != 1 or (
+        context_lineage[0].snapshot_id,
+        context_lineage[0].logical_sha256,
+    ) != (market_context_snapshot_id, market_context_logical_sha256):
+        raise ValidationError("market context differs from its lineage")
+    if layer == "curated":
+        if aggregation is None:
+            raise ValidationError("Curated verified input requires aggregation metadata")
+        if schemas != (EventSchemaRef(BAR_EVENT_SCHEMA_ID, SCHEMA_VERSION_V2),):
+            raise ValidationError("Curated verified input requires the frozen Bar schema")
+        if table.schema != get_arrow_schema(BAR_EVENT_SCHEMA_ID):
+            raise ValidationError("Curated verified input table is not the frozen Bar schema")
+        context_values = (
+            calendar_id,
+            session_policy_version,
+            market_context_snapshot_id,
+            market_context_logical_sha256,
+        )
+        aggregation_values = (
+            aggregation.calendar_id,
+            aggregation.session_policy_version,
+            aggregation.market_context_snapshot_id,
+            aggregation.market_context_logical_sha256,
+        )
+        if context_values != aggregation_values:
+            raise ValidationError("verified input context differs from its aggregation")
+    elif aggregation is not None:
+        raise ValidationError("Normalized verified input cannot contain aggregation metadata")
+    elif any(
+        item.schema_id == BAR_EVENT_SCHEMA_ID or item.schema_version != SCHEMA_VERSION_V2
+        for item in schemas
+    ):
+        raise ValidationError("Normalized verified input requires non-Bar v2 event schemas")
+    if layer == "normalized":
+        if "event_schema_id" not in table.column_names:
+            raise ValidationError("Normalized verified input lacks event_schema_id")
+        actual_schema_ids = set(table.column("event_schema_id").to_pylist())
+        expected_schema_ids = {item.schema_id for item in schemas}
+        if actual_schema_ids != expected_schema_ids:
+            raise ValidationError("Normalized table event schemas differ from its contract")
 
 
 def _arrow_table_logical_sha256(table: pa.Table) -> str:
