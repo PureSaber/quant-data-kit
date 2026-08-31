@@ -51,5 +51,8 @@ layer = "data"
 schemas = [
     { id = "puresaber.market-events", version = "2.0.0" },
     { id = "puresaber.instrument-master", version = "2.0.0" },
+    { id = "puresaber.curated-aggregation", version = "1.0.0" },
+    { id = "puresaber.market-context", version = "1.0.0" },
+    { id = "puresaber.verified-factor-input", version = "1.0.0" },
 ]
 lock-files = ["requirements.lock"]
