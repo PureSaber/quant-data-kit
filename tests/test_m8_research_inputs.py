@@ -976,7 +976,7 @@ def test_normalized_factory_orders_by_event_time_not_session_text(tmp_path: Path
     assert verified.table.column("event_id").to_pylist() == ["t1", "t2", "t3", "t4"]
 
 
-def test_event_bar_writer_partitions_independent_sources_without_rejecting_them(
+def test_event_bar_writer_partitions_sources_but_certification_enforces_snapshot_lineage(
     tmp_path: Path,
 ) -> None:
     primary = [
@@ -1034,6 +1034,58 @@ def test_event_bar_writer_partitions_independent_sources_without_rejecting_them(
         source_event_schemas=(EventSchemaRef(TRADE_EVENT_SCHEMA_ID, SCHEMA_VERSION_V2),),
         partition_evidence=tuple(evidence),
     )
+    with pytest.raises(ValidationError, match="require source/session partition scopes"):
+        curated_module._write_curated_bars(
+            tmp_path,
+            bars,
+            dataset="missing-event-scopes",
+            revision_id="r1",
+            recipe_version="multi-source-v1",
+            normalized_snapshot_id=source.snapshot_id,
+            policy=TEST_POLICY,
+            aggregation=aggregation,
+        )
+    with pytest.raises(ValidationError, match="only valid for event Bars"):
+        curated_module._write_curated_bars(
+            tmp_path,
+            bars,
+            dataset="unexpected-event-scopes",
+            revision_id="r1",
+            recipe_version="multi-source-v1",
+            normalized_snapshot_id=source.snapshot_id,
+            policy=TEST_POLICY,
+            event_partition_scopes=scopes,
+        )
+    incomplete_scopes = dict(scopes)
+    incomplete_scopes.pop(next(iter(incomplete_scopes)))
+    with pytest.raises(ValidationError, match="lacks a valid"):
+        curated_module._write_curated_bars(
+            tmp_path,
+            bars,
+            dataset="incomplete-event-scopes",
+            revision_id="r1",
+            recipe_version="multi-source-v1",
+            normalized_snapshot_id=source.snapshot_id,
+            policy=TEST_POLICY,
+            aggregation=aggregation,
+            event_partition_scopes=incomplete_scopes,
+        )
+    wrong_session_scopes = {
+        event_id: (upstream_source, "wrong-session")
+        for event_id, (upstream_source, _session_id) in scopes.items()
+    }
+    with pytest.raises(ValidationError, match="session differs"):
+        curated_module._write_curated_bars(
+            tmp_path,
+            bars,
+            dataset="wrong-session-scopes",
+            revision_id="r1",
+            recipe_version="multi-source-v1",
+            normalized_snapshot_id=source.snapshot_id,
+            policy=TEST_POLICY,
+            aggregation=aggregation,
+            event_partition_scopes=wrong_session_scopes,
+        )
     snapshot = curated_module._write_curated_bars(
         tmp_path,
         bars,
@@ -1049,6 +1101,8 @@ def test_event_bar_writer_partitions_independent_sources_without_rejecting_them(
     assert {item.relative_path for item in snapshot.partitions} == {
         item.relative_path for item in evidence
     }
+    with pytest.raises(ValidationError, match="event_count"):
+        load_verified_curated_bars(tmp_path, "multi-source-writer", snapshot.snapshot_id)
 
 
 def test_bound_reader_rejects_actual_consumed_bytes_that_do_not_match_manifest(
