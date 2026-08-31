@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from copy import copy
 from dataclasses import replace
@@ -7,6 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 import quant_data_kit.curated as curated_module
@@ -664,24 +666,19 @@ def test_bar_validation_and_event_evidence_fail_closed(tmp_path: Path) -> None:
     broken = copy(event_input.aggregation)
     object.__setattr__(broken, "partition_evidence", None)
     with pytest.raises(ValidationError, match="metadata is incomplete"):
-        research_inputs._verify_event_bars(
-            tmp_path, broken, source.snapshot_id, event_input.table, context
-        )
+        research_inputs._verify_event_bars(broken, source_rows, event_input.table, context)
     wrong_schema = replace(
         event_input.aggregation,
         source_event_schemas=(EventSchemaRef(BOOK_DELTA_EVENT_SCHEMA_ID, SCHEMA_VERSION_V2),),
     )
     with pytest.raises(ValidationError, match="Trade schema"):
-        research_inputs._verify_event_bars(
-            tmp_path, wrong_schema, source.snapshot_id, event_input.table, context
-        )
+        research_inputs._verify_event_bars(wrong_schema, source_rows, event_input.table, context)
     multiple_sources = event_input.table.to_pylist()
     multiple_sources[1] = dict(multiple_sources[1], source="other")
     with pytest.raises(ValidationError, match="one deterministic"):
         research_inputs._verify_event_bars(
-            tmp_path,
             event_input.aggregation,
-            source.snapshot_id,
+            source_rows,
             bars(multiple_sources),
             context,
         )
@@ -690,7 +687,7 @@ def test_bar_validation_and_event_evidence_fail_closed(tmp_path: Path) -> None:
     changed[0]["close_price"] = dict(changed[0]["close_price"], units=40002)
     with pytest.raises(ValidationError, match="do not recompute"):
         research_inputs._verify_event_bars(
-            tmp_path, event_input.aggregation, source.snapshot_id, bars(changed), context
+            event_input.aggregation, source_rows, bars(changed), context
         )
 
 
@@ -888,6 +885,295 @@ def test_curated_aggregation_builders_cover_all_kinds_and_reject_bad_inputs() ->
             threshold=FixedPoint(3, 0),
             session_starts={SESSION_ID: start},
         )
+
+
+def two_session_context(
+    root: Path,
+    *,
+    first_id: str = "z-morning",
+    second_id: str = "a-afternoon",
+):
+    base = market_context(root)
+    first = replace(
+        base.sessions[0],
+        session_id=first_id,
+        opens_at=datetime(2026, 1, 5, 1, 30, tzinfo=UTC),
+        closes_at=datetime(2026, 1, 5, 1, 40, tzinfo=UTC),
+    )
+    second = replace(
+        base.sessions[0],
+        session_id=second_id,
+        opens_at=datetime(2026, 1, 5, 1, 40, tzinfo=UTC),
+        closes_at=datetime(2026, 1, 5, 2, 0, tzinfo=UTC),
+    )
+    return create_market_context_snapshot(
+        root,
+        calendar_id=base.calendar_id,
+        session_policy_version="cffex-two-session-v1",
+        instruments=base.instruments,
+        sessions=[first, second],
+        policy=TEST_POLICY,
+    )
+
+
+def two_session_trades(first_id: str, second_id: str) -> list[dict]:
+    rows = [
+        trade("t1", "2026-01-05T01:30:01Z", 1, 40001),
+        trade("t2", "2026-01-05T01:30:20Z", 2, 40003),
+        trade("t3", "2026-01-05T01:40:01Z", 1, 40002),
+        trade("t4", "2026-01-05T01:40:20Z", 2, 40004),
+    ]
+    for row in rows[:2]:
+        row["session_id"] = first_id
+    for row in rows[2:]:
+        row["session_id"] = second_id
+    return rows
+
+
+def test_multi_session_event_bars_have_unique_certified_partitions(tmp_path: Path) -> None:
+    context = two_session_context(tmp_path)
+    source = normalized(tmp_path, two_session_trades("z-morning", "a-afternoon"))
+    snapshot = curate_trade_event_bars_from_snapshot(
+        tmp_path,
+        normalized_snapshot_id=source.snapshot_id,
+        dataset="multi-session-event-bars",
+        revision_id="r1",
+        recipe_version="event-v1",
+        basis="trade_count",
+        threshold=FixedPoint(2, 0),
+        market_context_snapshot_id=context.snapshot_id,
+        policy=TEST_POLICY,
+    )
+    verified = load_verified_curated_bars(
+        tmp_path, "multi-session-event-bars", snapshot.snapshot_id
+    )
+    evidence = verified.aggregation.partition_evidence if verified.aggregation else None
+    assert evidence is not None
+    paths = [item.relative_path for item in evidence]
+    assert len(paths) == len(set(paths)) == 2
+    assert all("/session=" in item for item in paths)
+    assert {item.session_id for item in evidence} == {"z-morning", "a-afternoon"}
+
+
+def test_normalized_factory_orders_by_event_time_not_session_text(tmp_path: Path) -> None:
+    context = two_session_context(tmp_path)
+    source = normalized(tmp_path, two_session_trades("z-morning", "a-afternoon"))
+    verified = load_verified_normalized_events(
+        tmp_path,
+        source.snapshot_id,
+        [EventSchemaRef(TRADE_EVENT_SCHEMA_ID, SCHEMA_VERSION_V2)],
+        context.snapshot_id,
+    )
+    assert verified.table.column("session_id").to_pylist() == [
+        "z-morning",
+        "z-morning",
+        "a-afternoon",
+        "a-afternoon",
+    ]
+    assert verified.table.column("event_id").to_pylist() == ["t1", "t2", "t3", "t4"]
+
+
+def test_bound_reader_rejects_actual_consumed_bytes_that_do_not_match_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = normalized(tmp_path, [trade("t1", "2026-01-05T01:30:01Z", 1)])
+    context = market_context(tmp_path)
+    target = (
+        tmp_path
+        / "normalized"
+        / "snapshots"
+        / source.snapshot_id
+        / source.partitions[0].relative_path
+    )
+    original_read_bytes = Path.read_bytes
+
+    def changed_bytes(path: Path) -> bytes:
+        payload = original_read_bytes(path)
+        if path == target:
+            return payload[:-1] + bytes([payload[-1] ^ 1])
+        return payload
+
+    monkeypatch.setattr(Path, "read_bytes", changed_bytes)
+    with pytest.raises(ValidationError, match="bytes differ from its manifest"):
+        load_verified_normalized_events(
+            tmp_path,
+            source.snapshot_id,
+            [EventSchemaRef(TRADE_EVENT_SCHEMA_ID, SCHEMA_VERSION_V2)],
+            context.snapshot_id,
+        )
+
+
+def test_partition_row_binding_and_source_order_fail_closed(tmp_path: Path) -> None:
+    source = normalized(
+        tmp_path,
+        [
+            trade("t1", "2026-01-05T01:30:01Z", 1),
+            trade("t2", "2026-01-05T01:30:02Z", 2),
+        ],
+    )
+    normalized_path = (
+        tmp_path
+        / "normalized"
+        / "snapshots"
+        / source.snapshot_id
+        / source.partitions[0].relative_path
+    )
+    normalized_table = pq.read_table(normalized_path)
+    reversed_table = normalized_table.take(pa.array([1, 0]))
+    with pytest.raises(ValidationError, match="strictly ordered"):
+        research_inputs._validate_normalized_partition_table(source.partitions[0], reversed_table)
+    wrong_normalized_rows = normalized_table.to_pylist()
+    wrong_normalized_rows[0] = dict(wrong_normalized_rows[0], instrument_id="OTHER")
+    wrong_normalized = pa.Table.from_pylist(wrong_normalized_rows, schema=normalized_table.schema)
+    with pytest.raises(ValidationError, match="instrument differs"):
+        research_inputs._validate_normalized_partition_table(source.partitions[0], wrong_normalized)
+
+    context = market_context(tmp_path)
+    curated = curate_trade_bars_from_snapshot(
+        tmp_path,
+        normalized_snapshot_id=source.snapshot_id,
+        dataset="partition-binding",
+        revision_id="r1",
+        recipe_version="fixed-v1",
+        interval=timedelta(minutes=1),
+        session_starts={SESSION_ID: datetime(2026, 1, 5, 1, 30, tzinfo=UTC)},
+        market_context_snapshot_id=context.snapshot_id,
+        policy=TEST_POLICY,
+    )
+    curated_path = (
+        tmp_path
+        / "curated"
+        / "partition-binding"
+        / "snapshots"
+        / curated.snapshot_id
+        / curated.partitions[0].relative_path
+    )
+    curated_table = pq.read_table(curated_path)
+    wrong_curated_rows = curated_table.to_pylist()
+    wrong_curated_rows[0] = dict(wrong_curated_rows[0], trading_day=date(2026, 1, 6))
+    wrong_curated = pa.Table.from_pylist(wrong_curated_rows, schema=curated_table.schema)
+    with pytest.raises(ValidationError, match="trading_day"):
+        curated_module._validate_curated_partition_table(
+            curated.partitions[0], wrong_curated, curated.aggregation
+        )
+
+
+def test_partition_binding_helpers_cover_all_metadata_and_order_guards(tmp_path: Path) -> None:
+    source = normalized(
+        tmp_path,
+        [
+            trade("t1", "2026-01-05T01:30:01Z", 1),
+            trade("t2", "2026-01-05T01:30:02Z", 2),
+        ],
+    )
+    partition = source.partitions[0]
+    path = tmp_path / "normalized" / "snapshots" / source.snapshot_id / partition.relative_path
+    table = pq.read_table(path)
+    with pytest.raises(ValidationError, match="row count"):
+        research_inputs._validate_normalized_partition_table(
+            replace(partition, rows=partition.rows + 1), table
+        )
+    metadata_cases = [
+        (replace(partition, event_type="quote"), "event_type"),
+        (replace(partition, trading_date="2026-01-06"), "trading_day"),
+        (replace(partition, provider="other"), "source"),
+    ]
+    for changed_partition, message in metadata_cases:
+        with pytest.raises(ValidationError, match=message):
+            research_inputs._validate_normalized_partition_table(changed_partition, table)
+    duplicate_sequence_rows = table.to_pylist()
+    duplicate_sequence_rows[1] = dict(duplicate_sequence_rows[1], sequence=1)
+    duplicate_sequence = pa.Table.from_pylist(duplicate_sequence_rows, schema=table.schema)
+    with pytest.raises(ValidationError, match="sequence does not advance"):
+        research_inputs._validate_normalized_partition_table(partition, duplicate_sequence)
+
+    context = market_context(tmp_path)
+    event = curate_trade_event_bars_from_snapshot(
+        tmp_path,
+        normalized_snapshot_id=source.snapshot_id,
+        dataset="partition-helper-event",
+        revision_id="r1",
+        recipe_version="event-v1",
+        basis="trade_count",
+        threshold=FixedPoint(2, 0),
+        market_context_snapshot_id=context.snapshot_id,
+        policy=TEST_POLICY,
+    )
+    event_partition = event.partitions[0]
+    event_path = (
+        tmp_path
+        / "curated"
+        / "partition-helper-event"
+        / "snapshots"
+        / event.snapshot_id
+        / event_partition.relative_path
+    )
+    event_table = pq.read_table(event_path)
+    with pytest.raises(ValidationError, match="row count"):
+        curated_module._validate_curated_partition_table(
+            replace(event_partition, rows=event_partition.rows + 1),
+            event_table,
+            event.aggregation,
+        )
+    wrong_instrument_rows = event_table.to_pylist()
+    wrong_instrument_rows[0] = dict(wrong_instrument_rows[0], instrument_id="OTHER")
+    wrong_instrument = pa.Table.from_pylist(wrong_instrument_rows, schema=event_table.schema)
+    with pytest.raises(ValidationError, match="instrument"):
+        curated_module._validate_curated_partition_table(
+            event_partition, wrong_instrument, event.aggregation
+        )
+    multiple_session_rows = event_table.to_pylist()
+    multiple_session_rows.append(
+        dict(
+            multiple_session_rows[0],
+            event_id="other-session",
+            event_time=datetime(2026, 1, 5, 1, 31, tzinfo=UTC),
+            received_at=datetime(2026, 1, 5, 1, 31, tzinfo=UTC),
+            available_at=datetime(2026, 1, 5, 1, 31, tzinfo=UTC),
+            bar_end=datetime(2026, 1, 5, 1, 31, tzinfo=UTC),
+            sequence=event_table.num_rows + 1,
+            session_id="other-session",
+        )
+    )
+    multiple_session = pa.Table.from_pylist(multiple_session_rows, schema=event_table.schema)
+    expanded_partition = replace(event_partition, rows=multiple_session.num_rows)
+    with pytest.raises(ValidationError, match="exactly one session"):
+        curated_module._validate_curated_partition_table(
+            expanded_partition, multiple_session, event.aggregation
+        )
+
+
+def test_content_bound_reader_and_final_stamp_failure_branches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = normalized(tmp_path, [trade("t1", "2026-01-05T01:30:01Z", 1)])
+    partition = source.partitions[0]
+    path = tmp_path / "normalized" / "snapshots" / source.snapshot_id / partition.relative_path
+    original_stamp = research_inputs._file_stamp
+    calls = 0
+
+    def changed_during_read(target: Path):
+        nonlocal calls
+        calls += 1
+        stamp = original_stamp(target)
+        return (*stamp[:-1], stamp[-1] + 1) if calls == 2 else stamp
+
+    monkeypatch.setattr(research_inputs, "_file_stamp", changed_during_read)
+    with pytest.raises(ValidationError, match="changed while reading"):
+        research_inputs._read_content_bound_parquet(path, partition.content_sha256)
+    monkeypatch.setattr(research_inputs, "_file_stamp", original_stamp)
+
+    invalid = tmp_path / "invalid.parquet"
+    invalid.write_bytes(b"not parquet")
+    with pytest.raises(ValidationError, match="not readable Parquet"):
+        research_inputs._read_content_bound_parquet(
+            invalid, hashlib.sha256(b"not parquet").hexdigest()
+        )
+    with pytest.raises(ValidationError, match="changed during verified read"):
+        research_inputs._assert_file_stamps({path: (0, 0, 0, 0, 0)})
+    missing = tmp_path / "missing.parquet"
+    with pytest.raises(ValidationError, match="disappeared"):
+        research_inputs._assert_file_stamps({missing: (0, 0, 0, 0, 0)})
 
 
 def test_trading_day_rollup_uses_all_authoritative_sessions(tmp_path: Path) -> None:

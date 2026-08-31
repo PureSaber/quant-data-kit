@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import pyarrow as pa
+from pyarrow import ipc
 
 from quant_data_kit.exceptions import ValidationError
 from quant_data_kit.fixed_point import FixedPoint
+from quant_data_kit.schemas_v2 import (
+    BAR_EVENT_SCHEMA_ID,
+    SCHEMA_VERSION_V2,
+    get_arrow_schema,
+)
 
 VERIFIED_FACTOR_INPUT_SCHEMA_ID = "puresaber.verified-factor-input@1.0.0"
 CURATED_AGGREGATION_SCHEMA_ID = "puresaber.curated-aggregation@1.0.0"
@@ -23,6 +30,7 @@ _SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 _CANONICAL_NONNEGATIVE = re.compile(r"^(?:0|[1-9][0-9]*)$")
 _CANONICAL_POSITIVE = re.compile(r"^[1-9][0-9]*$")
 _INT64_MAX = 2**63 - 1
+_VERIFIED_INPUT_FACTORY_TOKEN = object()
 
 
 def _required_text(value: str, field_name: str) -> str:
@@ -254,6 +262,9 @@ class CuratedAggregation:
             evidence = tuple(self.partition_evidence or ())
             if not evidence:
                 raise ValidationError("event_bar requires partition evidence")
+            relative_paths = [item.relative_path for item in evidence]
+            if len(relative_paths) != len(set(relative_paths)):
+                raise ValidationError("event-bar partition paths must be globally unique")
             selection_hashes = [item.source_selection_sha256 for item in evidence]
             if len(selection_hashes) != len(set(selection_hashes)):
                 raise ValidationError("event-bar selection hashes must be globally unique")
@@ -272,6 +283,12 @@ class CuratedAggregation:
                 raise ValidationError("event-bar partition evidence must be canonically sorted")
             previous_by_stream: dict[tuple[str, str, str], EventBarPartitionEvidence] = {}
             for item in evidence:
+                if item.event_count > item.last_sequence - item.first_sequence + 1:
+                    raise ValidationError("event-bar event_count exceeds its sequence range")
+                if (item.first_sequence == item.last_sequence) != (
+                    item.first_event_id == item.last_event_id
+                ):
+                    raise ValidationError("event-bar boundary identities are inconsistent")
                 previous = previous_by_stream.get(item.stream_key)
                 if previous is not None and item.first_sequence <= previous.last_sequence:
                     raise ValidationError("event-bar evidence ranges overlap within one stream")
@@ -379,8 +396,11 @@ class VerifiedFactorInput:
     lineage: tuple[LineageRef, ...] = ()
     aggregation: CuratedAggregation | None = None
     schema_id: str = VERIFIED_FACTOR_INPUT_SCHEMA_ID
+    _factory_token: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        if self._factory_token is not _VERIFIED_INPUT_FACTORY_TOKEN:
+            raise ValidationError("VerifiedFactorInput can only be created by a certified factory")
         if self.schema_id != VERIFIED_FACTOR_INPUT_SCHEMA_ID:
             raise ValidationError("unsupported VerifiedFactorInput schema")
         if self.layer not in {"curated", "normalized"}:
@@ -397,21 +417,58 @@ class VerifiedFactorInput:
             raise ValidationError("event_schemas must be non-empty, unique, and sorted")
         if not isinstance(self.table, pa.Table) or self.table.num_rows <= 0:
             raise ValidationError("verified input table must be a non-empty Arrow table")
+        if self.selection_logical_sha256 != _arrow_table_logical_sha256(self.table):
+            raise ValidationError("verified input selection hash does not match its Arrow table")
         lineage = tuple(self.lineage)
         if not lineage or lineage != tuple(sorted(lineage)):
             raise ValidationError("lineage must be non-empty and canonically ordered")
+        lineage_keys = [(item.role, item.snapshot_id) for item in lineage]
+        if len(lineage_keys) != len(set(lineage_keys)):
+            raise ValidationError("lineage roles and snapshots must be unique")
         if self.layer == "curated":
             if self.aggregation is None:
                 raise ValidationError("Curated verified input requires aggregation metadata")
+            if schemas != (EventSchemaRef(BAR_EVENT_SCHEMA_ID, SCHEMA_VERSION_V2),):
+                raise ValidationError("Curated verified input requires the frozen Bar schema")
+            if self.table.schema != get_arrow_schema(BAR_EVENT_SCHEMA_ID):
+                raise ValidationError("Curated verified input table is not the frozen Bar schema")
+            context_values = (
+                self.calendar_id,
+                self.session_policy_version,
+                self.market_context_snapshot_id,
+                self.market_context_logical_sha256,
+            )
+            aggregation_values = (
+                self.aggregation.calendar_id,
+                self.aggregation.session_policy_version,
+                self.aggregation.market_context_snapshot_id,
+                self.aggregation.market_context_logical_sha256,
+            )
+            if context_values != aggregation_values:
+                raise ValidationError("verified input context differs from its aggregation")
         elif self.aggregation is not None:
             raise ValidationError("Normalized verified input cannot contain aggregation metadata")
+        elif any(
+            item.schema_id == BAR_EVENT_SCHEMA_ID or item.schema_version != SCHEMA_VERSION_V2
+            for item in schemas
+        ):
+            raise ValidationError("Normalized verified input requires non-Bar v2 event schemas")
+        if self.layer == "normalized":
+            if "event_schema_id" not in self.table.column_names:
+                raise ValidationError("Normalized verified input lacks event_schema_id")
+            actual_schema_ids = set(self.table.column("event_schema_id").to_pylist())
+            expected_schema_ids = {item.schema_id for item in schemas}
+            if actual_schema_ids != expected_schema_ids:
+                raise ValidationError("Normalized table event schemas differ from its contract")
         object.__setattr__(self, "event_schemas", schemas)
         object.__setattr__(self, "lineage", lineage)
 
+    @classmethod
+    def _from_certified_factory(cls, **values: Any) -> VerifiedFactorInput:
+        return cls(_factory_token=_VERIFIED_INPUT_FACTORY_TOKEN, **values)
+
     @property
     def arrow_schema_sha256(self) -> str:
-        import hashlib
-
         return hashlib.sha256(self.table.schema.serialize().to_pybytes()).hexdigest()
 
     def to_contract(self) -> dict[str, Any]:
@@ -431,3 +488,11 @@ class VerifiedFactorInput:
             "arrow_schema_sha256": self.arrow_schema_sha256,
             "aggregation": self.aggregation.to_contract() if self.aggregation else None,
         }
+
+
+def _arrow_table_logical_sha256(table: pa.Table) -> str:
+    combined = table.combine_chunks()
+    sink = pa.BufferOutputStream()
+    with ipc.new_stream(sink, combined.schema) as writer:
+        writer.write_table(combined)
+    return hashlib.sha256(sink.getvalue().to_pybytes()).hexdigest()

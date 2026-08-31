@@ -17,9 +17,14 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from pyarrow import ipc
 
-from quant_data_kit.curated import build_event_bars, load_curated_snapshot
+from quant_data_kit.curated import (
+    _validate_curated_partition_table,
+    build_event_bars,
+    load_curated_snapshot,
+)
 from quant_data_kit.data_lake import (
     StoragePolicy,
+    _json_evidence,
     _lake_lock,
     _mkdir_in_lake,
     _publish_tree_entry,
@@ -27,7 +32,6 @@ from quant_data_kit.data_lake import (
     _stable_staging_directory,
     _validate_lake_path,
     load_normalized_snapshot,
-    read_normalized_events,
     require_collection_capacity,
 )
 from quant_data_kit.domain_v2 import (
@@ -139,6 +143,143 @@ def _table_logical_sha256(table: pa.Table) -> str:
     with ipc.new_stream(sink, combined.schema) as writer:
         writer.write_table(combined)
     return _hash_bytes(sink.getvalue().to_pybytes())
+
+
+def _file_stamp(path: Path) -> tuple[int, int, int, int, int]:
+    stat = path.stat()
+    return (
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_size,
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
+    )
+
+
+def _read_content_bound_parquet(
+    path: Path,
+    expected_content_sha256: str,
+) -> tuple[pa.Table, tuple[int, int, int, int, int]]:
+    """Hash and parse the same in-memory bytes, rejecting concurrent replacement."""
+    before = _file_stamp(path)
+    payload = path.read_bytes()
+    after_read = _file_stamp(path)
+    if before != after_read:
+        raise ValidationError(f"snapshot partition changed while reading: {path}")
+    if _hash_bytes(payload) != expected_content_sha256:
+        raise ValidationError(f"snapshot partition bytes differ from its manifest: {path}")
+    try:
+        table = pq.ParquetFile(pa.BufferReader(payload)).read()
+    except (OSError, pa.ArrowException) as exc:
+        raise ValidationError(f"snapshot partition is not readable Parquet: {path}") from exc
+    after_parse = _file_stamp(path)
+    if after_read != after_parse:
+        raise ValidationError(f"snapshot partition changed while parsing: {path}")
+    return table, after_parse
+
+
+def _assert_file_stamps(
+    stamps: Mapping[Path, tuple[int, int, int, int, int]],
+) -> None:
+    for path, expected in stamps.items():
+        try:
+            actual = _file_stamp(path)
+        except FileNotFoundError as exc:
+            raise ValidationError(f"snapshot partition disappeared while reading: {path}") from exc
+        if actual != expected:
+            raise ValidationError(f"snapshot partition changed during verified read: {path}")
+
+
+def _validate_normalized_partition_table(partition: Any, table: pa.Table) -> None:
+    validate_arrow_table(partition.schema_id, table)
+    if table.num_rows != partition.rows:
+        raise ValidationError("Normalized partition row count differs from its manifest")
+    previous: tuple[datetime, int, str] | None = None
+    previous_sequence_by_session: dict[str, int] = {}
+    for row in table.to_pylist():
+        trading_day = row["trading_day"]
+        trading_day_text = (
+            trading_day.isoformat() if isinstance(trading_day, date) else str(trading_day)
+        )
+        if str(row["event_type"]) != partition.event_type:
+            raise ValidationError("Normalized row event_type differs from its partition")
+        if str(row["instrument_id"]) != partition.instrument_id:
+            raise ValidationError("Normalized row instrument differs from its partition")
+        if trading_day_text != partition.trading_date:
+            raise ValidationError("Normalized row trading_day differs from its partition")
+        if str(row["source"]) != partition.provider:
+            raise ValidationError("Normalized row source differs from its partition provider")
+        identity = (
+            _utc(row["event_time"], "event_time"),
+            int(row["sequence"]),
+            str(row["event_id"]),
+        )
+        if previous is not None and identity <= previous:
+            raise ValidationError("Normalized partition rows are not strictly ordered")
+        session_id = str(row["session_id"])
+        previous_sequence = previous_sequence_by_session.get(session_id)
+        if previous_sequence is not None and identity[1] <= previous_sequence:
+            raise ValidationError("Normalized partition sequence does not advance")
+        previous = identity
+        previous_sequence_by_session[session_id] = identity[1]
+
+
+def _read_bound_normalized_records(
+    lake_root: Path,
+    snapshot: Any,
+    refs: tuple[EventSchemaRef, ...],
+) -> tuple[
+    list[tuple[EventSchemaRef, dict[str, Any]]],
+    dict[Path, tuple[int, int, int, int, int]],
+]:
+    ref_by_schema = {item.schema_id: item for item in refs}
+    snapshot_dir = _validate_lake_path(
+        lake_root,
+        lake_root / "normalized" / "snapshots" / snapshot.snapshot_id,
+        allow_missing=False,
+    )
+    selected: list[tuple[EventSchemaRef, dict[str, Any]]] = []
+    stamps: dict[Path, tuple[int, int, int, int, int]] = {}
+    for partition in snapshot.partitions:
+        schema_ref = ref_by_schema.get(partition.schema_id)
+        if schema_ref is None:
+            continue
+        path = _validate_lake_path(
+            lake_root, snapshot_dir / partition.relative_path, allow_missing=False
+        )
+        table, stamp = _read_content_bound_parquet(path, partition.content_sha256)
+        _validate_normalized_partition_table(partition, table)
+        stamps[path] = stamp
+        selected.extend((schema_ref, _json_evidence(row)) for row in table.to_pylist())
+    return selected, stamps
+
+
+def _read_bound_curated_tables(
+    lake_root: Path,
+    snapshot: Any,
+) -> tuple[
+    list[pa.Table],
+    dict[str, pa.Table],
+    dict[Path, tuple[int, int, int, int, int]],
+]:
+    snapshot_dir = _validate_lake_path(
+        lake_root,
+        lake_root / "curated" / snapshot.dataset / "snapshots" / snapshot.snapshot_id,
+        allow_missing=False,
+    )
+    tables: list[pa.Table] = []
+    tables_by_path: dict[str, pa.Table] = {}
+    stamps: dict[Path, tuple[int, int, int, int, int]] = {}
+    for partition in snapshot.partitions:
+        path = _validate_lake_path(
+            lake_root, snapshot_dir / partition.relative_path, allow_missing=False
+        )
+        table, stamp = _read_content_bound_parquet(path, partition.content_sha256)
+        _validate_curated_partition_table(partition, table, snapshot.aggregation)
+        tables.append(table)
+        tables_by_path[partition.relative_path] = table
+        stamps[path] = stamp
+    return tables, tables_by_path, stamps
 
 
 def _record_selection_sha256(schema_id: str, rows: Sequence[Mapping[str, Any]]) -> str:
@@ -542,12 +683,12 @@ def _ordered_records(
     return sorted(
         records,
         key=lambda item: (
-            str(item[1]["source"]),
             str(item[1]["instrument_id"]),
-            str(item[1]["session_id"]),
             _utc(item[1]["event_time"], "event_time"),
             int(item[1]["sequence"]),
             str(item[1]["event_id"]),
+            str(item[1]["source"]),
+            str(item[1]["session_id"]),
             item[0].schema_id,
         ),
     )
@@ -555,6 +696,7 @@ def _ordered_records(
 
 def _validate_event_order(records: Sequence[tuple[EventSchemaRef, dict[str, Any]]]) -> None:
     event_ids: set[str] = set()
+    previous_by_instrument: dict[str, tuple[datetime, int, str]] = {}
     previous_by_stream: dict[tuple[str, str, str, str], tuple[datetime, int, str]] = {}
     l2_streams: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for schema_ref, record in records:
@@ -575,6 +717,11 @@ def _validate_event_order(records: Sequence[tuple[EventSchemaRef, dict[str, Any]
             int(record["sequence"]),
             event_id,
         )
+        instrument_id = str(record["instrument_id"])
+        instrument_previous = previous_by_instrument.get(instrument_id)
+        if instrument_previous is not None and identity <= instrument_previous:
+            raise ValidationError(f"instrument events are not strictly ordered: {instrument_id}")
+        previous_by_instrument[instrument_id] = identity
         previous = previous_by_stream.get(stream)
         if previous is not None and identity <= previous:
             raise ValidationError(f"event stream is not strictly ordered: {stream}")
@@ -660,19 +807,11 @@ def load_verified_normalized_events(
     lake_root = _resolved_lake_root(root, create=False)
     before = load_normalized_snapshot(lake_root, snapshot_id)
     context_before = load_market_context_snapshot(lake_root, market_context_snapshot_id)
-    rows = read_normalized_events(lake_root, before.snapshot_id)
-    ref_by_type = {_EVENT_TYPE_BY_SCHEMA[item.schema_id]: item for item in refs}
-    selected: list[tuple[EventSchemaRef, dict[str, Any]]] = []
+    selected, partition_stamps = _read_bound_normalized_records(lake_root, before, refs)
     counts = {item: 0 for item in refs}
-    for raw in rows:
-        event_type = str(raw.get("event_type"))
-        schema_ref = ref_by_type.get(event_type)
-        if schema_ref is None:
-            continue
-        record = dict(raw)
+    for schema_ref, record in selected:
         validate_json_record(schema_ref.schema_id, record, schema_ref.schema_version)
         _validate_context_record(context_before, record, bar=False)
-        selected.append((schema_ref, record))
         counts[schema_ref] += 1
     missing = [item.schema_id for item, count in counts.items() if count == 0]
     if missing:
@@ -690,7 +829,8 @@ def load_verified_normalized_events(
         raise ValidationError("Normalized snapshot changed while building verified input")
     if context_before.manifest() != context_after.manifest():
         raise ValidationError("market context changed while building verified input")
-    return VerifiedFactorInput(
+    _assert_file_stamps(partition_stamps)
+    return VerifiedFactorInput._from_certified_factory(
         layer="normalized",
         source_snapshot_id=before.snapshot_id,
         source_logical_sha256=before.logical_sha256,
@@ -819,9 +959,8 @@ def _source_rows_for_evidence(
 
 
 def _verify_event_bars(
-    root: Path,
     aggregation: CuratedAggregation,
-    normalized_snapshot_id: str,
+    source_rows: Sequence[Mapping[str, Any]],
     table: pa.Table,
     context: MarketContextSnapshot,
 ) -> None:
@@ -831,15 +970,19 @@ def _verify_event_bars(
         EventSchemaRef(TRADE_EVENT_SCHEMA_ID, SCHEMA_VERSION_V2),
     ):
         raise ValidationError("M8 event bars currently require the frozen Trade schema")
-    source_rows = read_normalized_events(root, normalized_snapshot_id, event_type="trade")
     output_sources = set(table.column("source").to_pylist())
     if len(output_sources) != 1:
         raise ValidationError("event Bars must use one deterministic Curated source")
     output_source = str(next(iter(output_sources)))
     session_starts = {item.session_id: item.opens_at for item in context.sessions}
     rebuilt: list[dict[str, Any]] = []
+    used_event_ids: set[str] = set()
     for evidence in aggregation.partition_evidence:
         selected = _source_rows_for_evidence(source_rows, evidence)
+        selected_ids = {str(item["event_id"]) for item in selected}
+        if used_event_ids.intersection(selected_ids):
+            raise ValidationError("event-bar evidence reuses source events")
+        used_event_ids.update(selected_ids)
         rebuilt.extend(
             build_event_bars(
                 selected,
@@ -851,6 +994,9 @@ def _verify_event_bars(
                 require_complete=True,
             )
         )
+    all_event_ids = {str(item["event_id"]) for item in source_rows}
+    if used_event_ids != all_event_ids:
+        raise ValidationError("event-bar evidence does not cover its complete Trade lineage")
     expected_table = pa.Table.from_pylist(
         [_arrow_ready(item, get_arrow_schema(BAR_EVENT_SCHEMA_ID)) for item in rebuilt],
         schema=get_arrow_schema(BAR_EVENT_SCHEMA_ID),
@@ -887,19 +1033,7 @@ def load_verified_curated_bars(
         or aggregation.session_policy_version != context_before.session_policy_version
     ):
         raise ValidationError("Curated aggregation market-context binding changed")
-    snapshot_dir = _validate_lake_path(
-        lake_root,
-        lake_root / "curated" / dataset / "snapshots" / snapshot_id,
-        allow_missing=False,
-    )
-    tables: list[pa.Table] = []
-    for partition in before.partitions:
-        path = _validate_lake_path(
-            lake_root, snapshot_dir / partition.relative_path, allow_missing=False
-        )
-        table = pq.ParquetFile(path).read()
-        validate_arrow_table(BAR_EVENT_SCHEMA_ID, table)
-        tables.append(table)
+    tables, tables_by_path, curated_stamps = _read_bound_curated_tables(lake_root, before)
     if not tables:
         raise ValidationError("Curated snapshot contains no Bar partitions")
     combined = pa.concat_tables(tables).combine_chunks()
@@ -921,10 +1055,21 @@ def load_verified_curated_bars(
             partition = partition_by_path[item.relative_path]
             if item.instrument_id != partition.instrument_id:
                 raise ValidationError("event-bar evidence instrument does not match its partition")
+            partition_sessions = set(
+                tables_by_path[item.relative_path].column("session_id").to_pylist()
+            )
+            if partition_sessions != {item.session_id}:
+                raise ValidationError("event-bar evidence session does not match its partition")
+        normalized_before = load_normalized_snapshot(
+            lake_root, before.lineage["normalized_snapshot_id"]
+        )
+        trade_ref = (EventSchemaRef(TRADE_EVENT_SCHEMA_ID, SCHEMA_VERSION_V2),)
+        source_pairs, normalized_stamps = _read_bound_normalized_records(
+            lake_root, normalized_before, trade_ref
+        )
         _verify_event_bars(
-            lake_root,
             aggregation,
-            before.lineage["normalized_snapshot_id"],
+            [record for _, record in source_pairs],
             table,
             context_before,
         )
@@ -937,7 +1082,12 @@ def load_verified_curated_bars(
     normalized = load_normalized_snapshot(lake_root, before.lineage["normalized_snapshot_id"])
     if normalized.logical_sha256 != before.lineage["normalized_logical_sha256"]:
         raise ValidationError("Curated Normalized lineage hash changed")
-    return VerifiedFactorInput(
+    _assert_file_stamps(curated_stamps)
+    if aggregation.kind == "event_bar":
+        if normalized_before != normalized:
+            raise ValidationError("Normalized lineage changed while verifying event Bars")
+        _assert_file_stamps(normalized_stamps)
+    return VerifiedFactorInput._from_certified_factory(
         layer="curated",
         source_snapshot_id=before.snapshot_id,
         source_logical_sha256=before.logical_sha256,
