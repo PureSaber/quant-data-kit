@@ -258,11 +258,14 @@ def test_full_eight_stream_bounded_probe_archives_and_normalizes(tmp_path: Path)
         http=FakeHttp(),
         websockets=connector,
         clock=clock,
+        monotonic=lambda: 0.0,
         jitter=lambda: 0.5,
         policy=POLICY,
     )
     report = asyncio.run(coordinator.run(maximum_websocket_messages=3))
-    assert report.status == "BOUNDED_PROBE_COMPLETE"
+    assert report.status == "BOUNDED_PROBE_COMPLETE", [
+        (item.stream_id, item.errors) for item in report.streams if item.errors
+    ]
     assert report.providers == ("binance", "okx")
     assert report.capabilities == (
         "btc-spot-l2",
