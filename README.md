@@ -117,7 +117,9 @@ session/trading-day rollup, or event-Bar threshold and exact source-range eviden
 verify the complete source snapshot, physical and logical partition hashes, PIT timestamps,
 context membership, ordering, L2 snapshot/delta replay, selection hash and a second post-read
 snapshot check. Legacy Curated manifests remain readable through `load_curated_snapshot` but fail
-with `legacy-curated-not-m8-certified` at the certified factory.
+with `legacy-curated-not-m8-certified` at the certified factory. `VerifiedFactorInput`是不可公开
+构造、不可`dataclasses.replace`且不可变的opaque结果；模块不暴露认证令牌或可直接调用的
+类工厂，只有上述两个完成全链路校验的loader会实例化它。
 
 ## M2 data-lake guarantees
 
