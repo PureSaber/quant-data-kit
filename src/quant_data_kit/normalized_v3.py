@@ -498,17 +498,34 @@ def _partition_identity(
 def _streaming_stage(root: Path) -> Iterator[Path]:
     staging_root = _mkdir_in_lake(root, root / "normalized" / "staging")
     owners_root = _mkdir_in_lake(root, root / "normalized" / ".stage-owners")
-    for stale in sorted(staging_root.glob("normalized-batch-stream-*")):
-        checked = _validate_lake_path(root, stale, allow_missing=False)
-        if not checked.is_dir():
-            raise ValidationError(f"Normalized staging entry is not a directory: {checked}")
-        owner = owners_root / f"{checked.name}.lock"
-        try:
-            with process_file_lock(owner, timeout_seconds=0.01):
-                if checked.exists():
-                    shutil.rmtree(checked)
-        except TimeoutError:
-            continue
+    gc_lock = owners_root / ".gc.lock"
+    with process_file_lock(gc_lock):
+        for stale in sorted(staging_root.glob("normalized-batch-stream-*")):
+            if not stale.exists():
+                continue
+            checked = _validate_lake_path(root, stale, allow_missing=False)
+            if not checked.is_dir():
+                raise ValidationError(f"Normalized staging entry is not a directory: {checked}")
+            owner = owners_root / f"{checked.name}.lock"
+            try:
+                with process_file_lock(owner, timeout_seconds=0.01):
+                    if checked.exists():
+                        shutil.rmtree(checked)
+                if owner.exists():
+                    owner.unlink()
+            except TimeoutError:
+                continue
+        for owner in sorted(owners_root.glob("normalized-batch-stream-*.lock")):
+            stage = staging_root / owner.name.removesuffix(".lock")
+            if stage.exists():
+                continue
+            try:
+                with process_file_lock(owner, timeout_seconds=0.01):
+                    removable = not stage.exists()
+                if removable and owner.exists():
+                    owner.unlink()
+            except TimeoutError:
+                continue
     operation = uuid.uuid4().hex
     stage = staging_root / f"normalized-batch-stream-{operation}"
     owner = owners_root / f"{stage.name}.lock"
@@ -519,8 +536,9 @@ def _streaming_stage(root: Path) -> Iterator[Path]:
         finally:
             if stage.exists():
                 shutil.rmtree(stage)
-    if owner.exists():
-        owner.unlink()
+    with process_file_lock(gc_lock):
+        if owner.exists():
+            owner.unlink()
 
 
 def _sql_text(value: str | Path) -> str:
