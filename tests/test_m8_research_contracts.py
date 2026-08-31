@@ -242,11 +242,17 @@ def valid_verified_input(**changes) -> VerifiedFactorInput:
             LineageRef("market", SNAPSHOT, HASH),
             LineageRef("market_context", SNAPSHOT, HASH),
         ),
+        "aggregation": None,
+        "schema_id": VERIFIED_FACTOR_INPUT_SCHEMA_ID,
     }
     values.update(changes)
     if "table" in changes and "selection_logical_sha256" not in changes:
         values["selection_logical_sha256"] = contracts._arrow_table_logical_sha256(values["table"])
-    return VerifiedFactorInput._from_certified_factory(**values)
+    contracts._validate_verified_factor_input_values(values)
+    verified = object.__new__(VerifiedFactorInput)
+    for name in VerifiedFactorInput.__slots__:
+        object.__setattr__(verified, name, values[name])
+    return verified
 
 
 def bar_table() -> pa.Table:
@@ -303,7 +309,7 @@ def test_verified_input_is_closed_nonempty_and_layer_safe() -> None:
         table=curated_table,
     )
     assert curated.to_contract()["aggregation"]["kind"] == "fixed_time_bar"
-    with pytest.raises(ValidationError, match="certified factory"):
+    with pytest.raises(ValidationError, match="certified loader"):
         VerifiedFactorInput(
             layer="normalized",
             source_snapshot_id=SNAPSHOT,
@@ -317,7 +323,9 @@ def test_verified_input_is_closed_nonempty_and_layer_safe() -> None:
             market_context_logical_sha256=HASH,
             lineage=(LineageRef("market", SNAPSHOT, HASH),),
         )
-    with pytest.raises(ValidationError, match="certified factory"):
+    assert not hasattr(contracts, "_VERIFIED_INPUT_FACTORY_TOKEN")
+    assert not hasattr(VerifiedFactorInput, "_from_certified_factory")
+    with pytest.raises(TypeError, match="dataclass"):
         replace(valid, source_snapshot_id=f"sha256-{OTHER_HASH}")
     with pytest.raises(ValidationError, match="market lineage"):
         valid_verified_input(source_snapshot_id=f"sha256-{OTHER_HASH}")
