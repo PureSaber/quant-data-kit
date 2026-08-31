@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
@@ -164,6 +165,38 @@ def test_digest_and_staging_corruption_guards(
         normalized_v3._streaming_stage(root),
     ):
         pass
+
+
+def test_streaming_stage_serializes_owner_file_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = lake_module._resolved_lake_root(tmp_path / "lake", create=True)
+    real_lock = normalized_v3.process_file_lock
+    real_unlink = Path.unlink
+    held_locks: set[Path] = set()
+
+    @contextmanager
+    def tracked_lock(path: Path, *, timeout_seconds: float = 60.0):
+        checked = Path(path)
+        with real_lock(checked, timeout_seconds=timeout_seconds):
+            held_locks.add(checked)
+            try:
+                yield
+            finally:
+                held_locks.remove(checked)
+
+    def guarded_unlink(path: Path, *args: object, **kwargs: object) -> None:
+        if path.parent.name == ".stage-owners" and path.name.startswith("normalized-batch-stream-"):
+            assert any(item.name == ".gc.lock" for item in held_locks)
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(normalized_v3, "process_file_lock", tracked_lock)
+    monkeypatch.setattr(Path, "unlink", guarded_unlink)
+    with normalized_v3._streaming_stage(root) as stage:
+        assert stage.is_dir()
+    owners_root = root / "normalized" / ".stage-owners"
+    assert sorted(item.name for item in owners_root.iterdir()) == [".gc.lock"]
 
 
 def _rewrite_index_manifest(
