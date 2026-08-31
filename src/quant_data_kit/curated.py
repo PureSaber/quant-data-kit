@@ -8,7 +8,7 @@ import re
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
@@ -32,6 +32,11 @@ from quant_data_kit.data_lake import (
 from quant_data_kit.exceptions import ValidationError
 from quant_data_kit.fixed_point import FixedPoint
 from quant_data_kit.market_events_v2 import BarEvent, market_event_payload
+from quant_data_kit.research_contracts_v2 import (
+    CuratedAggregation,
+    EventBarPartitionEvidence,
+    EventSchemaRef,
+)
 from quant_data_kit.schemas_v2 import (
     BAR_EVENT_SCHEMA_ID,
     SCHEMA_VERSION_V2,
@@ -72,6 +77,7 @@ class CuratedSnapshot:
     rows: int
     lineage: dict[str, str]
     partitions: tuple[CuratedPartition, ...]
+    aggregation: CuratedAggregation | None = None
 
 
 def _canonical(value: Any) -> bytes:
@@ -196,7 +202,10 @@ def build_session_bars(
     for (instrument_id, trading_day, session_id, upstream_source, bar_start), trades in sorted(
         grouped.items(), key=lambda item: item[0]
     ):
-        ordered = sorted(trades, key=lambda item: (item["event_time"], item["event_id"]))
+        ordered = sorted(
+            trades,
+            key=lambda item: (item["event_time"], int(item["sequence"]), item["event_id"]),
+        )
         price_scale = max(int(item["price"]["scale"]) for item in ordered)
         quantity_scale = max(int(item["quantity"]["scale"]) for item in ordered)
         prices = [_fixed_decimal(item["price"]) for item in ordered]
@@ -244,6 +253,222 @@ def build_session_bars(
     return bars
 
 
+def _bar_from_trade_group(
+    trades: list[dict[str, Any]],
+    *,
+    bar_start: datetime,
+    bar_end: datetime,
+    source: str,
+    recipe_version: str,
+    identity_extra: Mapping[str, Any],
+    output_session_id: str | None = None,
+) -> dict[str, Any]:
+    if not trades:
+        raise ValidationError("Cannot build a Bar from no trades")
+    ordered = sorted(
+        trades,
+        key=lambda item: (
+            _utc(str(item["event_time"]), "event_time"),
+            int(item["sequence"]),
+            str(item["event_id"]),
+        ),
+    )
+    if not bar_start < bar_end:
+        raise ValidationError("Bar boundaries must be strictly positive")
+    price_scale = max(int(item["price"]["scale"]) for item in ordered)
+    quantity_scale = max(int(item["quantity"]["scale"]) for item in ordered)
+    prices = [_fixed_decimal(item["price"]) for item in ordered]
+    volume = sum((_fixed_decimal(item["quantity"]) for item in ordered), Decimal(0))
+    received_at = max(
+        bar_end,
+        max(_utc(str(item["received_at"]), "received_at") for item in ordered),
+    )
+    available_at = max(
+        received_at,
+        max(_utc(str(item["available_at"]), "available_at") for item in ordered),
+    )
+    identity = {
+        "recipe_version": recipe_version,
+        "upstream_event_ids": [item["event_id"] for item in ordered],
+        "bar_start": _utc_text(bar_start),
+        "bar_end": _utc_text(bar_end),
+        **dict(identity_extra),
+    }
+    event = BarEvent(
+        event_id=f"bar-{_hash_bytes(_canonical(identity))[:24]}",
+        instrument_id=str(ordered[0]["instrument_id"]),
+        event_time=bar_end,
+        received_at=received_at,
+        available_at=available_at,
+        source=source,
+        trading_day=datetime.fromisoformat(str(ordered[0]["trading_day"])).date(),
+        session_id=output_session_id or str(ordered[-1]["session_id"]),
+        sequence=int(ordered[-1]["sequence"]),
+        bar_start=bar_start,
+        bar_end=bar_end,
+        open_price=_fixed(prices[0], price_scale),
+        high_price=_fixed(max(prices), price_scale),
+        low_price=_fixed(min(prices), price_scale),
+        close_price=_fixed(prices[-1], price_scale),
+        volume=_fixed(volume, quantity_scale),
+        is_complete=True,
+    )
+    payload = market_event_payload(event)
+    payload["source"] = source
+    validate_json_record(BAR_EVENT_SCHEMA_ID, payload)
+    return payload
+
+
+def build_session_rollup_bars(
+    records: Iterable[Mapping[str, Any]],
+    *,
+    session_boundaries: Mapping[str, tuple[datetime, datetime]],
+    session_rollup: str,
+    trading_day_boundaries: Mapping[tuple[str, str], tuple[datetime, datetime, str]] | None = None,
+    instrument_venues: Mapping[str, str] | None = None,
+    source: str = "curated",
+    recipe_version: str = "session-rollup-v1",
+) -> list[dict[str, Any]]:
+    """Aggregate complete session or trading-day Bars from frozen trade events."""
+    if session_rollup not in {"session", "trading_day"}:
+        raise ValidationError("session_rollup must be session or trading_day")
+    grouped: dict[tuple[str, ...], list[dict[str, Any]]] = defaultdict(list)
+    for raw in records:
+        record = dict(raw)
+        validate_json_record(TRADE_EVENT_SCHEMA_ID, record)
+        session_id = str(record["session_id"])
+        if session_id not in session_boundaries:
+            raise ValidationError(f"Missing authoritative boundary for {session_id}")
+        key = (
+            str(record["instrument_id"]),
+            str(record["trading_day"]),
+            str(record["source"]),
+            *([session_id] if session_rollup == "session" else []),
+        )
+        grouped[key].append(record)
+    bars: list[dict[str, Any]] = []
+    for key, trades in sorted(grouped.items()):
+        referenced = {str(item["session_id"]) for item in trades}
+        output_session_id: str | None = None
+        if session_rollup == "trading_day":
+            instrument_id, trading_day = key[:2]
+            venue = (instrument_venues or {}).get(instrument_id)
+            boundary = (trading_day_boundaries or {}).get((str(venue), trading_day))
+            if venue is None or boundary is None:
+                raise ValidationError(
+                    f"Missing authoritative trading-day boundary for {instrument_id}/{trading_day}"
+                )
+            starts = [_utc(boundary[0], f"{trading_day}.opens_at")]
+            ends = [_utc(boundary[1], f"{trading_day}.closes_at")]
+            output_session_id = boundary[2]
+        else:
+            starts = [_utc(session_boundaries[item][0], f"{item}.opens_at") for item in referenced]
+            ends = [_utc(session_boundaries[item][1], f"{item}.closes_at") for item in referenced]
+        bars.append(
+            _bar_from_trade_group(
+                trades,
+                bar_start=min(starts),
+                bar_end=max(ends),
+                source=source,
+                recipe_version=recipe_version,
+                identity_extra={"session_rollup": session_rollup, "group": list(key)},
+                output_session_id=output_session_id,
+            )
+        )
+    return bars
+
+
+def build_event_bars(
+    records: Iterable[Mapping[str, Any]],
+    *,
+    basis: str,
+    threshold: FixedPoint,
+    session_starts: Mapping[str, datetime],
+    source: str = "curated",
+    recipe_version: str = "event-bars-v1",
+    require_complete: bool = True,
+) -> list[dict[str, Any]]:
+    """Build deterministic trade-count, base-volume, or quote-notional Bars."""
+    if basis not in {"trade_count", "base_volume", "quote_notional"}:
+        raise ValidationError("unsupported event-bar basis")
+    if not isinstance(threshold, FixedPoint) or not threshold.is_positive():
+        raise ValidationError("event-bar threshold must be a positive FixedPoint")
+    if basis == "trade_count" and threshold.scale != 0:
+        raise ValidationError("trade_count threshold must have scale zero")
+    grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for raw in records:
+        record = dict(raw)
+        validate_json_record(TRADE_EVENT_SCHEMA_ID, record)
+        session_id = str(record["session_id"])
+        if session_id not in session_starts:
+            raise ValidationError(f"Missing session start for {session_id}")
+        grouped[
+            (
+                str(record["source"]),
+                str(record["instrument_id"]),
+                str(record["trading_day"]),
+                session_id,
+            )
+        ].append(record)
+
+    threshold_value = threshold.to_decimal()
+    bars: list[dict[str, Any]] = []
+    for stream, trades in sorted(grouped.items()):
+        ordered = sorted(
+            trades,
+            key=lambda item: (
+                _utc(str(item["event_time"]), "event_time"),
+                int(item["sequence"]),
+                str(item["event_id"]),
+            ),
+        )
+        prior_identity: tuple[datetime, int, str] | None = None
+        bar_start = _utc(session_starts[stream[3]], f"{stream[3]}.opens_at")
+        bucket: list[dict[str, Any]] = []
+        accumulated = Decimal(0)
+        for trade in ordered:
+            identity = (
+                _utc(str(trade["event_time"]), "event_time"),
+                int(trade["sequence"]),
+                str(trade["event_id"]),
+            )
+            if prior_identity is not None and identity <= prior_identity:
+                raise ValidationError(f"event-bar source stream is not strictly ordered: {stream}")
+            prior_identity = identity
+            bucket.append(trade)
+            if basis == "trade_count":
+                accumulated += 1
+            elif basis == "base_volume":
+                accumulated += _fixed_decimal(trade["quantity"])
+            else:
+                accumulated += _fixed_decimal(trade["price"]) * _fixed_decimal(trade["quantity"])
+            if accumulated < threshold_value:
+                continue
+            bar_end = identity[0]
+            bars.append(
+                _bar_from_trade_group(
+                    bucket,
+                    bar_start=bar_start,
+                    bar_end=bar_end,
+                    source=source,
+                    recipe_version=recipe_version,
+                    identity_extra={
+                        "event_bar_basis": basis,
+                        "event_bar_threshold": {
+                            "units": str(threshold.units),
+                            "scale": threshold.scale,
+                        },
+                    },
+                )
+            )
+            bar_start = bar_end
+            bucket = []
+            accumulated = Decimal(0)
+        if bucket and require_complete:
+            raise ValidationError(f"event-bar source stream ends below threshold: {stream}")
+    return bars
+
+
 def _arrow_ready_bar(record: Mapping[str, Any]) -> dict[str, Any]:
     result = dict(record)
     schema = get_arrow_schema(BAR_EVENT_SCHEMA_ID)
@@ -267,8 +492,9 @@ def _snapshot_identity(
     created_at: str,
     lineage: Mapping[str, str],
     partitions: tuple[CuratedPartition, ...],
+    aggregation: CuratedAggregation | None = None,
 ) -> dict[str, Any]:
-    return {
+    identity = {
         "schema_version": SCHEMA_VERSION_V2,
         "layer": "curated",
         "dataset": dataset,
@@ -277,6 +503,26 @@ def _snapshot_identity(
         "created_at": created_at,
         "lineage": dict(sorted(lineage.items())),
         "partitions": [asdict(item) for item in partitions],
+    }
+    if aggregation is not None:
+        identity["aggregation"] = aggregation.to_contract()
+    return identity
+
+
+def _snapshot_manifest(snapshot: CuratedSnapshot) -> dict[str, Any]:
+    return {
+        "schema_version": snapshot.schema_version,
+        "layer": snapshot.layer,
+        "dataset": snapshot.dataset,
+        "snapshot_id": snapshot.snapshot_id,
+        "revision_id": snapshot.revision_id,
+        "recipe_version": snapshot.recipe_version,
+        "created_at": snapshot.created_at,
+        "logical_sha256": snapshot.logical_sha256,
+        "rows": snapshot.rows,
+        "lineage": dict(snapshot.lineage),
+        "partitions": [asdict(item) for item in snapshot.partitions],
+        "aggregation": snapshot.aggregation.to_contract() if snapshot.aggregation else None,
     }
 
 
@@ -407,6 +653,8 @@ def _write_curated_bars(
     recipe_version: str,
     normalized_snapshot_id: str,
     policy: StoragePolicy,
+    aggregation: CuratedAggregation | None = None,
+    event_partition_scopes: Mapping[str, tuple[str, str]] | None = None,
 ) -> CuratedSnapshot:
     """Persist bars only after loading their exact immutable Normalized lineage."""
     lake_root = _resolved_lake_root(root, create=False)
@@ -414,6 +662,8 @@ def _write_curated_bars(
     revision_id = _revision_segment(revision_id)
     if not recipe_version.strip():
         raise ValidationError("recipe_version is required")
+    if aggregation is not None and aggregation.recipe_version != recipe_version:
+        raise ValidationError("aggregation recipe_version must match the Curated recipe")
     normalized = load_normalized_snapshot(lake_root, normalized_snapshot_id)
     lineage = {
         "normalized_snapshot_id": normalized.snapshot_id,
@@ -422,10 +672,29 @@ def _write_curated_bars(
     records = [dict(item) for item in bars]
     if not records:
         raise ValidationError("Cannot write an empty Curated snapshot")
-    groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    event_partitioned = aggregation is not None and aggregation.kind == "event_bar"
+    if event_partitioned and event_partition_scopes is None:
+        raise ValidationError("event Bars require source/session partition scopes")
+    if not event_partitioned and event_partition_scopes is not None:
+        raise ValidationError("source/session partition scopes are only valid for event Bars")
+    scopes = event_partition_scopes
+    groups: dict[tuple[str, ...], list[dict[str, Any]]] = defaultdict(list)
     for record in records:
         validate_json_record(BAR_EVENT_SCHEMA_ID, record)
-        groups[(str(record["trading_day"]), str(record["instrument_id"]))].append(record)
+        key = (str(record["trading_day"]), str(record["instrument_id"]))
+        if event_partitioned:
+            assert scopes is not None
+            scope = scopes.get(str(record["event_id"]))
+            if (
+                scope is None
+                or len(scope) != 2
+                or not all(isinstance(item, str) and item for item in scope)
+            ):
+                raise ValidationError("event Bar lacks a valid source/session partition scope")
+            if scope[1] != str(record["session_id"]):
+                raise ValidationError("event Bar partition scope session differs from its row")
+            key += scope
+        groups[key].append(record)
 
     estimated_bytes = sum(len(_canonical(_json_value(item))) for item in records)
     curated_root = _mkdir_in_lake(lake_root, lake_root / "curated" / dataset)
@@ -443,16 +712,23 @@ def _write_curated_bars(
             projected_write_bytes=estimated_bytes,
             policy=policy,
         )
-        for (trading_date, instrument_id), group in sorted(groups.items()):
-            ordered = sorted(group, key=lambda row: (row["event_time"], row["event_id"]))
+        for key, group in sorted(groups.items()):
+            trading_date, instrument_id = key[:2]
+            ordered = sorted(
+                group,
+                key=lambda row: (row["event_time"], int(row["sequence"]), row["event_id"]),
+            )
             table = pa.Table.from_pylist(
                 [_arrow_ready_bar(record) for record in ordered],
                 schema=get_arrow_schema(BAR_EVENT_SCHEMA_ID),
             )
             validate_arrow_table(BAR_EVENT_SCHEMA_ID, table)
-            relative = Path(
-                f"date={trading_date}/instrument={quote(instrument_id, safe='-._')}/data.parquet"
-            )
+            partition_root = f"date={trading_date}/instrument={quote(instrument_id, safe='-._')}"
+            if event_partitioned:
+                partition_root += (
+                    f"/source={quote(key[2], safe='-._')}/session={quote(key[3], safe='-._')}"
+                )
+            relative = Path(f"{partition_root}/data.parquet")
             target = stage / relative
             _mkdir_in_lake(lake_root, target.parent)
             pq.write_table(table, target, compression="zstd", use_dictionary=False)
@@ -479,6 +755,7 @@ def _write_curated_bars(
             created_at=created_at,
             lineage=lineage,
             partitions=partitions,
+            aggregation=aggregation,
         )
         logical_sha256 = _hash_bytes(_canonical(identity))
         snapshot_id = f"sha256-{logical_sha256}"
@@ -494,9 +771,10 @@ def _write_curated_bars(
             rows=sum(item.rows for item in partitions),
             lineage=dict(sorted(lineage.items())),
             partitions=partitions,
+            aggregation=aggregation,
         )
         (stage / "manifest.json").write_text(
-            json.dumps(asdict(snapshot), indent=2, ensure_ascii=False),
+            json.dumps(_snapshot_manifest(snapshot), indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
         return _publish_curated_snapshot(
@@ -517,6 +795,7 @@ def curate_trade_bars_from_snapshot(
     interval: timedelta,
     session_starts: Mapping[str, datetime],
     source: str = "curated",
+    market_context_snapshot_id: str | None = None,
     policy: StoragePolicy | None = None,
 ) -> CuratedSnapshot:
     """Certified public path: fixed Normalized trade snapshot to immutable Curated bars."""
@@ -532,6 +811,33 @@ def curate_trade_bars_from_snapshot(
         source=source,
         recipe_version=recipe_version,
     )
+    aggregation: CuratedAggregation | None = None
+    if market_context_snapshot_id is not None:
+        from quant_data_kit.research_inputs_v2 import load_market_context_snapshot
+
+        context = load_market_context_snapshot(root, market_context_snapshot_id)
+        authoritative_starts = {item.session_id: item.opens_at for item in context.sessions}
+        used_session_ids = {str(item["session_id"]) for item in trades}
+        for session_id in used_session_ids:
+            if session_id not in session_starts or session_id not in authoritative_starts:
+                raise ValidationError(f"Missing market-context session start for {session_id}")
+            if _utc(session_starts[session_id], session_id) != authoritative_starts[session_id]:
+                raise ValidationError(
+                    f"session_starts differs from market context for {session_id}"
+                )
+        interval_us = (
+            interval.days * 86_400 + interval.seconds
+        ) * 1_000_000 + interval.microseconds
+        aggregation = CuratedAggregation(
+            calendar_id=context.calendar_id,
+            session_policy_version=context.session_policy_version,
+            kind="fixed_time_bar",
+            recipe_version=recipe_version,
+            interval_ns=interval_us * 1_000,
+            market_context_snapshot_id=context.snapshot_id,
+            market_context_logical_sha256=context.logical_sha256,
+            source_event_schemas=(EventSchemaRef(TRADE_EVENT_SCHEMA_ID, SCHEMA_VERSION_V2),),
+        )
     return _write_curated_bars(
         root,
         bars,
@@ -540,7 +846,236 @@ def curate_trade_bars_from_snapshot(
         recipe_version=recipe_version,
         normalized_snapshot_id=normalized.snapshot_id,
         policy=resolved_policy,
+        aggregation=aggregation,
     )
+
+
+def curate_session_bars_from_snapshot(
+    root: Path,
+    *,
+    normalized_snapshot_id: str,
+    dataset: str,
+    revision_id: str,
+    recipe_version: str,
+    session_rollup: str,
+    market_context_snapshot_id: str,
+    source: str = "curated",
+    policy: StoragePolicy | None = None,
+) -> CuratedSnapshot:
+    """Create one complete Bar per authoritative session or trading day."""
+    from quant_data_kit.research_inputs_v2 import load_market_context_snapshot
+
+    normalized = load_normalized_snapshot(root, normalized_snapshot_id)
+    context = load_market_context_snapshot(root, market_context_snapshot_id)
+    trades = read_normalized_events(root, normalized.snapshot_id, event_type="trade")
+    if not trades:
+        raise ValidationError("Normalized snapshot contains no trades to curate")
+    boundaries = {item.session_id: (item.opens_at, item.closes_at) for item in context.sessions}
+    sessions_by_venue_day: dict[tuple[str, str], list[Any]] = defaultdict(list)
+    for session in context.sessions:
+        sessions_by_venue_day[(session.venue, session.trading_day.isoformat())].append(session)
+    day_boundaries = {
+        key: (
+            min(item.opens_at for item in values),
+            max(item.closes_at for item in values),
+            max(values, key=lambda item: item.closes_at).session_id,
+        )
+        for key, values in sessions_by_venue_day.items()
+    }
+    instrument_venues = {item.instrument_id: item.venue for item in context.instruments}
+    bars = build_session_rollup_bars(
+        trades,
+        session_boundaries=boundaries,
+        session_rollup=session_rollup,
+        trading_day_boundaries=day_boundaries,
+        instrument_venues=instrument_venues,
+        source=source,
+        recipe_version=recipe_version,
+    )
+    aggregation = CuratedAggregation(
+        calendar_id=context.calendar_id,
+        session_policy_version=context.session_policy_version,
+        kind="session_bar",
+        recipe_version=recipe_version,
+        session_rollup=session_rollup,
+        market_context_snapshot_id=context.snapshot_id,
+        market_context_logical_sha256=context.logical_sha256,
+        source_event_schemas=(EventSchemaRef(TRADE_EVENT_SCHEMA_ID, SCHEMA_VERSION_V2),),
+    )
+    return _write_curated_bars(
+        root,
+        bars,
+        dataset=dataset,
+        revision_id=revision_id,
+        recipe_version=recipe_version,
+        normalized_snapshot_id=normalized.snapshot_id,
+        policy=policy or StoragePolicy(),
+        aggregation=aggregation,
+    )
+
+
+def _source_selection_sha256(records: list[dict[str, Any]]) -> str:
+    payload = {
+        "algorithm": "puresaber.event-selection-canonical-json@1.0.0",
+        "schema_id": TRADE_EVENT_SCHEMA_ID,
+        "schema_version": SCHEMA_VERSION_V2,
+        "records": records,
+    }
+    return _hash_bytes(_canonical(payload))
+
+
+def curate_trade_event_bars_from_snapshot(
+    root: Path,
+    *,
+    normalized_snapshot_id: str,
+    dataset: str,
+    revision_id: str,
+    recipe_version: str,
+    basis: str,
+    threshold: FixedPoint,
+    market_context_snapshot_id: str,
+    source: str = "curated",
+    policy: StoragePolicy | None = None,
+) -> CuratedSnapshot:
+    """Create certified event Bars with source-range evidence for every stream."""
+    from quant_data_kit.research_inputs_v2 import load_market_context_snapshot
+
+    normalized = load_normalized_snapshot(root, normalized_snapshot_id)
+    context = load_market_context_snapshot(root, market_context_snapshot_id)
+    trades = [
+        dict(item)
+        for item in read_normalized_events(root, normalized.snapshot_id, event_type="trade")
+    ]
+    if not trades:
+        raise ValidationError("Normalized snapshot contains no trades to curate")
+    session_starts = {item.session_id: item.opens_at for item in context.sessions}
+    grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for record in trades:
+        grouped[
+            (
+                str(record["source"]),
+                str(record["instrument_id"]),
+                str(record["trading_day"]),
+                str(record["session_id"]),
+            )
+        ].append(record)
+    bars: list[dict[str, Any]] = []
+    event_partition_scopes: dict[str, tuple[str, str]] = {}
+    evidence: list[EventBarPartitionEvidence] = []
+    for (upstream_source, instrument_id, trading_day, session_id), rows in sorted(grouped.items()):
+        ordered = sorted(
+            rows,
+            key=lambda item: (
+                _utc(str(item["event_time"]), "event_time"),
+                int(item["sequence"]),
+                str(item["event_id"]),
+            ),
+        )
+        stream_bars = build_event_bars(
+            ordered,
+            basis=basis,
+            threshold=threshold,
+            session_starts=session_starts,
+            source=source,
+            recipe_version=recipe_version,
+            require_complete=True,
+        )
+        bars.extend(stream_bars)
+        for bar in stream_bars:
+            event_id = str(bar["event_id"])
+            if event_id in event_partition_scopes:
+                raise ValidationError("event Bar identity collides across source streams")
+            event_partition_scopes[event_id] = (upstream_source, session_id)
+        relative_path = Path(
+            f"date={trading_day}/instrument={quote(instrument_id, safe='-._')}/"
+            f"source={quote(upstream_source, safe='-._')}/"
+            f"session={quote(session_id, safe='-._')}/data.parquet"
+        ).as_posix()
+        evidence.append(
+            EventBarPartitionEvidence(
+                relative_path=relative_path,
+                source=upstream_source,
+                instrument_id=instrument_id,
+                session_id=session_id,
+                first_sequence=int(ordered[0]["sequence"]),
+                last_sequence=int(ordered[-1]["sequence"]),
+                first_event_id=str(ordered[0]["event_id"]),
+                last_event_id=str(ordered[-1]["event_id"]),
+                event_count=len(ordered),
+                source_selection_sha256=_source_selection_sha256(ordered),
+            )
+        )
+    ordered_evidence = tuple(
+        sorted(
+            evidence,
+            key=lambda item: (
+                item.stream_key,
+                item.first_sequence,
+                item.last_sequence,
+                item.relative_path,
+            ),
+        )
+    )
+    aggregation = CuratedAggregation(
+        calendar_id=context.calendar_id,
+        session_policy_version=context.session_policy_version,
+        kind="event_bar",
+        recipe_version=recipe_version,
+        event_bar_basis=basis,
+        event_bar_threshold=threshold,
+        market_context_snapshot_id=context.snapshot_id,
+        market_context_logical_sha256=context.logical_sha256,
+        source_event_schemas=(EventSchemaRef(TRADE_EVENT_SCHEMA_ID, SCHEMA_VERSION_V2),),
+        partition_evidence=ordered_evidence,
+    )
+    return _write_curated_bars(
+        root,
+        bars,
+        dataset=dataset,
+        revision_id=revision_id,
+        recipe_version=recipe_version,
+        normalized_snapshot_id=normalized.snapshot_id,
+        policy=policy or StoragePolicy(),
+        aggregation=aggregation,
+        event_partition_scopes=event_partition_scopes,
+    )
+
+
+def _validate_curated_partition_table(
+    partition: CuratedPartition,
+    table: pa.Table,
+    aggregation: CuratedAggregation | None,
+) -> str | None:
+    """Bind partition metadata, source order and event-bar scope to actual rows."""
+    validate_arrow_table(partition.schema_id, table)
+    if table.num_rows != partition.rows:
+        raise ValidationError("Curated partition row count changed")
+    rows = table.to_pylist()
+    previous: tuple[datetime, int, str] | None = None
+    session_ids: set[str] = set()
+    for row in rows:
+        trading_day = row["trading_day"]
+        trading_day_text = (
+            trading_day.isoformat() if isinstance(trading_day, date) else str(trading_day)
+        )
+        if str(row["instrument_id"]) != partition.instrument_id:
+            raise ValidationError("Curated row instrument does not match partition metadata")
+        if trading_day_text != partition.trading_date:
+            raise ValidationError("Curated row trading_day does not match partition metadata")
+        identity = (
+            _utc(row["event_time"], "event_time"),
+            int(row["sequence"]),
+            str(row["event_id"]),
+        )
+        if previous is not None and identity <= previous:
+            raise ValidationError("Curated partition rows are not strictly ordered")
+        previous = identity
+        session_ids.add(str(row["session_id"]))
+    if aggregation is not None and aggregation.kind == "event_bar":
+        if len(session_ids) != 1:
+            raise ValidationError("event-bar partition must contain exactly one session")
+        return next(iter(session_ids))
+    return None
 
 
 def _load_curated_snapshot(
@@ -568,6 +1103,10 @@ def _load_curated_snapshot(
         raise ValidationError(f"Curated snapshot manifest missing: {manifest_path}")
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     payload["partitions"] = tuple(CuratedPartition(**item) for item in payload["partitions"])
+    raw_aggregation = payload.get("aggregation")
+    payload["aggregation"] = (
+        CuratedAggregation.from_contract(raw_aggregation) if raw_aggregation is not None else None
+    )
     snapshot = CuratedSnapshot(**payload)
     if (
         snapshot.snapshot_id != snapshot_id
@@ -595,6 +1134,7 @@ def _load_curated_snapshot(
         created_at=snapshot.created_at,
         lineage=snapshot.lineage,
         partitions=snapshot.partitions,
+        aggregation=snapshot.aggregation,
     )
     logical_sha256 = _hash_bytes(_canonical(identity))
     if logical_sha256 != snapshot.logical_sha256 or snapshot_id != f"sha256-{logical_sha256}":
@@ -602,16 +1142,36 @@ def _load_curated_snapshot(
     rows = 0
     expected_files = {Path("manifest.json")}
     seen_paths: set[str] = set()
+    event_evidence_by_path = {
+        item.relative_path: item
+        for item in (
+            snapshot.aggregation.partition_evidence
+            if snapshot.aggregation is not None
+            and snapshot.aggregation.kind == "event_bar"
+            and snapshot.aggregation.partition_evidence is not None
+            else ()
+        )
+    }
     for partition in snapshot.partitions:
         if partition.relative_path in seen_paths:
             raise ValidationError("Curated snapshot contains duplicate partition paths")
         seen_paths.add(partition.relative_path)
         if partition.schema_id != BAR_EVENT_SCHEMA_ID:
             raise ValidationError("Curated partition schema is not the frozen Bar schema")
-        expected_relative = Path(
-            f"date={partition.trading_date}/"
-            f"instrument={quote(partition.instrument_id, safe='-._')}/data.parquet"
-        ).as_posix()
+        partition_root = (
+            f"date={partition.trading_date}/instrument={quote(partition.instrument_id, safe='-._')}"
+        )
+        expected_event_session: str | None = None
+        if snapshot.aggregation is not None and snapshot.aggregation.kind == "event_bar":
+            evidence = event_evidence_by_path.get(partition.relative_path)
+            if evidence is None or evidence.instrument_id != partition.instrument_id:
+                raise ValidationError("Curated partition path metadata mismatch")
+            expected_event_session = evidence.session_id
+            partition_root += (
+                f"/source={quote(evidence.source, safe='-._')}/"
+                f"session={quote(expected_event_session, safe='-._')}"
+            )
+        expected_relative = Path(f"{partition_root}/data.parquet").as_posix()
         if partition.relative_path != expected_relative:
             raise ValidationError("Curated partition path metadata mismatch")
         relative = Path(partition.relative_path)
@@ -624,13 +1184,15 @@ def _load_curated_snapshot(
         if _hash_file(path) != partition.content_sha256:
             raise ValidationError(f"Curated partition hash changed: {path}")
         table = pq.ParquetFile(path).read()
-        validate_arrow_table(partition.schema_id, table)
-        if table.num_rows != partition.rows:
-            raise ValidationError(f"Curated partition row count changed: {path}")
+        event_session_id = _validate_curated_partition_table(partition, table, snapshot.aggregation)
+        if event_session_id != expected_event_session:
+            raise ValidationError("event-bar evidence session differs from partition rows")
         logical_rows = [_json_value(item) for item in table.to_pylist()]
         if _hash_bytes(_canonical(logical_rows)) != partition.logical_sha256:
             raise ValidationError(f"Curated partition logical content changed: {path}")
         rows += table.num_rows
+    if event_evidence_by_path and set(event_evidence_by_path) != seen_paths:
+        raise ValidationError("event-bar evidence does not cover Curated partitions")
     if rows != snapshot.rows:
         raise ValidationError("Curated snapshot row count changed")
     actual_files = {
