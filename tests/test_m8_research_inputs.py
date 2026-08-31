@@ -36,6 +36,8 @@ from quant_data_kit.domain_v2 import (
 from quant_data_kit.exceptions import ValidationError
 from quant_data_kit.fixed_point import FixedPoint
 from quant_data_kit.research_contracts_v2 import (
+    CuratedAggregation,
+    EventBarPartitionEvidence,
     EventSchemaRef,
 )
 from quant_data_kit.research_inputs_v2 import (
@@ -951,6 +953,7 @@ def test_multi_session_event_bars_have_unique_certified_partitions(tmp_path: Pat
     assert evidence is not None
     paths = [item.relative_path for item in evidence]
     assert len(paths) == len(set(paths)) == 2
+    assert all("/source=cn-fixture/" in item for item in paths)
     assert all("/session=" in item for item in paths)
     assert {item.session_id for item in evidence} == {"z-morning", "a-afternoon"}
 
@@ -971,6 +974,81 @@ def test_normalized_factory_orders_by_event_time_not_session_text(tmp_path: Path
         "a-afternoon",
     ]
     assert verified.table.column("event_id").to_pylist() == ["t1", "t2", "t3", "t4"]
+
+
+def test_event_bar_writer_partitions_independent_sources_without_rejecting_them(
+    tmp_path: Path,
+) -> None:
+    primary = [
+        trade("p1", "2026-01-05T01:30:01Z", 1),
+        trade("p2", "2026-01-05T01:30:02Z", 2),
+    ]
+    source = normalized(tmp_path, primary)
+    context = market_context(tmp_path)
+    secondary = [
+        dict(trade("s1", "2026-01-05T01:30:03Z", 1), source="other"),
+        dict(trade("s2", "2026-01-05T01:30:04Z", 2), source="other"),
+    ]
+    streams = [("cn-fixture", primary), ("other", secondary)]
+    bars: list[dict] = []
+    scopes: dict[str, tuple[str, str]] = {}
+    evidence: list[EventBarPartitionEvidence] = []
+    for upstream_source, rows in streams:
+        stream_bars = build_event_bars(
+            rows,
+            basis="trade_count",
+            threshold=FixedPoint(2, 0),
+            session_starts={SESSION_ID: datetime(2026, 1, 5, 1, 30, tzinfo=UTC)},
+            source="curated",
+            recipe_version="multi-source-v1",
+        )
+        bars.extend(stream_bars)
+        scopes.update({str(bar["event_id"]): (upstream_source, SESSION_ID) for bar in stream_bars})
+        relative_path = (
+            "date=2026-01-05/instrument=IF-CONT/"
+            f"source={upstream_source}/session={SESSION_ID}/data.parquet"
+        )
+        evidence.append(
+            EventBarPartitionEvidence(
+                relative_path=relative_path,
+                source=upstream_source,
+                instrument_id="IF-CONT",
+                session_id=SESSION_ID,
+                first_sequence=1,
+                last_sequence=2,
+                first_event_id=str(rows[0]["event_id"]),
+                last_event_id=str(rows[-1]["event_id"]),
+                event_count=2,
+                source_selection_sha256=curated_module._source_selection_sha256(rows),
+            )
+        )
+    aggregation = CuratedAggregation(
+        calendar_id=context.calendar_id,
+        session_policy_version=context.session_policy_version,
+        kind="event_bar",
+        recipe_version="multi-source-v1",
+        event_bar_basis="trade_count",
+        event_bar_threshold=FixedPoint(2, 0),
+        market_context_snapshot_id=context.snapshot_id,
+        market_context_logical_sha256=context.logical_sha256,
+        source_event_schemas=(EventSchemaRef(TRADE_EVENT_SCHEMA_ID, SCHEMA_VERSION_V2),),
+        partition_evidence=tuple(evidence),
+    )
+    snapshot = curated_module._write_curated_bars(
+        tmp_path,
+        bars,
+        dataset="multi-source-writer",
+        revision_id="r1",
+        recipe_version="multi-source-v1",
+        normalized_snapshot_id=source.snapshot_id,
+        policy=TEST_POLICY,
+        aggregation=aggregation,
+        event_partition_scopes=scopes,
+    )
+    assert len(snapshot.partitions) == 2
+    assert {item.relative_path for item in snapshot.partitions} == {
+        item.relative_path for item in evidence
+    }
 
 
 def test_bound_reader_rejects_actual_consumed_bytes_that_do_not_match_manifest(

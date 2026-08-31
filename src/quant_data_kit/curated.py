@@ -654,6 +654,7 @@ def _write_curated_bars(
     normalized_snapshot_id: str,
     policy: StoragePolicy,
     aggregation: CuratedAggregation | None = None,
+    event_partition_scopes: Mapping[str, tuple[str, str]] | None = None,
 ) -> CuratedSnapshot:
     """Persist bars only after loading their exact immutable Normalized lineage."""
     lake_root = _resolved_lake_root(root, create=False)
@@ -672,12 +673,27 @@ def _write_curated_bars(
     if not records:
         raise ValidationError("Cannot write an empty Curated snapshot")
     event_partitioned = aggregation is not None and aggregation.kind == "event_bar"
+    if event_partitioned and event_partition_scopes is None:
+        raise ValidationError("event Bars require source/session partition scopes")
+    if not event_partitioned and event_partition_scopes is not None:
+        raise ValidationError("source/session partition scopes are only valid for event Bars")
+    scopes = event_partition_scopes
     groups: dict[tuple[str, ...], list[dict[str, Any]]] = defaultdict(list)
     for record in records:
         validate_json_record(BAR_EVENT_SCHEMA_ID, record)
         key = (str(record["trading_day"]), str(record["instrument_id"]))
         if event_partitioned:
-            key += (str(record["session_id"]),)
+            assert scopes is not None
+            scope = scopes.get(str(record["event_id"]))
+            if (
+                scope is None
+                or len(scope) != 2
+                or not all(isinstance(item, str) and item for item in scope)
+            ):
+                raise ValidationError("event Bar lacks a valid source/session partition scope")
+            if scope[1] != str(record["session_id"]):
+                raise ValidationError("event Bar partition scope session differs from its row")
+            key += scope
         groups[key].append(record)
 
     estimated_bytes = sum(len(_canonical(_json_value(item))) for item in records)
@@ -709,7 +725,9 @@ def _write_curated_bars(
             validate_arrow_table(BAR_EVENT_SCHEMA_ID, table)
             partition_root = f"date={trading_date}/instrument={quote(instrument_id, safe='-._')}"
             if event_partitioned:
-                partition_root += f"/session={quote(key[2], safe='-._')}"
+                partition_root += (
+                    f"/source={quote(key[2], safe='-._')}/session={quote(key[3], safe='-._')}"
+                )
             relative = Path(f"{partition_root}/data.parquet")
             target = stage / relative
             _mkdir_in_lake(lake_root, target.parent)
@@ -930,19 +948,7 @@ def curate_trade_event_bars_from_snapshot(
     ]
     if not trades:
         raise ValidationError("Normalized snapshot contains no trades to curate")
-    upstream_sources = {str(item["source"]) for item in trades}
-    if len(upstream_sources) != 1:
-        raise ValidationError("certified event Bars require one upstream source per snapshot")
     session_starts = {item.session_id: item.opens_at for item in context.sessions}
-    bars = build_event_bars(
-        trades,
-        basis=basis,
-        threshold=threshold,
-        session_starts=session_starts,
-        source=source,
-        recipe_version=recipe_version,
-        require_complete=True,
-    )
     grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for record in trades:
         grouped[
@@ -953,6 +959,8 @@ def curate_trade_event_bars_from_snapshot(
                 str(record["session_id"]),
             )
         ].append(record)
+    bars: list[dict[str, Any]] = []
+    event_partition_scopes: dict[str, tuple[str, str]] = {}
     evidence: list[EventBarPartitionEvidence] = []
     for (upstream_source, instrument_id, trading_day, session_id), rows in sorted(grouped.items()):
         ordered = sorted(
@@ -963,8 +971,24 @@ def curate_trade_event_bars_from_snapshot(
                 str(item["event_id"]),
             ),
         )
+        stream_bars = build_event_bars(
+            ordered,
+            basis=basis,
+            threshold=threshold,
+            session_starts=session_starts,
+            source=source,
+            recipe_version=recipe_version,
+            require_complete=True,
+        )
+        bars.extend(stream_bars)
+        for bar in stream_bars:
+            event_id = str(bar["event_id"])
+            if event_id in event_partition_scopes:
+                raise ValidationError("event Bar identity collides across source streams")
+            event_partition_scopes[event_id] = (upstream_source, session_id)
         relative_path = Path(
             f"date={trading_day}/instrument={quote(instrument_id, safe='-._')}/"
+            f"source={quote(upstream_source, safe='-._')}/"
             f"session={quote(session_id, safe='-._')}/data.parquet"
         ).as_posix()
         evidence.append(
@@ -1013,6 +1037,7 @@ def curate_trade_event_bars_from_snapshot(
         normalized_snapshot_id=normalized.snapshot_id,
         policy=policy or StoragePolicy(),
         aggregation=aggregation,
+        event_partition_scopes=event_partition_scopes,
     )
 
 
@@ -1142,7 +1167,10 @@ def _load_curated_snapshot(
             if evidence is None or evidence.instrument_id != partition.instrument_id:
                 raise ValidationError("Curated partition path metadata mismatch")
             expected_event_session = evidence.session_id
-            partition_root += f"/session={quote(expected_event_session, safe='-._')}"
+            partition_root += (
+                f"/source={quote(evidence.source, safe='-._')}/"
+                f"session={quote(expected_event_session, safe='-._')}"
+            )
         expected_relative = Path(f"{partition_root}/data.parquet").as_posix()
         if partition.relative_path != expected_relative:
             raise ValidationError("Curated partition path metadata mismatch")

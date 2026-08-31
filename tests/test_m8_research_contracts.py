@@ -238,7 +238,10 @@ def valid_verified_input(**changes) -> VerifiedFactorInput:
         "session_policy_version": "sessions-v1",
         "market_context_snapshot_id": SNAPSHOT,
         "market_context_logical_sha256": HASH,
-        "lineage": (LineageRef("market", SNAPSHOT, HASH),),
+        "lineage": (
+            LineageRef("market", SNAPSHOT, HASH),
+            LineageRef("market_context", SNAPSHOT, HASH),
+        ),
     }
     values.update(changes)
     if "table" in changes and "selection_logical_sha256" not in changes:
@@ -314,6 +317,12 @@ def test_verified_input_is_closed_nonempty_and_layer_safe() -> None:
             market_context_logical_sha256=HASH,
             lineage=(LineageRef("market", SNAPSHOT, HASH),),
         )
+    with pytest.raises(ValidationError, match="certified factory"):
+        replace(valid, source_snapshot_id=f"sha256-{OTHER_HASH}")
+    with pytest.raises(ValidationError, match="market lineage"):
+        valid_verified_input(source_snapshot_id=f"sha256-{OTHER_HASH}")
+    with pytest.raises(ValidationError, match="context differs from its lineage"):
+        valid_verified_input(market_context_logical_sha256=OTHER_HASH)
     with pytest.raises(ValidationError, match="selection hash"):
         valid_verified_input(selection_logical_sha256=OTHER_HASH)
     with pytest.raises(ValidationError, match="context differs"):

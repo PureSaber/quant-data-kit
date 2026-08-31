@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from typing import Any, Literal
 
 import pyarrow as pa
@@ -396,10 +396,10 @@ class VerifiedFactorInput:
     lineage: tuple[LineageRef, ...] = ()
     aggregation: CuratedAggregation | None = None
     schema_id: str = VERIFIED_FACTOR_INPUT_SCHEMA_ID
-    _factory_token: object = field(default=None, repr=False, compare=False)
+    _factory_token: InitVar[object] = None
 
-    def __post_init__(self) -> None:
-        if self._factory_token is not _VERIFIED_INPUT_FACTORY_TOKEN:
+    def __post_init__(self, _factory_token: object) -> None:
+        if _factory_token is not _VERIFIED_INPUT_FACTORY_TOKEN:
             raise ValidationError("VerifiedFactorInput can only be created by a certified factory")
         if self.schema_id != VERIFIED_FACTOR_INPUT_SCHEMA_ID:
             raise ValidationError("unsupported VerifiedFactorInput schema")
@@ -425,6 +425,18 @@ class VerifiedFactorInput:
         lineage_keys = [(item.role, item.snapshot_id) for item in lineage]
         if len(lineage_keys) != len(set(lineage_keys)):
             raise ValidationError("lineage roles and snapshots must be unique")
+        source_lineage = [item for item in lineage if item.role == "market"]
+        if len(source_lineage) != 1 or (
+            source_lineage[0].snapshot_id,
+            source_lineage[0].logical_sha256,
+        ) != (self.source_snapshot_id, self.source_logical_sha256):
+            raise ValidationError("source snapshot differs from its market lineage")
+        context_lineage = [item for item in lineage if item.role == "market_context"]
+        if len(context_lineage) != 1 or (
+            context_lineage[0].snapshot_id,
+            context_lineage[0].logical_sha256,
+        ) != (self.market_context_snapshot_id, self.market_context_logical_sha256):
+            raise ValidationError("market context differs from its lineage")
         if self.layer == "curated":
             if self.aggregation is None:
                 raise ValidationError("Curated verified input requires aggregation metadata")
