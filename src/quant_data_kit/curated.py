@@ -8,7 +8,7 @@ import re
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
@@ -671,10 +671,14 @@ def _write_curated_bars(
     records = [dict(item) for item in bars]
     if not records:
         raise ValidationError("Cannot write an empty Curated snapshot")
-    groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    event_partitioned = aggregation is not None and aggregation.kind == "event_bar"
+    groups: dict[tuple[str, ...], list[dict[str, Any]]] = defaultdict(list)
     for record in records:
         validate_json_record(BAR_EVENT_SCHEMA_ID, record)
-        groups[(str(record["trading_day"]), str(record["instrument_id"]))].append(record)
+        key = (str(record["trading_day"]), str(record["instrument_id"]))
+        if event_partitioned:
+            key += (str(record["session_id"]),)
+        groups[key].append(record)
 
     estimated_bytes = sum(len(_canonical(_json_value(item))) for item in records)
     curated_root = _mkdir_in_lake(lake_root, lake_root / "curated" / dataset)
@@ -692,7 +696,8 @@ def _write_curated_bars(
             projected_write_bytes=estimated_bytes,
             policy=policy,
         )
-        for (trading_date, instrument_id), group in sorted(groups.items()):
+        for key, group in sorted(groups.items()):
+            trading_date, instrument_id = key[:2]
             ordered = sorted(
                 group,
                 key=lambda row: (row["event_time"], int(row["sequence"]), row["event_id"]),
@@ -702,9 +707,10 @@ def _write_curated_bars(
                 schema=get_arrow_schema(BAR_EVENT_SCHEMA_ID),
             )
             validate_arrow_table(BAR_EVENT_SCHEMA_ID, table)
-            relative = Path(
-                f"date={trading_date}/instrument={quote(instrument_id, safe='-._')}/data.parquet"
-            )
+            partition_root = f"date={trading_date}/instrument={quote(instrument_id, safe='-._')}"
+            if event_partitioned:
+                partition_root += f"/session={quote(key[2], safe='-._')}"
+            relative = Path(f"{partition_root}/data.parquet")
             target = stage / relative
             _mkdir_in_lake(lake_root, target.parent)
             pq.write_table(table, target, compression="zstd", use_dictionary=False)
@@ -924,6 +930,9 @@ def curate_trade_event_bars_from_snapshot(
     ]
     if not trades:
         raise ValidationError("Normalized snapshot contains no trades to curate")
+    upstream_sources = {str(item["source"]) for item in trades}
+    if len(upstream_sources) != 1:
+        raise ValidationError("certified event Bars require one upstream source per snapshot")
     session_starts = {item.session_id: item.opens_at for item in context.sessions}
     bars = build_event_bars(
         trades,
@@ -955,7 +964,8 @@ def curate_trade_event_bars_from_snapshot(
             ),
         )
         relative_path = Path(
-            f"date={trading_day}/instrument={quote(instrument_id, safe='-._')}/data.parquet"
+            f"date={trading_day}/instrument={quote(instrument_id, safe='-._')}/"
+            f"session={quote(session_id, safe='-._')}/data.parquet"
         ).as_posix()
         evidence.append(
             EventBarPartitionEvidence(
@@ -1004,6 +1014,43 @@ def curate_trade_event_bars_from_snapshot(
         policy=policy or StoragePolicy(),
         aggregation=aggregation,
     )
+
+
+def _validate_curated_partition_table(
+    partition: CuratedPartition,
+    table: pa.Table,
+    aggregation: CuratedAggregation | None,
+) -> str | None:
+    """Bind partition metadata, source order and event-bar scope to actual rows."""
+    validate_arrow_table(partition.schema_id, table)
+    if table.num_rows != partition.rows:
+        raise ValidationError("Curated partition row count changed")
+    rows = table.to_pylist()
+    previous: tuple[datetime, int, str] | None = None
+    session_ids: set[str] = set()
+    for row in rows:
+        trading_day = row["trading_day"]
+        trading_day_text = (
+            trading_day.isoformat() if isinstance(trading_day, date) else str(trading_day)
+        )
+        if str(row["instrument_id"]) != partition.instrument_id:
+            raise ValidationError("Curated row instrument does not match partition metadata")
+        if trading_day_text != partition.trading_date:
+            raise ValidationError("Curated row trading_day does not match partition metadata")
+        identity = (
+            _utc(row["event_time"], "event_time"),
+            int(row["sequence"]),
+            str(row["event_id"]),
+        )
+        if previous is not None and identity <= previous:
+            raise ValidationError("Curated partition rows are not strictly ordered")
+        previous = identity
+        session_ids.add(str(row["session_id"]))
+    if aggregation is not None and aggregation.kind == "event_bar":
+        if len(session_ids) != 1:
+            raise ValidationError("event-bar partition must contain exactly one session")
+        return next(iter(session_ids))
+    return None
 
 
 def _load_curated_snapshot(
@@ -1070,16 +1117,33 @@ def _load_curated_snapshot(
     rows = 0
     expected_files = {Path("manifest.json")}
     seen_paths: set[str] = set()
+    event_evidence_by_path = {
+        item.relative_path: item
+        for item in (
+            snapshot.aggregation.partition_evidence
+            if snapshot.aggregation is not None
+            and snapshot.aggregation.kind == "event_bar"
+            and snapshot.aggregation.partition_evidence is not None
+            else ()
+        )
+    }
     for partition in snapshot.partitions:
         if partition.relative_path in seen_paths:
             raise ValidationError("Curated snapshot contains duplicate partition paths")
         seen_paths.add(partition.relative_path)
         if partition.schema_id != BAR_EVENT_SCHEMA_ID:
             raise ValidationError("Curated partition schema is not the frozen Bar schema")
-        expected_relative = Path(
-            f"date={partition.trading_date}/"
-            f"instrument={quote(partition.instrument_id, safe='-._')}/data.parquet"
-        ).as_posix()
+        partition_root = (
+            f"date={partition.trading_date}/instrument={quote(partition.instrument_id, safe='-._')}"
+        )
+        expected_event_session: str | None = None
+        if snapshot.aggregation is not None and snapshot.aggregation.kind == "event_bar":
+            evidence = event_evidence_by_path.get(partition.relative_path)
+            if evidence is None or evidence.instrument_id != partition.instrument_id:
+                raise ValidationError("Curated partition path metadata mismatch")
+            expected_event_session = evidence.session_id
+            partition_root += f"/session={quote(expected_event_session, safe='-._')}"
+        expected_relative = Path(f"{partition_root}/data.parquet").as_posix()
         if partition.relative_path != expected_relative:
             raise ValidationError("Curated partition path metadata mismatch")
         relative = Path(partition.relative_path)
@@ -1092,13 +1156,15 @@ def _load_curated_snapshot(
         if _hash_file(path) != partition.content_sha256:
             raise ValidationError(f"Curated partition hash changed: {path}")
         table = pq.ParquetFile(path).read()
-        validate_arrow_table(partition.schema_id, table)
-        if table.num_rows != partition.rows:
-            raise ValidationError(f"Curated partition row count changed: {path}")
+        event_session_id = _validate_curated_partition_table(partition, table, snapshot.aggregation)
+        if event_session_id != expected_event_session:
+            raise ValidationError("event-bar evidence session differs from partition rows")
         logical_rows = [_json_value(item) for item in table.to_pylist()]
         if _hash_bytes(_canonical(logical_rows)) != partition.logical_sha256:
             raise ValidationError(f"Curated partition logical content changed: {path}")
         rows += table.num_rows
+    if event_evidence_by_path and set(event_evidence_by_path) != seen_paths:
+        raise ValidationError("event-bar evidence does not cover Curated partitions")
     if rows != snapshot.rows:
         raise ValidationError("Curated snapshot row count changed")
     actual_files = {
