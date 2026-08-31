@@ -11,6 +11,8 @@ CORE_THRESHOLDS = {
     "src/quant_data_kit/normalized_v3.py": 90,
     "src/quant_data_kit/data_lake.py": 90,
     "src/quant_data_kit/curated.py": 90,
+    "src/quant_data_kit/research_contracts_v2.py": 90,
+    "src/quant_data_kit/research_inputs_v2.py": 90,
     "src/quant_data_kit/process_lock.py": 90,
     "src/quant_data_kit/schemas_v2.py": 90,
     "src/quant_data_kit/l2_replay.py": 90,

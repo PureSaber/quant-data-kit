@@ -37,11 +37,16 @@ def crypto_context(provider: str) -> qdk.AdapterContext:
 
 
 def test_public_m2_api_and_version_are_exposed() -> None:
-    assert qdk.__version__ == version("quant-data-kit") == "0.7.4"
+    assert qdk.__version__ == version("quant-data-kit") == "0.8.0"
     for name in (
         "write_raw_bytes",
         "write_normalized_events",
         "curate_trade_bars_from_snapshot",
+        "curate_session_bars_from_snapshot",
+        "curate_trade_event_bars_from_snapshot",
+        "create_market_context_snapshot",
+        "load_verified_curated_bars",
+        "load_verified_normalized_events",
         "DuckDBCatalog",
         "replay_l2",
         "BinanceFixtureAdapter",
