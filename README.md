@@ -75,6 +75,8 @@ move or rebuild a release tag to repair a dependency resolution.
 | `temporal_v2` | Strict bitemporal validation and PIT joins without silent fallback |
 | `data_lake` | Immutable Raw bytes, strict partitioned Normalized Parquet, quarantine, pinned DuckDB reads and storage stop policy |
 | `curated` | Session-aware bar aggregation and immutable revision/lineage snapshots |
+| `research_contracts_v2` | Closed M8 Curated aggregation and verified-factor-input contracts |
+| `research_inputs_v2` | Content-addressed market context plus fail-closed Curated/Normalized factor-input factories |
 | `l2_replay` | Deterministic Snapshot+Delta reconstruction, sequence/cross checks and checkpoint hashes |
 | `adapters_v2` | Binance, OKX and supplier-neutral domestic desensitized fixture adapters |
 | `capture_v2` | Fail-closed public Binance/OKX L2 capture, immutable batched Raw segments, snapshot synchronization, independent archive/restore verification and the Raw-to-Normalized bridge |
@@ -86,11 +88,43 @@ The public-feed collector's exact eight-stream scope, explicit storage configura
 safe CLI modes and non-certification boundary are documented in
 [`docs/m7-crypto-l2-capture.md`](docs/m7-crypto-l2-capture.md).
 
+## M8 certified research inputs
+
+M8 factor code must consume one of two public factories instead of promoting an arbitrary Arrow
+table or the ordinary `read_normalized_events` result:
+
+```python
+from quant_data_kit import (
+    EventSchemaRef,
+    create_market_context_snapshot,
+    load_verified_curated_bars,
+    load_verified_normalized_events,
+)
+
+bars = load_verified_curated_bars(root, "bars-1m", curated_snapshot_id)
+events = load_verified_normalized_events(
+    root,
+    normalized_snapshot_id,
+    [EventSchemaRef("puresaber.trade-event", "2.0.0")],
+    market_context_snapshot_id,
+)
+```
+
+`create_market_context_snapshot` content-addresses immutable `InstrumentSpec` and
+`TradingSession` values together with one explicit calendar and session-policy version. A certified
+Curated snapshot additionally binds `puresaber.curated-aggregation@1.0.0`: fixed interval,
+session/trading-day rollup, or event-Bar threshold and exact source-range evidence. The loaders
+verify the complete source snapshot, physical and logical partition hashes, PIT timestamps,
+context membership, ordering, L2 snapshot/delta replay, selection hash and a second post-read
+snapshot check. Legacy Curated manifests remain readable through `load_curated_snapshot` but fail
+with `legacy-curated-not-m8-certified` at the certified factory.
+
 ## M2 data-lake guarantees
 
 - Raw persists exact provider bytes through lake-local staging and atomic rename. Its integrity anchor binds source, request, UTC collection time, object/key path identity, SHA-256 and the30-day retention policy. A crash-released process lock and immutable key claim make concurrent writes, crash recovery and cleanup serialize on the same idempotency key. Every write, read and cleanup rejects path escapes and Windows reparse points below the lake root.
 - Normalized requires resolvable, hash-verified Raw references and writes only frozen`standard/v2`Arrow schemas under`provider/venue/event_type/date/instrument`partitions. Capture epochs persist`PREPARED`before snapshot publication and finish as`COMMITTED`or`ABORTED`; startup uses the frozen stream configuration as an independent identity anchor, enforces closed terminal JSON fields and strict types, recomputes partition rows, logical hashes, the available-time maximum and the final L2 state from the immutable journal, and rejects any receipt bound to a different snapshot before network startup. A sharded persistent claim index binds every lake-wide`event_id`to its Arrow-normalized logical event hash. Same-ID/same-content reuse is idempotent; conflicting content, bad sequences and L2 reconstruction failures cannot enter research snapshots.
-- The certified Curated entry is`curate_trade_bars_from_snapshot`: it reads trades from one explicit verified Normalized snapshot, constructs session-aware bars and binds the exact lineage. One`dataset+revision_id`maps to one snapshot; corrected data requires a new revision and never overwrites history.
+- Certified Curated producers are`curate_trade_bars_from_snapshot`、`curate_session_bars_from_snapshot`and`curate_trade_event_bars_from_snapshot`: they read trades from one explicit verified Normalized snapshot, construct authoritative fixed/session/event Bars and bind exact lineage plus an immutable market-context snapshot. One`dataset+revision_id`maps to one snapshot; corrected data requires a new revision and never overwrites history.
+- A Normalized snapshot is provider-bound. Binance and OKX certification therefore uses separate immutable snapshots and separate verified inputs; a Curated writer can partition evidence by`source/session`, but the certified loader rejects any source that is not present in the snapshot lineage.
 - Normalized and Curated snapshot identities bind Arrow-canonical logical rows and physical Parquet hashes. DuckDB verifies the fixed snapshot, copies Arrow data into in-memory tables, then disables external access; user SQL cannot call file readers or resolve`latest`/`main`.
 - Collection stops with a visible`COLLECTION_STOPPED`error if hot data would exceed150GB or free space would fall below`max(volume*20%,100GB)`.
 - Raw cleanup requires all of: the30-day window elapsed, explicit confirmation, an accessible real local archive object, archive hash equality and a successful restore-hash exercise. Cleanup publishes an immutable audit tombstone and resumes an explicit`deleting`state after interruption; local unlink failures remain visible to callers. Remote archives have no M2 verifier and therefore stop cleanup. No background or silent deletion path exists.
