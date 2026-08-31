@@ -48,11 +48,13 @@ from quant_data_kit.l2_replay import L2ReplayError, replay_l2
 from quant_data_kit.market_clock_v2 import MarketClock
 from quant_data_kit.research_contracts_v2 import (
     MARKET_CONTEXT_SCHEMA_ID,
+    VERIFIED_FACTOR_INPUT_SCHEMA_ID,
     CuratedAggregation,
     EventBarPartitionEvidence,
     EventSchemaRef,
     LineageRef,
     VerifiedFactorInput,
+    _validate_verified_factor_input_values,
 )
 from quant_data_kit.schemas_v2 import (
     BAR_EVENT_SCHEMA_ID,
@@ -830,18 +832,18 @@ def load_verified_normalized_events(
     if context_before.manifest() != context_after.manifest():
         raise ValidationError("market context changed while building verified input")
     _assert_file_stamps(partition_stamps)
-    return VerifiedFactorInput._from_certified_factory(
-        layer="normalized",
-        source_snapshot_id=before.snapshot_id,
-        source_logical_sha256=before.logical_sha256,
-        selection_logical_sha256=_table_logical_sha256(table),
-        event_schemas=refs,
-        table=table,
-        calendar_id=context_before.calendar_id,
-        session_policy_version=context_before.session_policy_version,
-        market_context_snapshot_id=context_before.snapshot_id,
-        market_context_logical_sha256=context_before.logical_sha256,
-        lineage=tuple(
+    values = {
+        "layer": "normalized",
+        "source_snapshot_id": before.snapshot_id,
+        "source_logical_sha256": before.logical_sha256,
+        "selection_logical_sha256": _table_logical_sha256(table),
+        "event_schemas": refs,
+        "table": table,
+        "calendar_id": context_before.calendar_id,
+        "session_policy_version": context_before.session_policy_version,
+        "market_context_snapshot_id": context_before.snapshot_id,
+        "market_context_logical_sha256": context_before.logical_sha256,
+        "lineage": tuple(
             sorted(
                 (
                     LineageRef("market", before.snapshot_id, before.logical_sha256),
@@ -851,7 +853,14 @@ def load_verified_normalized_events(
                 )
             )
         ),
-    )
+        "aggregation": None,
+        "schema_id": VERIFIED_FACTOR_INPUT_SCHEMA_ID,
+    }
+    _validate_verified_factor_input_values(values)
+    verified = object.__new__(VerifiedFactorInput)
+    for name in VerifiedFactorInput.__slots__:
+        object.__setattr__(verified, name, values[name])
+    return verified
 
 
 def _validate_bar_rows(
@@ -1087,18 +1096,18 @@ def load_verified_curated_bars(
         if normalized_before != normalized:
             raise ValidationError("Normalized lineage changed while verifying event Bars")
         _assert_file_stamps(normalized_stamps)
-    return VerifiedFactorInput._from_certified_factory(
-        layer="curated",
-        source_snapshot_id=before.snapshot_id,
-        source_logical_sha256=before.logical_sha256,
-        selection_logical_sha256=_table_logical_sha256(table),
-        event_schemas=(EventSchemaRef(BAR_EVENT_SCHEMA_ID, SCHEMA_VERSION_V2),),
-        table=table,
-        calendar_id=aggregation.calendar_id,
-        session_policy_version=aggregation.session_policy_version,
-        market_context_snapshot_id=context_before.snapshot_id,
-        market_context_logical_sha256=context_before.logical_sha256,
-        lineage=tuple(
+    values = {
+        "layer": "curated",
+        "source_snapshot_id": before.snapshot_id,
+        "source_logical_sha256": before.logical_sha256,
+        "selection_logical_sha256": _table_logical_sha256(table),
+        "event_schemas": (EventSchemaRef(BAR_EVENT_SCHEMA_ID, SCHEMA_VERSION_V2),),
+        "table": table,
+        "calendar_id": aggregation.calendar_id,
+        "session_policy_version": aggregation.session_policy_version,
+        "market_context_snapshot_id": context_before.snapshot_id,
+        "market_context_logical_sha256": context_before.logical_sha256,
+        "lineage": tuple(
             sorted(
                 (
                     LineageRef("market", before.snapshot_id, before.logical_sha256),
@@ -1109,5 +1118,11 @@ def load_verified_curated_bars(
                 )
             )
         ),
-        aggregation=aggregation,
-    )
+        "aggregation": aggregation,
+        "schema_id": VERIFIED_FACTOR_INPUT_SCHEMA_ID,
+    }
+    _validate_verified_factor_input_values(values)
+    verified = object.__new__(VerifiedFactorInput)
+    for name in VerifiedFactorInput.__slots__:
+        object.__setattr__(verified, name, values[name])
+    return verified
