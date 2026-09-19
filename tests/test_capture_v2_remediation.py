@@ -2273,7 +2273,8 @@ def test_epoch_recovery_rejects_identity_part_count_open_part_and_bad_flush(
         )
 
     part = _failed_epoch_for_recovery(tmp_path / "part", "part")
-    part_path = next(part.root.glob("part-*.ndjson"))
+    # The directory also contains part-open.ndjson; glob order differs by OS.
+    part_path = next(part.root.glob("part-[0-9]*-sha256-*.ndjson"))
     part_path.write_bytes(part_path.read_bytes() + b" ")
     with pytest.raises(ValidationError, match="part hash changed"):
         NormalizedEpochJournal.recover(
