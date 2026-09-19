@@ -17,6 +17,7 @@ FUNDAMENTAL_COLUMNS = [
     "date",
     "report_date",
     "available_at",
+    "availability_basis",
     "market_cap",
     "pe_ratio",
     "pb_ratio",
@@ -58,9 +59,14 @@ def _fetch_one_fundamental(
     else:
         frame["report_date"] = pd.to_datetime(frame["report_date"]).dt.normalize()
     if "available_at" not in frame.columns:
-        frame["available_at"] = frame["date"]
+        # A valuation date is not evidence of historical publication time.
+        # Keep these rows available for descriptive research, but PIT joins
+        # must reject them instead of silently certifying invented timestamps.
+        frame["available_at"] = pd.NaT
+        frame["availability_basis"] = "unknown"
     else:
-        frame["available_at"] = pd.to_datetime(frame["available_at"]).dt.normalize()
+        frame["available_at"] = pd.to_datetime(frame["available_at"])
+        frame["availability_basis"] = "provider_supplied"
     return frame[(frame["date"] >= start) & (frame["date"] <= end)]
 
 

@@ -37,6 +37,7 @@ def fetch_hs300_constituents_history(
     current_symbols: list[str] | None = None,
     trade_dates: pd.DatetimeIndex | None = None,
     allow_current_fallback: bool = False,
+    current_as_of: str | pd.Timestamp | None = None,
 ) -> pd.DataFrame:
     if fetch_fn is not None:
         adjustments = fetch_fn()
@@ -94,8 +95,25 @@ def fetch_hs300_constituents_history(
             for symbol in current
         ]
         return pd.DataFrame(rows)
+    if not {"date", "symbol", "action"}.issubset(events.columns):
+        raise ValidationError("HS300 history requires date, symbol and action")
     events["date"] = pd.to_datetime(events["date"]).dt.normalize()
+    if events[["date", "symbol", "action"]].isna().any().any():
+        raise ValidationError("HS300 history contains missing event fields")
+    actions = events["action"].astype(str)
+    if not actions.str.contains("纳入|进入|剔除|退出").all():
+        raise ValidationError("HS300 history contains unknown adjustment actions")
     events["symbol"] = events["symbol"].map(normalize_symbol)
+    anchor = (
+        pd.Timestamp(current_as_of).normalize()
+        if current_as_of is not None
+        else pd.Timestamp.now().normalize()
+    )
+    if parse_date(end_date) > anchor:
+        raise ValidationError("Historical membership query ends after the current snapshot anchor")
+    # Announced but not yet effective adjustments are not reflected in the
+    # current constituent list, so they must not be undone from that anchor.
+    events = events[events["date"] <= anchor].drop_duplicates(["date", "symbol", "action"])
     events = events.sort_values("date")
 
     start = parse_date(start_date)
@@ -110,7 +128,10 @@ def fetch_hs300_constituents_history(
     active = set(current_symbols or fetch_hs300_constituents())
     for _, row in events.sort_values("date", ascending=False).iterrows():
         event_date = row["date"]
-        if event_date > end or event_date <= start:
+        # The anchor is TODAY's membership, not membership at the query end.
+        # Undo every subsequent event, including events after the requested end.
+        # An event on start is already effective at start and must remain applied.
+        if event_date <= start:
             continue
         symbol = row["symbol"]
         action = str(row["action"])
@@ -133,12 +154,7 @@ def fetch_hs300_constituents_history(
                 elif "剔除" in action or "退出" in action:
                     active.discard(symbol)
             event_idx += 1
-        for symbol in active:
+        for symbol in sorted(active):
             rows.append({"symbol": symbol, "date": date, "in_universe": 1})
 
-    if not rows:
-        for symbol in active:
-            for date in all_dates:
-                rows.append({"symbol": symbol, "date": date, "in_universe": 1})
-
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=UNIVERSE_COLUMNS)

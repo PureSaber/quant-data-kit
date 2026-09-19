@@ -166,3 +166,10 @@ from quant_data_kit.providers.akshare import fetch_hs300_constituents
 - [a-share-multifactor](../a-share-multifactor)
 - [sklearn-stock-trend](../sklearn-stock-trend)
 - [quant-lab](../quant-lab)
+# 日频研究适配修正（开发分支）
+
+`codex/research-decision-reliability` 分支将 A 股成交量统一为股，并在腾讯备用接口中使用
+未复权成交额／价格检查单位；`fetch_daily_prices(..., adjust="")` 可取得真实成交价格。
+缺少可核验发布时间的估值记录使用 `available_at=NaT`、`availability_basis=unknown`，
+严格 PIT 消费者应拒绝它们。历史指数成分回溯包含查询终点之后、当前快照之前的调整。
+升级后应重新抓取旧价格缓存；旧缓存的单位和时间语义不能仅靠升级包自动修复。
