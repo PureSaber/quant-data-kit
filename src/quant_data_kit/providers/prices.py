@@ -63,6 +63,7 @@ def _fetch_one_price(
                     "最低": "low",
                     "收盘": "close",
                     "成交量": "volume",
+                    "成交额": "amount",
                 }
             )
             # Eastmoney reports lots; Tencent's AKShare adapter returns shares.

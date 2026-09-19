@@ -34,6 +34,7 @@ def test_live_primary_and_fallback_use_same_share_units(monkeypatch):
             "最低": [9],
             "收盘": [10],
             "成交量": [10],
+            "成交额": [10000],
         }
     )
     tencent = pd.DataFrame(
@@ -62,6 +63,7 @@ def test_live_primary_and_fallback_use_same_share_units(monkeypatch):
     ak.stock_zh_a_hist = failed
     b = fetch_daily_prices(["000001"], "2025-01-01", "2025-01-03", adjust="", sleep_seconds=0)
     assert a.volume.iloc[0] == b.volume.iloc[0] == 1000
+    assert a.amount.iloc[0] == 10000
     assert a.volume_unit.iloc[0] == b.volume_unit.iloc[0] == "share"
     assert a.adjustment.iloc[0] == b.adjustment.iloc[0] == "none"
     assert requested == [""]
