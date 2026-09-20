@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from importlib import import_module
+from importlib import import_module, util
 from typing import Any
 
 
@@ -19,6 +19,7 @@ class ProviderSpec:
     loader: str
     capabilities: frozenset[str]
     extra: str
+    dependency_module: str
     credential_env: str | None = None
     max_workers: int = 4
     single_source: bool = True
@@ -31,6 +32,7 @@ class ProviderSpec:
         payload["credential_configured"] = (
             True if self.credential_env is None else bool(os.environ.get(self.credential_env))
         )
+        payload["installed"] = util.find_spec(self.dependency_module) is not None
         return payload
 
 
@@ -40,6 +42,7 @@ _SPECS = {
         loader="quant_data_kit.providers.equity_prices.akshare:fetch_auto",
         capabilities=frozenset({"prices.raw", "prices.adjusted"}),
         extra="akshare",
+        dependency_module="akshare",
         max_workers=2,
         single_source=False,
         notes="Legacy Eastmoney-to-Tencent fallback; excluded from frozen research bundles.",
@@ -49,6 +52,7 @@ _SPECS = {
         loader="quant_data_kit.providers.equity_prices.akshare:fetch_eastmoney",
         capabilities=frozenset({"prices.raw", "prices.adjusted"}),
         extra="akshare",
+        dependency_module="akshare",
         max_workers=2,
     ),
     "akshare_tencent": ProviderSpec(
@@ -56,6 +60,7 @@ _SPECS = {
         loader="quant_data_kit.providers.equity_prices.akshare:fetch_tencent",
         capabilities=frozenset({"prices.raw", "prices.adjusted"}),
         extra="akshare",
+        dependency_module="akshare",
         max_workers=2,
     ),
     "baostock": ProviderSpec(
@@ -63,6 +68,7 @@ _SPECS = {
         loader="quant_data_kit.providers.equity_prices.baostock:fetch_prices",
         capabilities=frozenset({"prices.raw", "prices.adjusted"}),
         extra="baostock",
+        dependency_module="baostock",
         max_workers=1,
         notes="BaoStock sessions are serialized.",
     ),
@@ -71,6 +77,7 @@ _SPECS = {
         loader="quant_data_kit.providers.equity_prices.tushare:fetch_prices",
         capabilities=frozenset({"prices.raw", "prices.adjusted"}),
         extra="tushare",
+        dependency_module="tushare",
         credential_env="TUSHARE_TOKEN",
         max_workers=1,
     ),
@@ -79,6 +86,7 @@ _SPECS = {
         loader="quant_data_kit.providers.equity_prices.yahoo:fetch_prices",
         capabilities=frozenset({"prices.raw", "prices.adjusted"}),
         extra="yahoo",
+        dependency_module="yfinance",
         max_workers=2,
         notes="Research-use Yahoo data accessed through yfinance.",
     ),
@@ -87,6 +95,7 @@ _SPECS = {
         loader="quant_data_kit.providers.equity_prices.alphavantage:fetch_prices",
         capabilities=frozenset({"prices.raw", "prices.adjusted"}),
         extra="alpha-vantage",
+        dependency_module="requests",
         credential_env="ALPHAVANTAGE_API_KEY",
         max_workers=1,
         notes="Full and adjusted daily history may require a paid entitlement.",

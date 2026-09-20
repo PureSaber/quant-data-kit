@@ -20,8 +20,8 @@ pip install 'quant-data-kit[alpha-vantage]'
 
 `TUSHARE_TOKEN` and `ALPHAVANTAGE_API_KEY` are read from the environment only.
 They are never accepted as CLI arguments or written to manifests. Use
-`qdk-providers` to inspect capabilities and whether required credentials are
-configured.
+`qdk-providers` to inspect capabilities, optional SDK installation, and whether
+required credentials are configured.
 
 Supported daily-price selectors are `akshare_eastmoney`, `akshare_tencent`,
 `baostock`, `tushare`, `yahoo`, and `alpha_vantage`. `akshare_auto` remains for
