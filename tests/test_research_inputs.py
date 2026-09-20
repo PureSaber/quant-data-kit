@@ -68,7 +68,10 @@ def test_bundle_is_atomic_hashed_and_keeps_shadows_separate(tmp_path, monkeypatc
         inputs,
         "fetch_hs300_benchmark",
         lambda *args, **kwargs: pd.DataFrame(
-            {"date": pd.date_range("2026-01-02", "2026-01-05", freq="B"), "benchmark_return": [0.0, 0.01]}
+            {
+                "date": pd.date_range("2026-01-02", "2026-01-05", freq="B"),
+                "benchmark_return": [0.0, 0.01],
+            }
         ),
     )
     monkeypatch.setattr(

@@ -76,7 +76,9 @@ def load_policy(path: Path) -> dict:
     primary = normalize_provider_name(prices.get("primary", ""))
     spec = get_provider_spec(primary)
     if not spec.single_source:
-        raise ValueError("Frozen research inputs require one provider; fallback providers are forbidden")
+        raise ValueError(
+            "Frozen research inputs require one provider; fallback providers are forbidden"
+        )
     required = {"prices.raw", "prices.adjusted"}
     if not required.issubset(spec.capabilities):
         raise ValueError(f"Primary provider {primary} lacks raw or adjusted daily prices")
@@ -108,9 +110,9 @@ def load_policy(path: Path) -> dict:
             )
         },
         "corporate_actions": {
-            "provider": _mapping(
-                policy.get("corporate_actions", {}), "corporate_actions"
-            ).get("provider", "cninfo"),
+            "provider": _mapping(policy.get("corporate_actions", {}), "corporate_actions").get(
+                "provider", "cninfo"
+            ),
             "required": bool(
                 _mapping(policy.get("corporate_actions", {}), "corporate_actions").get(
                     "required", True
@@ -122,9 +124,7 @@ def load_policy(path: Path) -> dict:
                 "provider", "akshare_eastmoney"
             ),
             "required": bool(
-                _mapping(policy.get("trading_status", {}), "trading_status").get(
-                    "required", False
-                )
+                _mapping(policy.get("trading_status", {}), "trading_status").get("required", False)
             ),
         },
     }
@@ -161,7 +161,9 @@ def _compare_prices(primary: pd.DataFrame, shadow: pd.DataFrame) -> dict:
     keys = ["symbol", "date"]
     left = primary[keys + ["close", "volume"]].copy()
     right = shadow[keys + ["close", "volume"]].copy()
-    merged = left.merge(right, on=keys, how="outer", suffixes=("_primary", "_shadow"), indicator=True)
+    merged = left.merge(
+        right, on=keys, how="outer", suffixes=("_primary", "_shadow"), indicator=True
+    )
     common = merged[merged["_merge"] == "both"].copy()
     if common.empty:
         return {
@@ -265,9 +267,7 @@ def build_research_inputs(
         ):
             raise ValueError("Primary raw and adjusted price keys differ")
         manifest["files"]["raw"] = _write_frame(temporary, "raw", raw, primary)
-        manifest["files"]["adjusted"] = _write_frame(
-            temporary, "adjusted", adjusted, primary
-        )
+        manifest["files"]["adjusted"] = _write_frame(temporary, "adjusted", adjusted, primary)
 
         benchmark_provider = policy["benchmark"]["provider"]
         benchmark = fetch_hs300_benchmark(
@@ -341,7 +341,11 @@ def build_research_inputs(
                     "error_type": type(exc).__name__,
                 }
                 manifest["warnings"].append(
-                    {"domain": "price_shadow", "provider": shadow_provider, "error_type": type(exc).__name__}
+                    {
+                        "domain": "price_shadow",
+                        "provider": shadow_provider,
+                        "error_type": type(exc).__name__,
+                    }
                 )
 
         (temporary / "manifest.json").write_bytes(_canonical_bytes(manifest))
@@ -379,9 +383,7 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "output": str(args.output.resolve()),
                 "policy_sha256": manifest["policy_sha256"],
-                "providers": {
-                    name: entry["provider"] for name, entry in manifest["files"].items()
-                },
+                "providers": {name: entry["provider"] for name, entry in manifest["files"].items()},
                 "warnings": manifest["warnings"],
             },
             ensure_ascii=False,

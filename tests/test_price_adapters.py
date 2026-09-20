@@ -79,7 +79,9 @@ def test_yahoo_uses_exchange_symbol_and_normalizes_columns(monkeypatch):
         {"Open": [10], "High": [11], "Low": [9], "Close": [10.5], "Volume": [200]},
         index=pd.DatetimeIndex(["2026-01-02"], name="Date"),
     )
-    fake = SimpleNamespace(download=lambda ticker, **kwargs: calls.append((ticker, kwargs)) or history)
+    fake = SimpleNamespace(
+        download=lambda ticker, **kwargs: calls.append((ticker, kwargs)) or history
+    )
     monkeypatch.setitem(sys.modules, "yfinance", fake)
     frame = yahoo_prices("600000", "2026-01-01", "2026-01-03", "qfq")
     assert calls[0][0] == "600000.SS"
