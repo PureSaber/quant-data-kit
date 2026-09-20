@@ -24,6 +24,17 @@ dependencies = [
 
 [project.optional-dependencies]
 akshare = ["akshare>=1.12"]
+baostock = ["baostock>=0.8.9"]
+tushare = ["tushare>=1.4.24"]
+yahoo = ["yfinance>=0.2.65"]
+alpha-vantage = ["requests>=2.32,<3"]
+all-equity-providers = [
+    "akshare>=1.12",
+    "baostock>=0.8.9",
+    "tushare>=1.4.24",
+    "yfinance>=0.2.65",
+    "requests>=2.32,<3",
+]
 dev = ["coverage>=7.6", "psutil>=6.0,<8.0", "pytest>=7.4", "ruff>=0.9.0"]
 
 [project.scripts]
@@ -31,6 +42,8 @@ qdk-validate = "quant_data_kit.cli:main_validate"
 qdk-manifest = "quant_data_kit.cli:main_manifest"
 qdk-catalog = "quant_data_kit.cli:main_catalog"
 qdk-capture = "quant_data_kit.capture_v2.cli:main_capture"
+qdk-providers = "quant_data_kit.cli:main_providers"
+qdk-research-inputs = "quant_data_kit.research_inputs:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

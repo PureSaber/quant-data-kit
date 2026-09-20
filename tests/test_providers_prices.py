@@ -2,6 +2,7 @@ import sys
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from quant_data_kit.providers.prices import fetch_daily_prices
 
@@ -99,3 +100,30 @@ def test_shenzhen_lot_bug_is_verified_against_raw_prices_even_for_old_adjusted_d
     assert result.volume.iloc[0] == 1000
     assert calls == ["qfq", ""]
     assert result.source_volume_unit.iloc[0] == "lot_100_shares"
+
+
+def test_explicit_eastmoney_never_falls_back_to_tencent(monkeypatch):
+    called = []
+
+    def failed(**kw):
+        raise ConnectionError("unavailable")
+
+    def tencent(**kw):
+        called.append(kw)
+        return pd.DataFrame()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "akshare",
+        SimpleNamespace(stock_zh_a_hist=failed, stock_zh_a_hist_tx=tencent),
+    )
+    with pytest.raises(RuntimeError, match="akshare_eastmoney"):
+        fetch_daily_prices(
+            ["000001"],
+            "2025-01-01",
+            "2025-01-03",
+            provider="akshare_eastmoney",
+            max_retries=1,
+            sleep_seconds=0,
+        )
+    assert called == []

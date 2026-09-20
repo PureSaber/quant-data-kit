@@ -11,6 +11,19 @@ from quant_data_kit.storage import load_manifest, load_parquet
 from quant_data_kit.validate import validate_price_frame
 
 
+def main_providers(argv: list[str] | None = None) -> int:
+    from quant_data_kit.providers.provider_registry import list_provider_specs
+
+    parser = argparse.ArgumentParser(
+        prog="qdk-providers", description="List optional daily-price providers"
+    )
+    parser.add_argument("--capability")
+    args = parser.parse_args(argv)
+    payload = [spec.public_dict() for spec in list_provider_specs(args.capability)]
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0
+
+
 def main_validate(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="qdk-validate", description="Validate a Parquet price dataset"

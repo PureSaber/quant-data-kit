@@ -19,6 +19,7 @@ def fetch_hs300_benchmark(
     start_date: str,
     end_date: str,
     fetch_fn: Callable[[str, str], pd.DataFrame] | None = None,
+    provider: str = "akshare_auto",
 ) -> pd.DataFrame:
     start = parse_date(start_date).strftime("%Y%m%d")
     end = parse_date(end_date).strftime("%Y%m%d")
@@ -29,10 +30,17 @@ def fetch_hs300_benchmark(
         import akshare as ak
 
         configure_network()
+        if provider not in {"akshare_auto", "akshare_eastmoney", "akshare_sina"}:
+            raise ValueError("benchmark provider must be akshare_eastmoney or akshare_sina")
         try:
+            if provider == "akshare_sina":
+                raise LookupError("Sina explicitly selected")
             hist = ak.stock_zh_index_daily_em(symbol="sh000300")
-        except Exception:  # noqa: BLE001
-            logger.warning("Eastmoney index API failed; falling back to stock_zh_index_daily")
+        except Exception:
+            if provider == "akshare_eastmoney":
+                raise
+            if provider == "akshare_auto":
+                logger.warning("Eastmoney index API failed; falling back to stock_zh_index_daily")
             hist = ak.stock_zh_index_daily(symbol="sh000300")
         hist["date"] = pd.to_datetime(hist["date"]).dt.normalize()
 
