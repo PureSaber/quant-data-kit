@@ -12,9 +12,10 @@ python -m pip install -r requirements.lock
 python -m pip install -e . --no-deps --no-build-isolation
 ```
 
-AKShare providers are an explicit optional integration and are deliberately excluded from the
-audited runtime-and-development lock. Install `.[akshare]` only in an environment that needs live
-AKShare access; the core package and CI do not require it.
+Live providers are explicit optional integrations and are deliberately excluded from the
+audited runtime-and-development lock. Install only the required extra: `.[akshare]`,
+`.[baostock]`, `.[tushare]`, `.[yahoo]`, or `.[alpha-vantage]`. The core package and CI do not
+import those SDKs. See [optional providers and frozen research inputs](docs/RESEARCH_INPUTS.md).
 
 ## M6 dependency governance
 
@@ -59,7 +60,8 @@ move or rebuild a release tag to repair a dependency resolution.
 | `validate` | OHLCV logic, missing, duplicate and trading-calendar coverage checks |
 | `calendar` | SSE trading calendar helpers |
 | `panel` | PIT merge helpers for alt-data |
-| `providers.prices` | Daily OHLCV with thread pool + tx fallback |
+| `providers.prices` | Canonical daily OHLCV with explicit optional provider selection |
+| `research_inputs` | Single-primary immutable input bundles with separate shadow comparisons |
 | `providers.fundamentals` | Valuation metrics (PE/PB/market cap) |
 | `providers.universe` | HS300 constituents + membership history |
 | `providers.benchmark` | HS300 index returns |

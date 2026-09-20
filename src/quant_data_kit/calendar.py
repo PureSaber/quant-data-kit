@@ -17,8 +17,10 @@ def trading_days_between(
     return trade_dates[mask]
 
 
-def load_sse_trade_dates() -> pd.DatetimeIndex:
+def load_sse_trade_dates(provider: str = "akshare_sina") -> pd.DatetimeIndex:
     """Load SSE trading calendar via AKShare."""
+    if provider != "akshare_sina":
+        raise ValueError("SSE calendar provider must be akshare_sina")
     import akshare as ak
 
     df = ak.tool_trade_date_hist_sina()

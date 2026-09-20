@@ -1,4 +1,4 @@
-"""AKShare provider exports."""
+"""Normalized provider exports."""
 
 from quant_data_kit.providers._symbols import normalize_symbol, to_market_symbol
 from quant_data_kit.providers.akshare import fetch_daily_prices, fetch_hs300_constituents
@@ -8,10 +8,16 @@ from quant_data_kit.providers.fundamentals import fetch_fundamentals
 from quant_data_kit.providers.industry import fetch_industry_returns
 from quant_data_kit.providers.northbound import fetch_northbound_holdings
 from quant_data_kit.providers.prices import PRICE_COLUMNS
+from quant_data_kit.providers.provider_registry import (
+    ProviderSpec,
+    get_provider_spec,
+    list_provider_specs,
+)
 from quant_data_kit.providers.universe import fetch_hs300_constituents_history
 
 __all__ = [
     "PRICE_COLUMNS",
+    "ProviderSpec",
     "fetch_daily_prices",
     "fetch_earnings_forecasts",
     "fetch_fundamentals",
@@ -20,6 +26,8 @@ __all__ = [
     "fetch_hs300_constituents_history",
     "fetch_industry_returns",
     "fetch_northbound_holdings",
+    "get_provider_spec",
+    "list_provider_specs",
     "normalize_symbol",
     "to_market_symbol",
 ]
