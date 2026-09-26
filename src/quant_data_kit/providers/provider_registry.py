@@ -55,6 +55,15 @@ _SPECS = {
         dependency_module="akshare",
         max_workers=2,
     ),
+    "akshare_eastmoney_etf": ProviderSpec(
+        name="akshare_eastmoney_etf",
+        loader="quant_data_kit.providers.equity_prices.akshare:fetch_eastmoney_etf",
+        capabilities=frozenset({"prices.raw", "prices.adjusted"}),
+        extra="akshare",
+        dependency_module="akshare",
+        max_workers=2,
+        notes="Eastmoney ETF daily endpoint; volume is normalized from lots to shares.",
+    ),
     "akshare_tencent": ProviderSpec(
         name="akshare_tencent",
         loader="quant_data_kit.providers.equity_prices.akshare:fetch_tencent",
@@ -62,6 +71,18 @@ _SPECS = {
         extra="akshare",
         dependency_module="akshare",
         max_workers=2,
+    ),
+    "akshare_sina_etf": ProviderSpec(
+        name="akshare_sina_etf",
+        loader="quant_data_kit.providers.equity_prices.akshare:fetch_sina_etf",
+        capabilities=frozenset({"prices.raw", "prices.adjusted"}),
+        extra="akshare",
+        dependency_module="akshare",
+        max_workers=1,
+        notes=(
+            "Sina ETF bars; qfq is derived from Sina's separate cumulative-cash series. "
+            "Serialized because AKShare imports a process-global JavaScript runtime."
+        ),
     ),
     "baostock": ProviderSpec(
         name="baostock",

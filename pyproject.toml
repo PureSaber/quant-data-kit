@@ -44,6 +44,7 @@ qdk-catalog = "quant_data_kit.cli:main_catalog"
 qdk-capture = "quant_data_kit.capture_v2.cli:main_capture"
 qdk-providers = "quant_data_kit.cli:main_providers"
 qdk-research-inputs = "quant_data_kit.research_inputs:main"
+qdk-research-dataset = "quant_data_kit.research_dataset:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

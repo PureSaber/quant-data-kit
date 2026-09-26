@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 
+from quant_data_kit.providers.equity_prices.akshare import fetch_sina_etf
 from quant_data_kit.providers.equity_prices.alphavantage import fetch_prices as alpha_prices
 from quant_data_kit.providers.equity_prices.baostock import fetch_prices as baostock_prices
 from quant_data_kit.providers.equity_prices.tushare import fetch_prices as tushare_prices
@@ -127,3 +128,30 @@ def test_alpha_vantage_filters_dates_and_scales_adjusted_ohlc(monkeypatch):
     assert frame.loc[0, "open"] == 5
     assert frame.loc[0, "close"] == 5
     assert len(frame) == 1
+
+
+def test_sina_etf_qfq_is_derived_from_separate_real_cash_series(monkeypatch):
+    history = pd.DataFrame(
+        {
+            "date": pd.DatetimeIndex(["2026-01-15", "2026-01-16", "2026-01-19"]),
+            "open": [10.0, 10.0, 9.0],
+            "high": [10.0, 10.0, 9.0],
+            "low": [10.0, 10.0, 9.0],
+            "close": [10.0, 10.0, 9.0],
+            "volume": [100, 100, 100],
+            "amount": [1000, 1000, 900],
+        }
+    )
+    dividends = pd.DataFrame(
+        {"日期": pd.DatetimeIndex(["2026-01-19"]), "累计分红": [1.0]}
+    )
+    fake = SimpleNamespace(
+        fund_etf_hist_sina=lambda **kwargs: history.copy(),
+        fund_etf_dividend_sina=lambda **kwargs: dividends.copy(),
+    )
+    monkeypatch.setitem(sys.modules, "akshare", fake)
+    adjusted = fetch_sina_etf("510300", "2026-01-15", "2026-01-19", "qfq")
+    assert adjusted.close.tolist() == [9.0, 9.0, 9.0]
+    assert adjusted.volume.tolist() == [100, 100, 100]
+    assert adjusted.source_volume_unit.eq("share").all()
+    assert adjusted.source.str.contains("fund_etf_dividend_sina").all()
