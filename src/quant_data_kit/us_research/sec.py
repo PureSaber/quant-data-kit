@@ -15,12 +15,12 @@ from .prices import sha256, utc
 
 def download_sec(cik: str, destination: str | Path, user_agent: str) -> Path:
     """Fetch companyfacts and all submissions pages with a real contact identity."""
-    import requests
-
     if not re.search(r"[^\s@]+@[^\s@]+\.[^\s@]+", user_agent):
         raise ValueError("SEC_USER_AGENT must contain a real contact email")
     if not re.fullmatch(r"\d{1,10}", str(cik)):
         raise ValueError("CIK must contain 1 to 10 digits")
+    import requests
+
     cik = str(cik).zfill(10)
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=False)

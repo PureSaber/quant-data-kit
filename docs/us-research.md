@@ -11,3 +11,5 @@
 - `sec.filing_table/fact_table/facts_asof/annual_quality`: accession acceptance plus modeled processing lag, retained restatements, period-matched annual quality metrics. Facts with unknown acceptance are excluded and audited.
 
 Install `.[us-research]` for optional calendar/Yahoo/SEC clients. Unit tests never require live data or contact credentials. `historical_pit` is source evidence supplied by the importer, not automatic certification by the package.
+
+Settlement uses regular exchange holidays plus Columbus/Veterans bank holidays, independently of exchange-only ad-hoc closures. Saturday Veterans Day is not observed on Friday by Federal Reserve Banks. The daily research account models settled funds as available on the settlement date, without intraday clearing or broker-specific holds. Sources: [Federal Reserve bank holidays](https://www.federalreserve.gov/releases/k8/default.htm), [DTCC Veterans Day 2024](https://www.dtcc.com/-/media/Files/pdf/2024/10/11/a9503.pdf), [SIFMA January 2025 closure matrix](https://www.sifma.org/resources/guides-playbooks/unscheduled-close-market-matrix). Future or exceptional clearing changes require calendar review.

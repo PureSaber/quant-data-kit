@@ -65,6 +65,21 @@ def test_calendar_dst_halfday_settlement():
         schedule("2024-05-30", "2024-05-01")
 
 
+@pytest.mark.parametrize(
+    "trade,settles",
+    [
+        ("2024-10-11", "2024-10-15"),
+        ("2024-11-08", "2024-11-12"),
+        ("2023-11-09", "2023-11-13"),
+        ("2024-03-28", "2024-04-02"),
+        ("2025-01-08", "2025-01-09"),
+        ("2018-12-04", "2018-12-06"),
+    ],
+)
+def test_settlement_uses_bank_holidays_and_keeps_exchange_only_closures(trade, settles):
+    assert settlement_session(trade) == settles
+
+
 @pytest.mark.parametrize("value", ["AAPL", "BRK.B", "BRK-B", "SPY"])
 def test_us_symbols_are_not_domestic(value):
     assert us_symbol(value) == value
