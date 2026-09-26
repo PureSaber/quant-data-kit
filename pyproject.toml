@@ -23,6 +23,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+hong-kong = ["akshare>=1.12", "exchange-calendars>=4.10,<5"]
 akshare = ["akshare>=1.12"]
 baostock = ["baostock>=0.8.9"]
 tushare = ["tushare>=1.4.24"]
