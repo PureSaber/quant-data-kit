@@ -26,7 +26,13 @@ import pandas as pd
 
 from quant_data_kit._version import __version__
 from quant_data_kit.calendar import load_sse_trade_dates
-from quant_data_kit.instrument_master import load_instrument_master
+from quant_data_kit.instrument_master import (
+    BUNDLE_SCHEMA as INSTRUMENT_MASTER_SCHEMA,
+)
+from quant_data_kit.instrument_master import (
+    load_instrument_master,
+    resolve_instrument_catalog,
+)
 from quant_data_kit.providers._symbols import normalize_symbol
 from quant_data_kit.providers.benchmark import fetch_hs300_benchmark
 from quant_data_kit.providers.corporate_actions import fetch_etf_corporate_actions
@@ -713,13 +719,20 @@ def _publish(
     parent_snapshot_id: str | None,
     update_evidence: dict[str, Any],
     instrument_master_root: Path | None = None,
+    preserved_history_root: Path | None = None,
 ) -> dict[str, Any]:
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     staging = root / f".snapshot.tmp-{uuid4().hex}"
     staging.mkdir()
     try:
-        history = _history(frames["actions"], symbols, start, captured_at)
+        if preserved_history_root is None:
+            history = _history(frames["actions"], symbols, start, captured_at)
+        else:
+            preserved_history_root = preserved_history_root.resolve()
+            history = validate_history(
+                pd.read_parquet(preserved_history_root / FILE_NAMES["history"])
+            )
         master_manifest = None
         if instrument_master_root is None:
             catalog_frame = _instrument_catalog(
@@ -731,24 +744,17 @@ def _publish(
                 source=source,
             )
         else:
-            master_manifest, catalog_frame = load_instrument_master(instrument_master_root)
-            if sorted(catalog_frame["symbol"].tolist()) != sorted(symbols):
+            master_destination = staging / "instrument_master"
+            shutil.copytree(instrument_master_root.resolve(), master_destination)
+            master_manifest, versioned_catalog = load_instrument_master(master_destination)
+            if sorted(versioned_catalog["symbol"].unique().tolist()) != sorted(symbols):
                 raise ValueError("Historical instrument master must exactly match dataset symbols")
-            first_open = (
-                start.tz_localize("Asia/Shanghai") + pd.Timedelta(hours=9, minutes=25)
-            ).tz_convert("UTC")
-            last_close = (end.tz_localize("Asia/Shanghai") + pd.Timedelta(hours=15)).tz_convert(
-                "UTC"
+            catalog_frame = resolve_instrument_catalog(
+                versioned_catalog,
+                symbols=symbols,
+                start=start,
+                end=end,
             )
-            effective_from = pd.to_datetime(catalog_frame["effective_from"], utc=True)
-            effective_to = pd.to_datetime(catalog_frame["effective_to"], utc=True)
-            available_at = pd.to_datetime(catalog_frame["available_at"], utc=True)
-            if not (
-                (effective_from <= first_open).all()
-                and (effective_to > last_close).all()
-                and (available_at <= first_open).all()
-            ):
-                raise ValueError("Historical instrument master does not causally cover the dataset")
             validation = {
                 **validation,
                 "instrument_master": {
@@ -772,7 +778,7 @@ def _publish(
             "catalog": (
                 "qdk.etf-instrument-catalog/v1"
                 if master_manifest is None
-                else "qdk.historical-instrument-master/v1"
+                else INSTRUMENT_MASTER_SCHEMA
             ),
             "history": "derived_from_actions_captured_view",
         }
@@ -780,7 +786,9 @@ def _publish(
             path = staging / filename
             path.parent.mkdir(parents=True, exist_ok=True)
             file_format = path.suffix.lstrip(".")
-            if file_format == "parquet":
+            if name == "history" and preserved_history_root is not None:
+                shutil.copyfile(preserved_history_root / filename, path)
+            elif file_format == "parquet":
                 frames[name].to_parquet(path, index=False)
             elif file_format == "csv":
                 frames[name].to_csv(path, index=False)
@@ -795,28 +803,34 @@ def _publish(
             }
         history_root = staging / "history"
         history_source = history_root / "source.json"
-        history_source.write_bytes(
-            _history_source_payload(frames["actions"], symbols=symbols, source=source)
-        )
-        history_manifest = {
-            "schema_version": HISTORY_SCHEMA,
-            "provider": source.get("provider", source["mode"]),
-            "source_uri": source.get("source_uri", "akshare://sina-etf+eastmoney-fund-f10"),
-            "license_note": source.get(
-                "license_note", "Public web sources; rights remain with source providers."
-            ),
-            "scope": "captured-current-source-declaration",
-            "original": {"file": history_source.name, "sha256": _sha256(history_source)},
-            "history": {
-                "file": Path(FILE_NAMES["history"]).name,
-                "sha256": files["history"]["sha256"],
-            },
-            "rows": len(history),
-            "domains": sorted(history["domain"].unique()),
-            "symbols": sorted(history["symbol"].unique()),
-        }
         history_manifest_path = history_root / "manifest.json"
-        history_manifest_path.write_bytes(_canonical_bytes(history_manifest))
+        if preserved_history_root is None:
+            history_source.write_bytes(
+                _history_source_payload(frames["actions"], symbols=symbols, source=source)
+            )
+            history_manifest = {
+                "schema_version": HISTORY_SCHEMA,
+                "provider": source.get("provider", source["mode"]),
+                "source_uri": source.get("source_uri", "akshare://sina-etf+eastmoney-fund-f10"),
+                "license_note": source.get(
+                    "license_note", "Public web sources; rights remain with source providers."
+                ),
+                "scope": "captured-current-source-declaration",
+                "original": {"file": history_source.name, "sha256": _sha256(history_source)},
+                "history": {
+                    "file": Path(FILE_NAMES["history"]).name,
+                    "sha256": files["history"]["sha256"],
+                },
+                "rows": len(history),
+                "domains": sorted(history["domain"].unique()),
+                "symbols": sorted(history["symbol"].unique()),
+            }
+            history_manifest_path.write_bytes(_canonical_bytes(history_manifest))
+        else:
+            shutil.copyfile(preserved_history_root / "history" / "source.json", history_source)
+            shutil.copyfile(
+                preserved_history_root / "history" / "manifest.json", history_manifest_path
+            )
         evidence_files = {
             "history_manifest": {
                 "file": "history/manifest.json",
@@ -828,8 +842,6 @@ def _publish(
             },
         }
         if instrument_master_root is not None:
-            master_destination = staging / "instrument_master"
-            shutil.copytree(instrument_master_root.resolve(), master_destination)
             for path in sorted(master_destination.rglob("*")):
                 if path.is_file():
                     relative = path.relative_to(staging).as_posix()
@@ -1037,7 +1049,7 @@ def update_dataset(
     merged = _normalize_frames(merged, symbols=symbols, start=start_day, end=end_day)
     validation = validate_dataset_frames(merged, symbols=symbols, start=start_day, end=end_day)
     master_root = None
-    if previous["files"]["catalog"].get("provider") == "qdk.historical-instrument-master/v1":
+    if previous["files"]["catalog"].get("provider") == INSTRUMENT_MASTER_SCHEMA:
         master_root = root.resolve() / "snapshots" / previous["snapshot_id"] / "instrument_master"
     return _publish(
         root,
@@ -1132,6 +1144,7 @@ def bind_instrument_master(
             "instrument_master_bundle_sha256": master_manifest["bundle_sha256"],
         },
         instrument_master_root=instrument_master_root,
+        preserved_history_root=root / "snapshots" / previous["snapshot_id"],
     )
 
 

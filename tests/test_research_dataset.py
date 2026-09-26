@@ -145,6 +145,15 @@ def test_bind_historical_master_publishes_child_without_refetch(tmp_path):
     _source(source, dates, [10, 10, 9, 9.1, 9.2], [9, 9, 9, 9.1, 9.2])
     root = tmp_path / "dataset"
     parent = _build(root, source)
+    parent_snapshot = root / "snapshots" / parent["snapshot_id"]
+    preserved_history = {
+        relative: (parent_snapshot / relative).read_bytes()
+        for relative in (
+            "history/history.parquet",
+            "history/manifest.json",
+            "history/source.json",
+        )
+    }
     master = tmp_path / "master"
     import_instrument_master(_master_source(tmp_path / "master-source"), master)
 
@@ -155,8 +164,11 @@ def test_bind_historical_master_publishes_child_without_refetch(tmp_path):
     )
     assert child["parent_snapshot_id"] == parent["snapshot_id"]
     assert child["update_evidence"]["market_data_refetched"] is False
-    assert child["files"]["catalog"]["provider"] == "qdk.historical-instrument-master/v1"
+    assert child["files"]["catalog"]["provider"] == "qdk.historical-instrument-master/v2"
     assert child["consumer_contract"]["instrument_master_availability"].startswith("official")
+    child_snapshot = root / "snapshots" / child["snapshot_id"]
+    for relative, expected in preserved_history.items():
+        assert (child_snapshot / relative).read_bytes() == expected
     _, frames = load_research_snapshot(root, child["snapshot_id"])
     assert frames["catalog"].loc[0, "available_at"] == "2023-02-17T08:00:00Z"
 
@@ -175,7 +187,7 @@ def test_bind_historical_master_publishes_child_without_refetch(tmp_path):
         license_note="test fixture declaration",
     )
     assert updated["parent_snapshot_id"] == child["snapshot_id"]
-    assert updated["files"]["catalog"]["provider"] == "qdk.historical-instrument-master/v1"
+    assert updated["files"]["catalog"]["provider"] == "qdk.historical-instrument-master/v2"
     assert updated["validation"]["instrument_master"]["passed"] is True
 
 
