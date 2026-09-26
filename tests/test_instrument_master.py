@@ -351,9 +351,7 @@ def test_prefix_ignores_only_verified_current_horizon_extension(tmp_path):
     changed_declaration_path = changed_source / "declaration.json"
     changed_declaration = json.loads(changed_declaration_path.read_text(encoding="utf-8"))
     changed_declaration["catalog_sha256"] = _hash(changed_catalog_path)
-    changed_declaration["documents"][1]["assertions"][0]["fields"]["price_tick"][
-        "value"
-    ] = "0.002"
+    changed_declaration["documents"][1]["assertions"][0]["fields"]["price_tick"]["value"] = "0.002"
     changed_declaration_path.write_text(json.dumps(changed_declaration), encoding="utf-8")
     changed_bundle = tmp_path / "changed-history-bundle"
     import_instrument_master(changed_source, changed_bundle)
