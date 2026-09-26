@@ -1,5 +1,11 @@
 # quant-data-kit
 
+Hong Kong daily research uses the explicit `quant_data_kit.hong_kong` module
+(`pip install -e '.[hong-kong]'`). It preserves five-digit HK codes, HKD/share
+units, raw source responses and XHKG session times. Providers are selected
+explicitly; failed/incomplete or modified snapshots cannot be loaded. These
+price snapshots do not certify historical universes or corporate actions.
+
 Shared data layer for PureSaber quant research repos: immutable Raw/Normalized/Curated storage, pinned DuckDB snapshots, deterministic L2 replay, cross-venue fixture adapters, Parquet contracts, and AKShare providers.
 
 ## Install

@@ -24,6 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 us-research = ["exchange-calendars>=4.5,<5", "yfinance>=0.2.65,<1", "requests>=2.32,<3"]
+hong-kong = ["akshare>=1.12", "exchange-calendars>=4.10,<5"]
 akshare = ["akshare>=1.12"]
 baostock = ["baostock>=0.8.9"]
 tushare = ["tushare>=1.4.24"]
