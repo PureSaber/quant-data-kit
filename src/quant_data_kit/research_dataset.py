@@ -170,9 +170,7 @@ def _fetch_live_source(
     provider: str,
 ) -> tuple[dict[str, pd.DataFrame], dict[str, Any]]:
     spec = get_provider_spec(provider)
-    if not spec.single_source or not {"prices.raw", "prices.adjusted"}.issubset(
-        spec.capabilities
-    ):
+    if not spec.single_source or not {"prices.raw", "prices.adjusted"}.issubset(spec.capabilities):
         raise ValueError("Research ETF prices require one explicit raw/adjusted provider")
     request = {
         "symbols": symbols,
@@ -208,9 +206,7 @@ def _fetch_live_source(
     actions = fetch_etf_corporate_actions(symbols, captured_at.isoformat())
     if not actions.empty:
         ex_dates = pd.to_datetime(actions["ex_date"]).dt.normalize()
-        actions = actions[
-            (ex_dates >= dataset_start) & (ex_dates <= end)
-        ].reset_index(drop=True)
+        actions = actions[(ex_dates >= dataset_start) & (ex_dates <= end)].reset_index(drop=True)
     frames = {
         "raw": raw,
         "adjusted": adjusted,
@@ -253,9 +249,7 @@ def _normalize_frames(
             raise ValueError(f"{name} input lacks symbol/date")
         frame["symbol"] = frame["symbol"].map(normalize_symbol)
         frame["date"] = pd.to_datetime(frame["date"], errors="coerce").dt.normalize()
-        frame = frame[
-            frame["symbol"].isin(symbols) & frame["date"].between(start, end)
-        ]
+        frame = frame[frame["symbol"].isin(symbols) & frame["date"].between(start, end)]
         ready[name] = frame.sort_values(["symbol", "date"]).reset_index(drop=True)
     for name in ("benchmark", "calendar"):
         frame = ready[name]
@@ -280,9 +274,7 @@ def _normalize_frames(
             "shares_available_date",
         ):
             actions[column] = pd.to_datetime(actions[column], errors="coerce").dt.normalize()
-        actions = actions[
-            actions["symbol"].isin(symbols) & actions["ex_date"].between(start, end)
-        ]
+        actions = actions[actions["symbol"].isin(symbols) & actions["ex_date"].between(start, end)]
     ready["actions"] = actions.sort_values(["symbol", "ex_date"]).reset_index(drop=True)
     return ready
 
@@ -341,9 +333,7 @@ def _validate_actions(
             raise ValueError("Corporate actions contain invalid amounts")
         if row.announced_date >= row.ex_date or row.record_date >= row.ex_date:
             raise ValueError("Corporate-action announcement/record date must precede ex-date")
-        previous = raw.loc[
-            (raw["symbol"] == row.symbol) & (raw["date"] < row.ex_date), "date"
-        ]
+        previous = raw.loc[(raw["symbol"] == row.symbol) & (raw["date"] < row.ex_date), "date"]
         if previous.empty or pd.Timestamp(previous.max()) != row.record_date:
             raise ValueError("Corporate-action record date is not the previous captured session")
         if row.pay_date < row.ex_date:
@@ -390,10 +380,14 @@ def _validate_adjustments(
             cash, ratio = by_key.get((symbol, day), (0.0, 1.0))
             previous_close = float(group.loc[index - 1, "close_raw"])
             if cash >= previous_close:
-                raise ValueError(f"Dividend cash exceeds previous close for {symbol} on {day.date()}")
+                raise ValueError(
+                    f"Dividend cash exceeds previous close for {symbol} on {day.date()}"
+                )
             expected = previous_close * ratio / (previous_close - cash)
             observed = float(factor.iloc[index] / factor.iloc[index - 1])
-            tolerance = max(0.003, 0.025 / min(float(group.loc[index, "close_raw"]), previous_close))
+            tolerance = max(
+                0.003, 0.025 / min(float(group.loc[index, "close_raw"]), previous_close)
+            )
             multiplicative_errors.append(abs(observed - expected) / tolerance)
         multiplicative_ok = not multiplicative_errors or max(multiplicative_errors) <= 1
 
@@ -471,7 +465,9 @@ def _validate_coverage(
     if set(frames["raw"]["symbol"]) != set(symbols):
         raise ValueError("ETF price response does not cover the requested symbols")
     benchmark_dates = set(frames["benchmark"]["date"])
-    benchmark_missing = [day.date().isoformat() for day in expected[1:] if day not in benchmark_dates]
+    benchmark_missing = [
+        day.date().isoformat() for day in expected[1:] if day not in benchmark_dates
+    ]
     if benchmark_missing:
         raise ValueError(f"Benchmark gaps detected: {benchmark_missing}")
     future_sessions = calendar[calendar > end]
@@ -504,9 +500,7 @@ def validate_dataset_frames(
         raise ValueError("adjusted prices must use qfq")
     coverage = _validate_coverage(frames, symbols=symbols, start=start, end=end)
     actions = _validate_actions(frames["actions"], frames["raw"])
-    adjustments = _validate_adjustments(
-        frames["raw"], frames["adjusted"], frames["actions"]
-    )
+    adjustments = _validate_adjustments(frames["raw"], frames["adjusted"], frames["actions"])
     return {
         "passed": True,
         "coverage": coverage,
@@ -625,8 +619,7 @@ def _history_source_payload(
             "source": source,
             "corporate_action_source_records": records,
             "classification_declaration": {
-                symbol: {"product_type": "etf", "venue": _venue(symbol)}
-                for symbol in symbols
+                symbol: {"product_type": "etf", "venue": _venue(symbol)} for symbol in symbols
             },
         }
     )
@@ -773,9 +766,7 @@ def _publish(
         history_manifest = {
             "schema_version": HISTORY_SCHEMA,
             "provider": source.get("provider", source["mode"]),
-            "source_uri": source.get(
-                "source_uri", "akshare://sina-etf+eastmoney-fund-f10"
-            ),
+            "source_uri": source.get("source_uri", "akshare://sina-etf+eastmoney-fund-f10"),
             "license_note": source.get(
                 "license_note", "Public web sources; rights remain with source providers."
             ),
@@ -903,9 +894,7 @@ def build_dataset(
             source_version=source_version,
             license_note=license_note,
         )
-    frames = _normalize_frames(
-        frames, symbols=normalized_symbols, start=start_day, end=end_day
-    )
+    frames = _normalize_frames(frames, symbols=normalized_symbols, start=start_day, end=end_day)
     validation = validate_dataset_frames(
         frames, symbols=normalized_symbols, start=start_day, end=end_day
     )
@@ -994,9 +983,7 @@ def update_dataset(
             old["actions"], frames["actions"], ["symbol", "ex_date"], end=end_day
         )
     merged = _normalize_frames(merged, symbols=symbols, start=start_day, end=end_day)
-    validation = validate_dataset_frames(
-        merged, symbols=symbols, start=start_day, end=end_day
-    )
+    validation = validate_dataset_frames(merged, symbols=symbols, start=start_day, end=end_day)
     return _publish(
         root,
         merged,

@@ -65,9 +65,7 @@ def _actions():
 def _source(root: Path, dates, raw_closes, adjusted_closes, *, actions=True):
     root.mkdir()
     _prices(dates, raw_closes, "none").to_parquet(root / "raw.parquet", index=False)
-    _prices(dates, adjusted_closes, "qfq").to_parquet(
-        root / "adjusted.parquet", index=False
-    )
+    _prices(dates, adjusted_closes, "qfq").to_parquet(root / "adjusted.parquet", index=False)
     pd.DataFrame(
         {
             "date": dates[1:],
@@ -101,9 +99,7 @@ def _build(root: Path, source: Path, end="2026-01-21"):
 
 def test_local_build_is_immutable_asm_compatible_and_records_deferred_cash(tmp_path):
     source = tmp_path / "source"
-    dates = pd.DatetimeIndex(
-        ["2026-01-15", "2026-01-16", "2026-01-19", "2026-01-20", "2026-01-21"]
-    )
+    dates = pd.DatetimeIndex(["2026-01-15", "2026-01-16", "2026-01-19", "2026-01-20", "2026-01-21"])
     _source(source, dates, [10, 10, 9, 9.1, 9.2], [9, 9, 9, 9.1, 9.2])
     root = tmp_path / "dataset"
     manifest = _build(root, source)
@@ -139,9 +135,7 @@ def test_incremental_update_keeps_parent_and_records_overlap_revision(tmp_path):
     first = _build(root, initial, end="2026-01-19")
 
     refresh = tmp_path / "refresh"
-    refresh_dates = pd.DatetimeIndex(
-        ["2026-01-16", "2026-01-19", "2026-01-20", "2026-01-21"]
-    )
+    refresh_dates = pd.DatetimeIndex(["2026-01-16", "2026-01-19", "2026-01-20", "2026-01-21"])
     _source(refresh, refresh_dates, [10, 9, 9.1, 9.2], [9, 9, 9.1, 9.2])
     second = update_dataset(
         root,
@@ -222,9 +216,7 @@ def test_etf_action_normalizer_uses_source_announcement_and_per_ten_units():
             }
         ]
     )
-    result = normalize_etf_actions(
-        dividends, announcements, "510300", "2026-01-22T00:00:00Z"
-    )
+    result = normalize_etf_actions(dividends, announcements, "510300", "2026-01-22T00:00:00Z")
     assert result.iloc[0].cash_per_share == "0.123"
     assert result.iloc[0].announced_date == pd.Timestamp("2026-01-12")
     assert result.iloc[0].pay_date == pd.Timestamp("2026-01-27")

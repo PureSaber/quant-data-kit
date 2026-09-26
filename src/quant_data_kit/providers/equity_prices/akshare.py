@@ -126,13 +126,9 @@ def fetch_sina_etf(symbol: str, start: str, end: str, adjust: str) -> pd.DataFra
         if not required.issubset(dividends):
             raise ValueError("Sina ETF cumulative-dividend schema changed")
         dividends["date"] = pd.to_datetime(dividends["date"], errors="coerce").dt.normalize()
-        dividends["cumulative_cash"] = pd.to_numeric(
-            dividends["cumulative_cash"], errors="coerce"
-        )
+        dividends["cumulative_cash"] = pd.to_numeric(dividends["cumulative_cash"], errors="coerce")
         dividends = dividends.sort_values("date").reset_index(drop=True)
-        dividends["cash"] = dividends["cumulative_cash"].diff().fillna(
-            dividends["cumulative_cash"]
-        )
+        dividends["cash"] = dividends["cumulative_cash"].diff().fillna(dividends["cumulative_cash"])
         if dividends[["date", "cash"]].isna().any().any() or (dividends["cash"] < 0).any():
             raise ValueError("Sina ETF cumulative-dividend series is invalid")
         for event in dividends.itertuples():

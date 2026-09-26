@@ -180,9 +180,11 @@ def normalize_etf_actions(
         "报告ID" if "报告ID" in announcements else "公告ID" if "公告ID" in announcements else None
     )
     required_announcements = {"公告日期", "公告标题"}
-    if not required_dividends.issubset(dividends) or not required_announcements.issubset(
-        announcements
-    ) or announcement_id_column is None:
+    if (
+        not required_dividends.issubset(dividends)
+        or not required_announcements.issubset(announcements)
+        or announcement_id_column is None
+    ):
         raise ValueError("Eastmoney ETF dividend/announcement schema changed")
 
     published = announcements.copy()
@@ -261,9 +263,7 @@ def fetch_etf_corporate_actions(symbols: list[str], captured_at: str) -> pd.Data
     for symbol in symbols:
         code = normalize_symbol(symbol)
         dividends = fetch_with_retries(
-            lambda code=code: ak.fund_open_fund_info_em(
-                symbol=code, indicator="分红送配详情"
-            ),
+            lambda code=code: ak.fund_open_fund_info_em(symbol=code, indicator="分红送配详情"),
             max_retries=3,
             sleep_seconds=0.5,
             error_message=f"Eastmoney ETF dividend feed unavailable for {code}",
@@ -281,6 +281,8 @@ def fetch_etf_corporate_actions(symbols: list[str], captured_at: str) -> pd.Data
     frames = [frame for frame in frames if not frame.empty]
     if not frames:
         return pd.DataFrame(columns=_ETF_ACTION_COLUMNS)
-    return pd.concat(frames, ignore_index=True).sort_values(["symbol", "ex_date"]).reset_index(
-        drop=True
+    return (
+        pd.concat(frames, ignore_index=True)
+        .sort_values(["symbol", "ex_date"])
+        .reset_index(drop=True)
     )

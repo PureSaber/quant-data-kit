@@ -142,9 +142,7 @@ def test_sina_etf_qfq_is_derived_from_separate_real_cash_series(monkeypatch):
             "amount": [1000, 1000, 900],
         }
     )
-    dividends = pd.DataFrame(
-        {"日期": pd.DatetimeIndex(["2026-01-19"]), "累计分红": [1.0]}
-    )
+    dividends = pd.DataFrame({"日期": pd.DatetimeIndex(["2026-01-19"]), "累计分红": [1.0]})
     fake = SimpleNamespace(
         fund_etf_hist_sina=lambda **kwargs: history.copy(),
         fund_etf_dividend_sina=lambda **kwargs: dividends.copy(),
