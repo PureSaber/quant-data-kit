@@ -26,6 +26,7 @@ import pandas as pd
 
 from quant_data_kit._version import __version__
 from quant_data_kit.calendar import load_sse_trade_dates
+from quant_data_kit.instrument_master import load_instrument_master
 from quant_data_kit.providers._symbols import normalize_symbol
 from quant_data_kit.providers.benchmark import fetch_hs300_benchmark
 from quant_data_kit.providers.corporate_actions import fetch_etf_corporate_actions
@@ -542,7 +543,7 @@ def _instrument_catalog(
                 "catalog_schema_version": "qdk.etf-instrument-catalog/v1",
                 "catalog_source_version": source_version,
                 "symbol": symbol,
-                "asset_class": "equity",
+                "asset_class": "etf",
                 "product_type": "etf",
                 "venue": _venue(symbol),
                 "price_scale": 3,
@@ -711,6 +712,7 @@ def _publish(
     validation: dict[str, Any],
     parent_snapshot_id: str | None,
     update_evidence: dict[str, Any],
+    instrument_master_root: Path | None = None,
 ) -> dict[str, Any]:
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -718,14 +720,43 @@ def _publish(
     staging.mkdir()
     try:
         history = _history(frames["actions"], symbols, start, captured_at)
-        catalog_frame = _instrument_catalog(
-            symbols,
-            start=start,
-            end=end,
-            captured_at=captured_at,
-            raw=frames["raw"],
-            source=source,
-        )
+        master_manifest = None
+        if instrument_master_root is None:
+            catalog_frame = _instrument_catalog(
+                symbols,
+                start=start,
+                end=end,
+                captured_at=captured_at,
+                raw=frames["raw"],
+                source=source,
+            )
+        else:
+            master_manifest, catalog_frame = load_instrument_master(instrument_master_root)
+            if sorted(catalog_frame["symbol"].tolist()) != sorted(symbols):
+                raise ValueError("Historical instrument master must exactly match dataset symbols")
+            first_open = (
+                start.tz_localize("Asia/Shanghai") + pd.Timedelta(hours=9, minutes=25)
+            ).tz_convert("UTC")
+            last_close = (end.tz_localize("Asia/Shanghai") + pd.Timedelta(hours=15)).tz_convert(
+                "UTC"
+            )
+            effective_from = pd.to_datetime(catalog_frame["effective_from"], utc=True)
+            effective_to = pd.to_datetime(catalog_frame["effective_to"], utc=True)
+            available_at = pd.to_datetime(catalog_frame["available_at"], utc=True)
+            if not (
+                (effective_from <= first_open).all()
+                and (effective_to > last_close).all()
+                and (available_at <= first_open).all()
+            ):
+                raise ValueError("Historical instrument master does not causally cover the dataset")
+            validation = {
+                **validation,
+                "instrument_master": {
+                    "passed": True,
+                    "bundle_sha256": master_manifest["bundle_sha256"],
+                    "coverage": master_manifest.get("coverage", {}),
+                },
+            }
         frames = {**frames, "catalog": catalog_frame, "history": history}
         files = {}
         providers = {
@@ -738,7 +769,11 @@ def _publish(
                 if source["mode"] == "live_public_api"
                 else source["mode"]
             ),
-            "catalog": "qdk.etf-instrument-catalog/v1",
+            "catalog": (
+                "qdk.etf-instrument-catalog/v1"
+                if master_manifest is None
+                else "qdk.historical-instrument-master/v1"
+            ),
             "history": "derived_from_actions_captured_view",
         }
         for name, filename in FILE_NAMES.items():
@@ -792,6 +827,18 @@ def _publish(
                 "sha256": _sha256(history_source),
             },
         }
+        if instrument_master_root is not None:
+            master_destination = staging / "instrument_master"
+            shutil.copytree(instrument_master_root.resolve(), master_destination)
+            for path in sorted(master_destination.rglob("*")):
+                if path.is_file():
+                    relative = path.relative_to(staging).as_posix()
+                    evidence_files[
+                        f"instrument_master:{path.relative_to(master_destination).as_posix()}"
+                    ] = {
+                        "file": relative,
+                        "sha256": _sha256(path),
+                    }
         query = {
             "symbols": symbols,
             "start": start.date().isoformat(),
@@ -815,6 +862,11 @@ def _publish(
             "consumer_contract": {
                 "asm_decision_workflow_load_inputs": True,
                 "history_availability": "captured-current; no inferred intraday announcement time",
+                "instrument_master_availability": (
+                    "captured-current; strict historical replay remains blocked"
+                    if master_manifest is None
+                    else "official-document evidence with versioned rule intervals"
+                ),
             },
         }
         digest = hashlib.sha256(_canonical_bytes(manifest)).hexdigest()
@@ -984,6 +1036,9 @@ def update_dataset(
         )
     merged = _normalize_frames(merged, symbols=symbols, start=start_day, end=end_day)
     validation = validate_dataset_frames(merged, symbols=symbols, start=start_day, end=end_day)
+    master_root = None
+    if previous["files"]["catalog"].get("provider") == "qdk.historical-instrument-master/v1":
+        master_root = root.resolve() / "snapshots" / previous["snapshot_id"] / "instrument_master"
     return _publish(
         root,
         merged,
@@ -1001,6 +1056,7 @@ def update_dataset(
             "previous_end": old_end.date().isoformat(),
             "revised_rows": revised,
         },
+        instrument_master_root=master_root,
     )
 
 
@@ -1024,6 +1080,59 @@ def inspect_dataset(root: Path, snapshot_id: str | None = None) -> dict[str, Any
         "update_evidence": manifest["update_evidence"],
         "snapshot_path": str(Path(root).resolve() / "snapshots" / manifest["snapshot_id"]),
     }
+
+
+def bind_instrument_master(
+    root: Path,
+    instrument_master_root: Path,
+    *,
+    captured_at: str | None = None,
+) -> dict[str, Any]:
+    """Publish a child snapshot bound to verified historical master evidence.
+
+    Market data and actions are copied from the selected immutable parent.  The
+    operation never rewrites that parent and never manufactures daily status
+    rows from prices or an empty retrospective suspension query.
+    """
+    root = root.resolve()
+    previous, frames = load_research_snapshot(root)
+    capture_time = _captured_at(captured_at)
+    previous_capture = _captured_at(previous["captured_at"])
+    if capture_time < previous_capture:
+        raise ValueError("Instrument-master binding cannot predate the parent snapshot")
+    source = previous["source"]
+    source_frames = {
+        name: frames[name] for name in ("raw", "adjusted", "benchmark", "calendar", "actions")
+    }
+    validation = validate_dataset_frames(
+        source_frames,
+        symbols=list(previous["symbols"]),
+        start=_day(previous["requested_start"], "start"),
+        end=_day(previous["requested_end"], "end"),
+    )
+    master_manifest, _ = load_instrument_master(instrument_master_root)
+    validation["instrument_master"] = {
+        "passed": True,
+        "bundle_sha256": master_manifest["bundle_sha256"],
+        "coverage": master_manifest.get("coverage", {}),
+    }
+    return _publish(
+        root,
+        source_frames,
+        symbols=list(previous["symbols"]),
+        start=_day(previous["requested_start"], "start"),
+        end=_day(previous["requested_end"], "end"),
+        captured_at=capture_time,
+        source=source,
+        validation=validation,
+        parent_snapshot_id=previous["snapshot_id"],
+        update_evidence={
+            "operation": "bind_historical_instrument_master",
+            "market_data_refetched": False,
+            "instrument_master_bundle_sha256": master_manifest["bundle_sha256"],
+        },
+        instrument_master_root=instrument_master_root,
+    )
 
 
 def _source_arguments(parser: argparse.ArgumentParser) -> None:
@@ -1058,6 +1167,10 @@ def _parser() -> argparse.ArgumentParser:
     inspect = commands.add_parser("inspect")
     inspect.add_argument("--root", type=Path, required=True)
     inspect.add_argument("--snapshot-id")
+    bind = commands.add_parser("bind-master")
+    bind.add_argument("--root", type=Path, required=True)
+    bind.add_argument("--instrument-master", type=Path, required=True)
+    bind.add_argument("--captured-at")
     return parser
 
 
@@ -1087,6 +1200,13 @@ def main(argv: list[str] | None = None) -> int:
             source_uri=args.source_uri,
             source_version=args.source_version,
             license_note=args.license_note,
+        )
+        result = inspect_dataset(args.root, manifest["snapshot_id"])
+    elif args.command == "bind-master":
+        manifest = bind_instrument_master(
+            args.root,
+            args.instrument_master,
+            captured_at=args.captured_at,
         )
         result = inspect_dataset(args.root, manifest["snapshot_id"])
     else:

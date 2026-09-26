@@ -4,14 +4,17 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from quant_data_kit.instrument_master import import_instrument_master
 from quant_data_kit.providers.corporate_actions import normalize_etf_actions
 from quant_data_kit.research_coverage import load_history
 from quant_data_kit.research_dataset import (
+    bind_instrument_master,
     build_dataset,
     inspect_dataset,
     load_research_snapshot,
     update_dataset,
 )
+from tests.test_instrument_master import _source as _master_source
 
 
 def _prices(dates, closes, adjustment):
@@ -75,7 +78,15 @@ def _source(root: Path, dates, raw_closes, adjusted_closes, *, actions=True):
     pd.DataFrame(
         {
             "date": pd.DatetimeIndex(
-                ["2026-01-15", "2026-01-16", "2026-01-19", "2026-01-20", "2026-01-21", "2026-01-22"]
+                [
+                    "2026-01-15",
+                    "2026-01-16",
+                    "2026-01-19",
+                    "2026-01-20",
+                    "2026-01-21",
+                    "2026-01-22",
+                    "2026-01-23",
+                ]
             )
         }
     ).to_parquet(root / "calendar.parquet", index=False)
@@ -120,11 +131,52 @@ def test_local_build_is_immutable_asm_compatible_and_records_deferred_cash(tmp_p
     assert len(frames["history"]) == 4
     assert frames["history"]["available_at"].nunique() == 1
     assert frames["catalog"].loc[0, "product_type"] == "etf"
+    assert frames["catalog"].loc[0, "asset_class"] == "etf"
     assert frames["catalog"].loc[0, "price_tick"] == pytest.approx(0.001)
     history_manifest, compatible_history = load_history(snapshot / "history")
     assert history_manifest["schema_version"] == "qdk.research-history/v1"
     assert len(compatible_history) == 4
     assert inspect_dataset(root)["validation"]["passed"]
+
+
+def test_bind_historical_master_publishes_child_without_refetch(tmp_path):
+    source = tmp_path / "source"
+    dates = pd.DatetimeIndex(["2026-01-15", "2026-01-16", "2026-01-19", "2026-01-20", "2026-01-21"])
+    _source(source, dates, [10, 10, 9, 9.1, 9.2], [9, 9, 9, 9.1, 9.2])
+    root = tmp_path / "dataset"
+    parent = _build(root, source)
+    master = tmp_path / "master"
+    import_instrument_master(_master_source(tmp_path / "master-source"), master)
+
+    child = bind_instrument_master(
+        root,
+        master,
+        captured_at="2026-09-26T00:00:00Z",
+    )
+    assert child["parent_snapshot_id"] == parent["snapshot_id"]
+    assert child["update_evidence"]["market_data_refetched"] is False
+    assert child["files"]["catalog"]["provider"] == "qdk.historical-instrument-master/v1"
+    assert child["consumer_contract"]["instrument_master_availability"].startswith("official")
+    _, frames = load_research_snapshot(root, child["snapshot_id"])
+    assert frames["catalog"].loc[0, "available_at"] == "2023-02-17T08:00:00Z"
+
+    refresh = tmp_path / "refresh"
+    refresh_dates = pd.DatetimeIndex(
+        ["2026-01-15", "2026-01-16", "2026-01-19", "2026-01-20", "2026-01-21", "2026-01-22"]
+    )
+    _source(refresh, refresh_dates, [10, 10, 9, 9.1, 9.2, 9.3], [9, 9, 9, 9.1, 9.2, 9.3])
+    updated = update_dataset(
+        root,
+        end="2026-01-22",
+        captured_at="2026-09-27T00:00:00Z",
+        source_dir=refresh,
+        source_uri="file://declared-refresh",
+        source_version="vendor-export-8",
+        license_note="test fixture declaration",
+    )
+    assert updated["parent_snapshot_id"] == child["snapshot_id"]
+    assert updated["files"]["catalog"]["provider"] == "qdk.historical-instrument-master/v1"
+    assert updated["validation"]["instrument_master"]["passed"] is True
 
 
 def test_incremental_update_keeps_parent_and_records_overlap_revision(tmp_path):
