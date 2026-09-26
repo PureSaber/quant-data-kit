@@ -23,6 +23,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+us-research = ["exchange-calendars>=4.5,<5", "yfinance>=0.2.65,<1", "requests>=2.32,<3"]
 akshare = ["akshare>=1.12"]
 baostock = ["baostock>=0.8.9"]
 tushare = ["tushare>=1.4.24"]
@@ -35,7 +36,7 @@ all-equity-providers = [
     "yfinance>=0.2.65",
     "requests>=2.32,<3",
 ]
-dev = ["coverage>=7.6", "psutil>=6.0,<8.0", "pytest>=7.4", "ruff>=0.9.0"]
+dev = ["coverage>=7.6", "psutil>=6.0,<8.0", "pytest>=7.4", "ruff>=0.9.0", "exchange-calendars>=4.5,<5"]
 
 [project.scripts]
 qdk-validate = "quant_data_kit.cli:main_validate"
