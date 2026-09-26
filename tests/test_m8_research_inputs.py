@@ -1150,7 +1150,9 @@ def test_partition_row_binding_and_source_order_fail_closed(tmp_path: Path) -> N
         / source.snapshot_id
         / source.partitions[0].relative_path
     )
-    normalized_table = pq.read_table(normalized_path)
+    # Read this one physical file without Hive partition-column inference; the
+    # test mutates file rows and then exercises the product partition binding.
+    normalized_table = pq.ParquetFile(normalized_path).read()
     reversed_table = normalized_table.take(pa.array([1, 0]))
     with pytest.raises(ValidationError, match="strictly ordered"):
         research_inputs._validate_normalized_partition_table(source.partitions[0], reversed_table)
@@ -1180,7 +1182,7 @@ def test_partition_row_binding_and_source_order_fail_closed(tmp_path: Path) -> N
         / curated.snapshot_id
         / curated.partitions[0].relative_path
     )
-    curated_table = pq.read_table(curated_path)
+    curated_table = pq.ParquetFile(curated_path).read()
     wrong_curated_rows = curated_table.to_pylist()
     wrong_curated_rows[0] = dict(wrong_curated_rows[0], trading_day=date(2026, 1, 6))
     wrong_curated = pa.Table.from_pylist(wrong_curated_rows, schema=curated_table.schema)
@@ -1200,7 +1202,9 @@ def test_partition_binding_helpers_cover_all_metadata_and_order_guards(tmp_path:
     )
     partition = source.partitions[0]
     path = tmp_path / "normalized" / "snapshots" / source.snapshot_id / partition.relative_path
-    table = pq.read_table(path)
+    # This is a single-file tamper fixture, not a dataset scan. Product loaders
+    # still perform their normal partition metadata and row-binding checks.
+    table = pq.ParquetFile(path).read()
     with pytest.raises(ValidationError, match="row count"):
         research_inputs._validate_normalized_partition_table(
             replace(partition, rows=partition.rows + 1), table
@@ -1240,7 +1244,7 @@ def test_partition_binding_helpers_cover_all_metadata_and_order_guards(tmp_path:
         / event.snapshot_id
         / event_partition.relative_path
     )
-    event_table = pq.read_table(event_path)
+    event_table = pq.ParquetFile(event_path).read()
     with pytest.raises(ValidationError, match="row count"):
         curated_module._validate_curated_partition_table(
             replace(event_partition, rows=event_partition.rows + 1),

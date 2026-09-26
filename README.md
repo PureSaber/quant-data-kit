@@ -62,6 +62,7 @@ move or rebuild a release tag to repair a dependency resolution.
 | `panel` | PIT merge helpers for alt-data |
 | `providers.prices` | Canonical daily OHLCV with explicit optional provider selection |
 | `research_inputs` | Single-primary immutable input bundles with separate shadow comparisons |
+| `research_dataset` | Incremental real ETF inputs, dividend/adjustment checks and immutable ASM-compatible snapshots |
 | `providers.fundamentals` | Valuation metrics (PE/PB/market cap) |
 | `providers.universe` | HS300 constituents + membership history |
 | `providers.benchmark` | HS300 index returns |
@@ -153,7 +154,17 @@ qdk-manifest data/prices.manifest.json
 qdk-catalog list
 qdk-catalog register hs300_prices data/prices.parquet
 qdk-capture capture.json --mode preflight
+python -m quant_data_kit.research_dataset build --help
 ```
+
+The ETF research dataset workflow keeps a small mutable catalog whose entries
+point to content-addressed immutable snapshots. Each snapshot contains the
+`raw.parquet`, `adjusted.parquet`, `benchmark.parquet`, `calendar.parquet`,
+`actions.parquet` and `manifest.json` contract consumed by
+`a_share_multifactor.decision_workflow.load_inputs`, plus a versioned
+`catalog.csv` and a captured-current `history/` bundle accepted by
+`research_coverage.load_history`. See
+[real ETF research datasets](docs/RESEARCH_DATASETS.md).
 
 ## Python API
 

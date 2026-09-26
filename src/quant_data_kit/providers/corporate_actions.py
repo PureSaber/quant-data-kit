@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from decimal import Decimal
 
 import pandas as pd
@@ -141,3 +142,147 @@ def fetch_corporate_actions(symbols: list[str], captured_at: str) -> pd.DataFram
         for symbol in symbols
     ]
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+_ETF_ACTION_COLUMNS = [
+    "event_id",
+    "symbol",
+    "announced_date",
+    "record_date",
+    "ex_date",
+    "pay_date",
+    "shares_available_date",
+    "cash_per_share",
+    "share_ratio",
+    "source",
+    "captured_at",
+    "source_record",
+]
+
+
+def normalize_etf_actions(
+    dividends: pd.DataFrame,
+    announcements: pd.DataFrame,
+    symbol: str,
+    captured_at: str,
+) -> pd.DataFrame:
+    """Join ETF entitlement dates to their real dividend announcements.
+
+    Eastmoney exposes cash, record, ex and payment dates on the fund F10 page,
+    while its announcement endpoint supplies the publication date and source
+    document id. A row is admitted only when both source records can be joined;
+    the missing announcement is never inferred from an entitlement date.
+    """
+    if dividends.empty:
+        return pd.DataFrame(columns=_ETF_ACTION_COLUMNS)
+    required_dividends = {"权益登记日", "除息日", "每10份分红", "分红发放日"}
+    announcement_id_column = (
+        "报告ID" if "报告ID" in announcements else "公告ID" if "公告ID" in announcements else None
+    )
+    required_announcements = {"公告日期", "公告标题"}
+    if (
+        not required_dividends.issubset(dividends)
+        or not required_announcements.issubset(announcements)
+        or announcement_id_column is None
+    ):
+        raise ValueError("Eastmoney ETF dividend/announcement schema changed")
+
+    published = announcements.copy()
+    published["公告日期"] = pd.to_datetime(published["公告日期"], errors="coerce").dt.normalize()
+    if published[["公告日期", "公告标题", announcement_id_column]].isna().any().any():
+        raise ValueError("ETF dividend announcement contains unknown source fields")
+    published = published.sort_values(["公告日期", announcement_id_column]).reset_index(drop=True)
+    used_announcements: set[str] = set()
+    rows = []
+    for source in dividends.to_dict("records"):
+        record_date = pd.to_datetime(source["权益登记日"], errors="coerce").normalize()
+        ex_date = pd.to_datetime(source["除息日"], errors="coerce").normalize()
+        pay_date = pd.to_datetime(source["分红发放日"], errors="coerce").normalize()
+        if any(pd.isna(value) for value in (record_date, ex_date, pay_date)):
+            raise ValueError("ETF dividend contains an unknown entitlement/payment date")
+        description = str(source["每10份分红"])
+        matched_amount = re.search(r"每\s*10\s*份.*?([0-9]+(?:\.[0-9]+)?)\s*元", description)
+        if matched_amount is None:
+            raise ValueError(f"Unsupported ETF dividend description: {description}")
+        cash = Decimal(matched_amount.group(1)) / Decimal(10)
+        if not cash.is_finite() or cash <= 0:
+            raise ValueError("ETF cash dividend must be positive and finite")
+
+        candidates = published[
+            (published["公告日期"] < ex_date)
+            & ~published[announcement_id_column].astype(str).isin(used_announcements)
+        ]
+        if candidates.empty:
+            raise ValueError(
+                f"ETF dividend {normalize_symbol(symbol)} {ex_date.date()} lacks a prior announcement"
+            )
+        announcement = candidates.iloc[-1]
+        announcement_id = str(announcement[announcement_id_column])
+        used_announcements.add(announcement_id)
+        source_payload = {
+            "dividend": {
+                key: None if pd.isna(value) else str(value) for key, value in source.items()
+            },
+            "announcement": {
+                "date": announcement["公告日期"].date().isoformat(),
+                "title": str(announcement["公告标题"]),
+                "id": announcement_id,
+            },
+        }
+        source_record = json.dumps(source_payload, ensure_ascii=False, sort_keys=True)
+        code = normalize_symbol(symbol)
+        rows.append(
+            {
+                "event_id": "eastmoney-etf:"
+                + hashlib.sha256((code + source_record).encode()).hexdigest()[:24],
+                "symbol": code,
+                "announced_date": announcement["公告日期"],
+                "record_date": record_date,
+                "ex_date": ex_date,
+                "pay_date": pay_date,
+                "shares_available_date": pd.NaT,
+                "cash_per_share": str(cash.normalize()),
+                "share_ratio": "1",
+                "source": "akshare:eastmoney:fund-f10",
+                "captured_at": captured_at,
+                "source_record": source_record,
+            }
+        )
+    result = pd.DataFrame(rows, columns=_ETF_ACTION_COLUMNS)
+    if result.duplicated(["symbol", "ex_date"]).any() or result.duplicated("event_id").any():
+        raise ValueError("Duplicate/conflicting ETF corporate actions")
+    return result.sort_values(["symbol", "ex_date"]).reset_index(drop=True)
+
+
+def fetch_etf_corporate_actions(symbols: list[str], captured_at: str) -> pd.DataFrame:
+    """Fetch evidenced ETF cash dividends from two Eastmoney fund endpoints."""
+    import akshare as ak
+
+    configure_network()
+    frames = []
+    for symbol in symbols:
+        code = normalize_symbol(symbol)
+        dividends = fetch_with_retries(
+            lambda code=code: ak.fund_open_fund_info_em(symbol=code, indicator="分红送配详情"),
+            max_retries=3,
+            sleep_seconds=0.5,
+            error_message=f"Eastmoney ETF dividend feed unavailable for {code}",
+        )
+        if dividends.empty:
+            frames.append(pd.DataFrame(columns=_ETF_ACTION_COLUMNS))
+            continue
+        announcements = fetch_with_retries(
+            lambda code=code: ak.fund_announcement_dividend_em(symbol=code),
+            max_retries=3,
+            sleep_seconds=0.5,
+            error_message=f"Eastmoney ETF announcement feed unavailable for {code}",
+        )
+        frames.append(normalize_etf_actions(dividends, announcements, code, captured_at))
+    frames = [frame for frame in frames if not frame.empty]
+    if not frames:
+        return pd.DataFrame(columns=_ETF_ACTION_COLUMNS)
+    return (
+        pd.concat(frames, ignore_index=True)
+        .sort_values(["symbol", "ex_date"])
+        .reset_index(drop=True)
+    )
