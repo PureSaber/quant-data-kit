@@ -14,6 +14,7 @@ The Python API is available directly from the module:
 
 ```python
 from quant_data_kit.research_dataset import (
+    bind_instrument_master,
     build_dataset,
     inspect_dataset,
     load_research_snapshot,
@@ -56,11 +57,43 @@ hash-bound `source.json` and Parquet history, so
 `quant_data_kit.research_coverage.load_history(snapshot / "history")` works
 without adapting a loose file.
 
-The catalog's `available_at` is the real snapshot capture time. QDK does not
-backdate instrument-master availability to the research start. Until a separate
-historical exchange/security-master source proves earlier publication, a strict
-historical replay must remain blocked; a structurally loadable catalog is not
-evidence that the rules were known at each historical decision time.
+The default catalog's `available_at` is the real snapshot capture time. QDK
+does not backdate instrument-master availability to the research start. A
+structurally loadable catalog is not evidence that the rules were known at each
+historical decision time.
+
+## Bind a historical instrument master
+
+`quant_data_kit.instrument_master` imports an explicit source declaration,
+catalog and official documents into one immutable bundle. Import rejects a
+changed source hash, an unknown evidence ID, a rule published after its claimed
+effective time, a coverage gap and catalog availability before its initial
+evidence. Every source needs an HTTPS identity, publication time, effective
+interval and exact SHA-256.
+
+```powershell
+python -m quant_data_kit.instrument_master import `
+  --source ..\artifacts\pit-sources\source `
+  --output ..\artifacts\pit-sources\bundle
+
+python -m quant_data_kit.research_dataset bind-master `
+  --root ..\artifacts\etf-research `
+  --instrument-master ..\artifacts\pit-sources\bundle
+```
+
+Binding publishes a child snapshot. It copies already verified market data and
+actions without a provider request, replaces the current-capture catalog with
+the evidence-bound catalog, and retains the complete master bundle below
+`instrument_master/`. A later incremental update automatically carries that
+bundle forward and rechecks its symbol set, validity interval and availability.
+
+The bundle proves only its declared fields and intervals. A retrospective
+listing document becomes usable at the document publication time; it is not
+backdated to the listing day. An empty present-day suspension query is not
+expanded into daily `tradable=true`, and volume does not prove all-day
+tradability. If the source declares a fixed retrospective pool, missing daily
+status or missing dynamic-universe history, consumers must preserve those
+limits rather than label the result a complete dynamic PIT backtest.
 
 Every live manifest records the AKShare package version, QDK version, endpoint
 names, normalized request and capture time. Every Parquet file has an exact
