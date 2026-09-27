@@ -1,5 +1,7 @@
 # quant-data-kit
 
+研究可信度升级：接口、使用示例、验收及限制见 [11–20 使用说明](docs/SELECTION_LABELS.md)。
+
 Hong Kong daily research uses the explicit `quant_data_kit.hong_kong` module
 (`pip install -e '.[hong-kong]'`). It preserves five-digit HK codes, HKD/share
 units, raw source responses and XHKG session times. Providers are selected
