@@ -1,0 +1,18 @@
+{
+  "schema": "puresaber.financial-foundations/1",
+  "operation": "units",
+  "records": [
+    {
+      "volume": 12,
+      "amount": 36,
+      "free_float_shares": 1000000
+    }
+  ],
+  "options": {
+    "volume_unit": "lots",
+    "lot_size": 100,
+    "amount_unit": "thousand_currency",
+    "currency": "CNY",
+    "share_basis": "raw"
+  }
+}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import re
 import time
@@ -153,6 +154,8 @@ def fact_table(
                     "form": filing.form,
                     "accepted_at": filing.accepted_at,
                     "available_at": filing.available_at,
+                    "fiscal_year": fact.get("fy"),
+                    "fiscal_period": fact.get("fp"),
                 }
             )
     columns = [
@@ -166,6 +169,8 @@ def fact_table(
         "form",
         "accepted_at",
         "available_at",
+        "fiscal_year",
+        "fiscal_period",
     ]
     result = pd.DataFrame(rows, columns=columns).drop_duplicates()
     keys = ["instrument_id", "concept", "unit", "period_start", "period_end", "accession"]
@@ -180,9 +185,25 @@ def fact_table(
 
 def facts_asof(facts: pd.DataFrame, at) -> pd.DataFrame:
     facts = facts.copy()
-    facts["available_at"] = facts.available_at.map(lambda value: utc(value, "fact available_at"))
+    facts["value"] = pd.to_numeric(facts.value, errors="raise")
+    if not np.isfinite(facts.value).all():
+        raise ValueError("nonfinite SEC fact")
+    facts["period_start"] = pd.to_datetime(facts.period_start)
+    facts["period_end"] = pd.to_datetime(facts.period_end)
+    facts["available_at"] = pd.to_datetime(
+        facts.available_at.map(lambda value: utc(value, "fact available_at")), utc=True
+    )
+    if "accepted_at" in facts:
+        accepted = facts.accepted_at.map(lambda value: utc(value, "SEC accepted_at"))
+        if (facts.available_at < accepted).any():
+            raise ValueError("SEC fact cannot be known before acceptance")
+    if (facts.period_end > facts.available_at.dt.tz_localize(None)).any():
+        raise ValueError("SEC fact period cannot be in the future")
     visible = facts.loc[facts.available_at <= utc(at)].copy()
     keys = ["instrument_id", "concept", "unit", "period_start", "period_end"]
+    versions = visible.groupby([*keys, "available_at"], dropna=False).value.nunique()
+    if versions.gt(1).any():
+        raise ValueError("ambiguous same-time SEC facts")
     return visible.sort_values(["available_at", "accession"]).drop_duplicates(keys, keep="last")
 
 
@@ -233,6 +254,168 @@ def annual_quality(facts: pd.DataFrame, at, *, max_age_days: int = 550) -> pd.Da
             "period_end",
             "roa_annual",
             "accruals_annual",
+            "available_at",
+            "accessions",
+        ],
+    )
+
+
+def quarterly_facts(facts: pd.DataFrame, at) -> pd.DataFrame:
+    """Independent fiscal quarters, not calendar quarters or blindly divided YTD.
+
+    53-week fiscal years are accepted through duration/contiguity checks. Fiscal
+    year labels in companyfacts describe the FILING, so period boundaries govern
+    derivation. Direct disclosed quarters take precedence over differences.
+    Cross-accession differences remain flagged: restated YTD and old quarters
+    are not automatically certified as comparable.
+    """
+    visible = facts_asof(facts, at).copy()
+    visible["period_start"] = pd.to_datetime(visible.period_start)
+    visible["period_end"] = pd.to_datetime(visible.period_end)
+    rows = []
+    for _, group in visible.groupby(["instrument_id", "concept", "unit"]):
+        group = group.loc[group.period_start.notna()].sort_values("period_end")
+        direct = {}
+        for row in group.to_dict("records"):
+            days = (row["period_end"] - row["period_start"]).days + 1
+            if 60 <= days <= 110:
+                key = (row["period_start"], row["period_end"])
+                direct[key] = dict(
+                    row,
+                    method="reported_quarter",
+                    accessions=row["accession"],
+                    vintage_consistent=True,
+                )
+        derived = {}
+        for row in group.to_dict("records"):
+            duration = (row["period_end"] - row["period_start"]).days + 1
+            if not 150 <= duration <= 380:
+                continue
+            prior = group.loc[
+                (group.period_start == row["period_start"]) & (group.period_end < row["period_end"])
+            ]
+            if prior.empty:
+                continue
+            previous = prior.iloc[-1]
+            start = previous.period_end + pd.Timedelta(days=1)
+            days = (row["period_end"] - start).days + 1
+            if not 60 <= days <= 110:
+                continue
+            key = (start, row["period_end"])
+            if key in direct:
+                continue
+            candidate = dict(
+                row,
+                period_start=start,
+                value=row["value"] - previous.value,
+                method="cumulative_difference",
+                available_at=max(row["available_at"], previous.available_at),
+                accessions="|".join(sorted({row["accession"], previous.accession})),
+                vintage_consistent=row["accession"] == previous.accession,
+            )
+            if key in derived and derived[key]["value"] != candidate["value"]:
+                raise ValueError("conflicting cumulative derivations; reconcile SEC facts")
+            derived[key] = candidate
+        rows.extend([*direct.values(), *derived.values()])
+    columns = [*facts.columns, "method", "accessions", "vintage_consistent"]
+    return pd.DataFrame(rows, columns=columns).sort_values(
+        ["instrument_id", "concept", "unit", "period_end"]
+    )
+
+
+def ttm_facts(facts: pd.DataFrame, at, *, allow_mixed_vintages=False, max_age_days=200):
+    """Four contiguous independent quarters, with unit and vintage lineage intact."""
+    if type(allow_mixed_vintages) is not bool or type(max_age_days) is not int or max_age_days < 0:
+        raise ValueError("explicit vintage policy and nonnegative max_age_days required")
+    quarters = quarterly_facts(facts, at)
+    result = []
+    for key, rows in quarters.groupby(["instrument_id", "concept", "unit"]):
+        last = rows.sort_values("period_end").tail(4)
+        if len(last) != 4 or (not allow_mixed_vintages and not last.vintage_consistent.all()):
+            continue
+        records = last.to_dict("records")
+        if any(
+            b["period_start"] != a["period_end"] + pd.Timedelta(days=1)
+            for a, b in itertools.pairwise(records)
+        ):
+            continue
+        span = (records[-1]["period_end"] - records[0]["period_start"]).days + 1
+        if not 330 <= span <= 380:
+            continue
+        if (utc(at).tz_localize(None) - records[-1]["period_end"]).days > max_age_days:
+            continue
+        result.append(
+            {
+                "instrument_id": key[0],
+                "concept": key[1],
+                "unit": key[2],
+                "period_start": records[0]["period_start"],
+                "period_end": records[-1]["period_end"],
+                "value": sum(last.value),
+                "available_at": max(last.available_at),
+                "accessions": "|".join(sorted(set("|".join(last.accessions).split("|")))),
+                "vintage_consistent": bool(last.vintage_consistent.all()),
+            }
+        )
+    return pd.DataFrame(
+        result,
+        columns=[
+            "instrument_id",
+            "concept",
+            "unit",
+            "period_start",
+            "period_end",
+            "value",
+            "available_at",
+            "accessions",
+            "vintage_consistent",
+        ],
+    )
+
+
+def ttm_quality(facts, at, *, allow_mixed_vintages=False):
+    flows = ttm_facts(facts, at, allow_mixed_vintages=allow_mixed_vintages)
+    visible = facts_asof(facts, at)
+    result = []
+    for instrument, rows in flows.groupby("instrument_id"):
+        income = rows.loc[rows.concept.eq("NetIncomeLoss") & rows.unit.eq("USD")]
+        cash = rows.loc[
+            rows.concept.eq("NetCashProvidedByUsedInOperatingActivities") & rows.unit.eq("USD")
+        ]
+        if len(income) != 1 or len(cash) != 1:
+            continue
+        i, c = income.iloc[0], cash.iloc[0]
+        if i.period_start != c.period_start or i.period_end != c.period_end:
+            continue
+        assets = visible.loc[
+            visible.instrument_id.eq(instrument)
+            & visible.concept.eq("Assets")
+            & visible.unit.eq("USD")
+            & visible.period_start.isna()
+            & pd.to_datetime(visible.period_end).eq(i.period_end)
+        ]
+        if len(assets) != 1 or assets.iloc[0].value <= 0:
+            continue
+        a = assets.iloc[0]
+        result.append(
+            {
+                "instrument_id": instrument,
+                "period_end": i.period_end,
+                "roa_ttm": i.value / a.value,
+                "accruals_ttm": (i.value - c.value) / a.value,
+                "available_at": max(i.available_at, c.available_at, a.available_at),
+                "accessions": "|".join(
+                    sorted(set((i.accessions + "|" + c.accessions + "|" + a.accession).split("|")))
+                ),
+            }
+        )
+    return pd.DataFrame(
+        result,
+        columns=[
+            "instrument_id",
+            "period_end",
+            "roa_ttm",
+            "accruals_ttm",
             "available_at",
             "accessions",
         ],
