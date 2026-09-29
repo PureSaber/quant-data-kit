@@ -1,5 +1,11 @@
 # quant-data-kit
 
+On Windows, deep lake partitions can exceed `MAX_PATH`. If system long paths are
+disabled, supply an absolute extended-length lake root (for example
+`Path("//?/F:/lake")`). The pytest temporary-directory fixture uses this form
+automatically, including in Windows CI; no registry settings are changed.
+Archive file URIs preserve extended-length and UNC roots and literal percent escapes.
+
 研究可信度升级：接口、使用示例、验收及限制见 [11–20 使用说明](docs/SELECTION_LABELS.md)。
 
 Hong Kong daily research uses the explicit `quant_data_kit.hong_kong` module

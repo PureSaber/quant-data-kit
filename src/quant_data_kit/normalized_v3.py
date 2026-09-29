@@ -9,7 +9,7 @@ import os
 import shutil
 import uuid
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 from functools import cache, lru_cache
@@ -526,19 +526,31 @@ def _streaming_stage(root: Path) -> Iterator[Path]:
                     owner.unlink()
             except TimeoutError:
                 continue
-    operation = uuid.uuid4().hex
-    stage = staging_root / f"normalized-batch-stream-{operation}"
-    owner = owners_root / f"{stage.name}.lock"
-    with process_file_lock(owner):
-        stage.mkdir(exist_ok=False)
+        operation = uuid.uuid4().hex
+        stage = staging_root / f"normalized-batch-stream-{operation}"
+        owner = owners_root / f"{stage.name}.lock"
+        ownership = ExitStack()
+        ownership.enter_context(process_file_lock(owner))
         try:
-            yield stage
-        finally:
-            if stage.exists():
-                shutil.rmtree(stage)
-    with process_file_lock(gc_lock):
-        if owner.exists():
+            stage.mkdir(exist_ok=False)
+        except BaseException:
+            ownership.close()
             owner.unlink()
+            raise
+    try:
+        yield stage
+    finally:
+        # Creation and retirement must be atomic with respect to the collector.
+        # Otherwise it can see an owner with no stage, open its lock file, and
+        # race unlink (WinError 32) or split lock identity on POSIX.
+        with process_file_lock(gc_lock):
+            try:
+                if stage.exists():
+                    shutil.rmtree(stage)
+            finally:
+                ownership.close()
+            if owner.exists():
+                owner.unlink()
 
 
 def _sql_text(value: str | Path) -> str:

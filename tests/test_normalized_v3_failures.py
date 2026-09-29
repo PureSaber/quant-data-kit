@@ -174,6 +174,7 @@ def test_streaming_stage_serializes_owner_file_cleanup(
     root = lake_module._resolved_lake_root(tmp_path / "lake", create=True)
     real_lock = normalized_v3.process_file_lock
     real_unlink = Path.unlink
+    real_mkdir = Path.mkdir
     held_locks: set[Path] = set()
 
     @contextmanager
@@ -189,14 +190,28 @@ def test_streaming_stage_serializes_owner_file_cleanup(
     def guarded_unlink(path: Path, *args: object, **kwargs: object) -> None:
         if path.parent.name == ".stage-owners" and path.name.startswith("normalized-batch-stream-"):
             assert any(item.name == ".gc.lock" for item in held_locks)
+            assert path not in held_locks
         real_unlink(path, *args, **kwargs)
+
+    def guarded_mkdir(path: Path, *args: object, **kwargs: object) -> None:
+        if path.name.startswith("normalized-batch-stream-"):
+            assert any(item.name == ".gc.lock" for item in held_locks)
+        real_mkdir(path, *args, **kwargs)
 
     monkeypatch.setattr(normalized_v3, "process_file_lock", tracked_lock)
     monkeypatch.setattr(Path, "unlink", guarded_unlink)
+    monkeypatch.setattr(Path, "mkdir", guarded_mkdir)
     with normalized_v3._streaming_stage(root) as stage:
         assert stage.is_dir()
     owners_root = root / "normalized" / ".stage-owners"
     assert sorted(item.name for item in owners_root.iterdir()) == [".gc.lock"]
+    with (
+        pytest.raises(RuntimeError, match="producer failed"),
+        normalized_v3._streaming_stage(root),
+    ):
+        raise RuntimeError("producer failed")
+    assert sorted(item.name for item in owners_root.iterdir()) == [".gc.lock"]
+    assert not list((root / "normalized" / "staging").iterdir())
 
 
 def _rewrite_index_manifest(

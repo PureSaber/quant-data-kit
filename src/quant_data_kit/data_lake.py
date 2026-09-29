@@ -1085,7 +1085,13 @@ def _local_archive_path(archive_uri: str) -> Path:
         path = direct_path
     elif archive_uri.lower().startswith("file:"):
         parsed = urlparse(archive_uri)
-        raw_path = url2pathname(unquote(parsed.path))
+        authority = unquote(parsed.netloc)
+        uri_path = parsed.path
+        if authority and authority.lower() != "localhost":
+            uri_path = "//" + authority + uri_path
+        # url2pathname already percent-decodes. A second decode would turn a
+        # literal %xx filename into a different path and discard UNC/device roots.
+        raw_path = url2pathname(uri_path)
         if os.name == "nt" and re.match(r"^/[A-Za-z]:", raw_path):
             raw_path = raw_path[1:]
         path = Path(raw_path)
