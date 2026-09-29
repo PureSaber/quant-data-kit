@@ -517,6 +517,9 @@ def test_raw_path_staging_and_archive_negative_guards(
     archive = tmp_path.parent / f"{tmp_path.name}-archive.bin"
     archive.write_bytes(b"archive")
     assert lake_module._local_archive_path(archive.as_uri()) == archive.resolve()
+    escaped = tmp_path.parent / f"{tmp_path.name}-literal%20archive.bin"
+    escaped.write_bytes(b"archive with a literal percent escape")
+    assert lake_module._local_archive_path(escaped.as_uri()) == escaped.resolve()
     with pytest.raises(ValidationError, match="non-empty"):
         lake_module._local_archive_path(" ")
     with pytest.raises(ValidationError, match="Remote archive cleanup"):
