@@ -2,7 +2,7 @@
 
 On Windows, deep lake partitions can exceed `MAX_PATH`. If system long paths are
 disabled, supply an absolute extended-length lake root (for example
-`Path(r"\\\\?\\F:\\lake")`). The pytest temporary-directory fixture uses this form
+`Path("//?/F:/lake")`). The pytest temporary-directory fixture uses this form
 automatically, including in Windows CI; no registry settings are changed.
 Archive file URIs preserve extended-length and UNC roots and literal percent escapes.
 
