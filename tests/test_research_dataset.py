@@ -434,12 +434,14 @@ def test_action_refresh_preserves_pipeline_prefix_but_revisions_do_not(tmp_path,
             "history": str(snapshot / "history"),
         }
 
-    frozen = paper.input_prefix(inputs(initial), "2026-09-26")
+    # The master was verified at midnight, before the September 26 close.
+    cutoff = "2026-09-25"
+    frozen = paper.input_prefix(inputs(initial), cutoff)
     response["actions"]["captured_at"] = "2026-09-27T00:00:00Z"
     refreshed = update_dataset(root, end="2026-01-20", captured_at="2026-09-27T00:00:00Z")
     assert paper.input_lineage(inputs(refreshed)) == paper.input_lineage(inputs(initial))
-    assert paper.input_prefix(inputs(refreshed), "2026-09-26") == frozen
+    assert paper.input_prefix(inputs(refreshed), cutoff) == frozen
     response["actions"]["captured_at"] = "2026-09-28T00:00:00Z"
     response["actions"]["source_record"] = '{"document":"corrected"}'
     revised = update_dataset(root, end="2026-01-20", captured_at="2026-09-28T00:00:00Z")
-    assert paper.input_prefix(inputs(revised), "2026-09-26") != frozen
+    assert paper.input_prefix(inputs(revised), cutoff) != frozen
