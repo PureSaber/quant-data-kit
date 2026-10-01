@@ -146,7 +146,30 @@ adjustment change had no matching ETF cash record. The dataset does not rewrite
 a delayed payment to the ex-date. A downstream simulator that cannot represent
 dividend receivables should continue to fail until it implements that ledger.
 
-`history.parquet` uses the snapshot capture time as `available_at`. The source
-announcement only provides a calendar date, so the dataset does not invent an
-intraday historical availability timestamp. It is a captured-current history,
-not a historical-vintage PIT feed.
+Corporate-action `captured_at` is the first observed time of that complete row
+version within a verified snapshot lineage. Refresh compares every other field,
+including the event ID, entitlement dates, amounts, provider and source record.
+Only an identical version inherits its parent's receipt time. A changed version
+keeps its new receipt; an action removed from a complete live response is removed
+from the current view. Local bounded updates retain records outside their fragment.
+`update_evidence.action_changes` separates additions, removals, revisions and
+unchanged records; checking event IDs alone does not establish unchanged content.
+
+Each build or refresh seals the incoming normalized rows, their actual receipt
+times and the source declaration in `action-observations.json`. Its SHA-256 is
+bound by `evidence_files` and verified on load, separately from the first-observed
+action view. Snapshot captures cannot move backwards; missing, naive, future or
+regressed record receipts are rejected. Old snapshots are never rewritten.
+
+`history.parquet` uses each action version's first receipt as `available_at`.
+Unchanged classification declarations retain their first observation as well.
+The source announcement only provides a calendar date, so the dataset does not
+invent an intraday historical availability timestamp. This remains a captured
+history, not evidence of vintages before the first actual observation. The default
+instrument catalog still requires a verified historical master for forward use.
+
+This contract changes the executing code identity. Frozen forward accounts cannot
+be silently migrated or have their hashes replaced. Preserve their original code,
+inputs and failure receipts; validate and preregister any replacement account with
+a new code identity and a future start. Downstream full-row prefix checks remain
+unchanged and still reject real historical revisions.
