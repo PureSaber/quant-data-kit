@@ -417,3 +417,29 @@ def test_snapshot_capture_cannot_move_backwards(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="capture cannot move backwards"):
         update_dataset(root, end="2026-01-20", captured_at="2026-01-21T00:00:00Z")
     assert load_research_snapshot(root)[0]["snapshot_id"] == parent["snapshot_id"]
+
+
+def test_action_refresh_preserves_pipeline_prefix_but_revisions_do_not(tmp_path, monkeypatch):
+    paper = pytest.importorskip("quant_pipeline.research_paper")
+    root, _, response = _live_action_refresh(tmp_path, monkeypatch)
+    master = tmp_path / "master"
+    import_instrument_master(_master_source(tmp_path / "master-source"), master)
+    initial = bind_instrument_master(root, master, captured_at="2026-09-26T00:00:00Z")
+
+    def inputs(manifest):
+        snapshot = root / "snapshots" / manifest["snapshot_id"]
+        return {
+            "bundle": str(snapshot),
+            "catalog": str(snapshot / "catalog.csv"),
+            "history": str(snapshot / "history"),
+        }
+
+    frozen = paper.input_prefix(inputs(initial), "2026-09-26")
+    response["actions"]["captured_at"] = "2026-09-27T00:00:00Z"
+    refreshed = update_dataset(root, end="2026-01-20", captured_at="2026-09-27T00:00:00Z")
+    assert paper.input_lineage(inputs(refreshed)) == paper.input_lineage(inputs(initial))
+    assert paper.input_prefix(inputs(refreshed), "2026-09-26") == frozen
+    response["actions"]["captured_at"] = "2026-09-28T00:00:00Z"
+    response["actions"]["source_record"] = '{"document":"corrected"}'
+    revised = update_dataset(root, end="2026-01-20", captured_at="2026-09-28T00:00:00Z")
+    assert paper.input_prefix(inputs(revised), "2026-09-26") != frozen
