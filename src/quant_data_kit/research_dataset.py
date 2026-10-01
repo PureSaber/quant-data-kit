@@ -109,6 +109,65 @@ def _empty_actions() -> pd.DataFrame:
     return pd.DataFrame(columns=ACTION_COLUMNS)
 
 
+def _record_versions(frame: pd.DataFrame, timestamp_column: str) -> list[bytes]:
+    """Identify the whole evidenced row version, excluding only its receipt time."""
+    records = json.loads(
+        frame.drop(columns=timestamp_column).to_json(
+            orient="records", date_format="iso", date_unit="ns", force_ascii=False
+        )
+    )
+    return [_canonical_bytes(record) for record in records]
+
+
+def _first_observed_view(
+    previous: pd.DataFrame,
+    observed: pd.DataFrame,
+    timestamp_column: str,
+    observed_at: pd.Timestamp,
+) -> pd.DataFrame:
+    """Retain a verified parent's first receipt only for an identical row version."""
+    known = dict(zip(_record_versions(previous, timestamp_column), previous[timestamp_column]))
+    result = observed.copy()
+    for index, identity in zip(result.index, _record_versions(result, timestamp_column)):
+        if pd.isna(result.at[index, timestamp_column]):
+            raise ValueError("Record receipt timestamp is missing")
+        receipt = _captured_at(result.at[index, timestamp_column])
+        if receipt > observed_at:
+            raise ValueError("Record receipt cannot be later than the snapshot capture")
+        if identity in known:
+            original = _captured_at(known[identity])
+            if receipt < original:
+                raise ValueError("An identical record version cannot move its receipt backwards")
+            result.at[index, timestamp_column] = known[identity]
+    return result
+
+
+def _action_changes(previous: pd.DataFrame, observed: pd.DataFrame, *, complete: bool) -> dict:
+    keys = ["symbol", "ex_date"]
+    for frame in (previous, observed):
+        if frame.duplicated(keys).any() or frame.duplicated("event_id").any():
+            raise ValueError("Corporate actions contain duplicate event identities or ex-dates")
+    old = dict(
+        zip(
+            previous[keys].itertuples(index=False, name=None),
+            _record_versions(previous, "captured_at"),
+        )
+    )
+    new = dict(
+        zip(
+            observed[keys].itertuples(index=False, name=None),
+            _record_versions(observed, "captured_at"),
+        )
+    )
+    common = old.keys() & new.keys()
+    return {
+        "added": len(new.keys() - old.keys()),
+        "removed": len(old.keys() - new.keys()) if complete else 0,
+        "revised": sum(old[key] != new[key] for key in common),
+        "unchanged": sum(old[key] == new[key] for key in common),
+    }
+
+
 def _read_frame(path: Path) -> pd.DataFrame:
     suffix = path.suffix.lower()
     if suffix == ".parquet":
@@ -605,7 +664,7 @@ def _history(
                     "effective_at": effective,
                     # This is a captured-current view. We do not invent an intraday
                     # historical publication timestamp from a date-only announcement.
-                    "available_at": captured_at,
+                    "available_at": _captured_at(row.captured_at),
                     "value": str(getattr(row, field)),
                 }
             )
@@ -720,6 +779,8 @@ def _publish(
     update_evidence: dict[str, Any],
     instrument_master_root: Path | None = None,
     preserved_history_root: Path | None = None,
+    previous_history: pd.DataFrame | None = None,
+    action_observations: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -728,6 +789,13 @@ def _publish(
     try:
         if preserved_history_root is None:
             history = _history(frames["actions"], symbols, start, captured_at)
+            if previous_history is not None:
+                history = _first_observed_view(
+                    previous_history[previous_history.domain == "classification"],
+                    history,
+                    "available_at",
+                    captured_at,
+                )
         else:
             preserved_history_root = preserved_history_root.resolve()
             history = validate_history(
@@ -841,6 +909,26 @@ def _publish(
                 "sha256": _sha256(history_source),
             },
         }
+        if action_observations is not None:
+            receipt_path = staging / "action-observations.json"
+            receipt_path.write_bytes(
+                _canonical_bytes(
+                    {
+                        "schema_version": "qdk.action-observations/v1",
+                        "observed_at": captured_at.isoformat(),
+                        "source": source,
+                        "records": json.loads(
+                            action_observations.to_json(
+                                orient="records", date_format="iso", force_ascii=False
+                            )
+                        ),
+                    }
+                )
+            )
+            evidence_files["action_observations"] = {
+                "file": receipt_path.name,
+                "sha256": _sha256(receipt_path),
+            }
         if instrument_master_root is not None:
             for path in sorted(master_destination.rglob("*")):
                 if path.is_file():
@@ -874,6 +962,10 @@ def _publish(
             "consumer_contract": {
                 "asm_decision_workflow_load_inputs": True,
                 "history_availability": "captured-current; no inferred intraday announcement time",
+                "action_availability": (
+                    "first receipt of identical evidenced row version; "
+                    "fresh observations are retained separately"
+                ),
                 "instrument_master_availability": (
                     "captured-current; strict historical replay remains blocked"
                     if master_manifest is None
@@ -959,6 +1051,9 @@ def build_dataset(
             license_note=license_note,
         )
     frames = _normalize_frames(frames, symbols=normalized_symbols, start=start_day, end=end_day)
+    frames["actions"] = _first_observed_view(
+        _empty_actions(), frames["actions"], "captured_at", captured
+    )
     validation = validate_dataset_frames(
         frames, symbols=normalized_symbols, start=start_day, end=end_day
     )
@@ -973,6 +1068,7 @@ def build_dataset(
         validation=validation,
         parent_snapshot_id=None,
         update_evidence={"mode": "initial_build", "revised_rows": {}},
+        action_observations=frames["actions"],
     )
 
 
@@ -998,6 +1094,8 @@ def update_dataset(
     if end_day < old_end:
         raise ValueError("Incremental update cannot shorten the dataset")
     captured = _captured_at(captured_at)
+    if captured < _captured_at(previous["captured_at"]):
+        raise ValueError("Incremental snapshot capture cannot move backwards")
     if end_day > captured.tz_convert("Asia/Shanghai").tz_localize(None).normalize():
         raise ValueError("Research dataset cannot include a future session")
     old_dates = pd.DatetimeIndex(old["raw"]["date"].drop_duplicates().sort_values())
@@ -1031,21 +1129,22 @@ def update_dataset(
     ):
         merged[name], revised[name] = _merge_by_key(old[name], frames[name], keys, end=end_day)
     merged["calendar"] = frames["calendar"]
+    action_changes = _action_changes(
+        old["actions"], frames["actions"], complete=source["mode"] == "live_public_api"
+    )
+    action_view = _first_observed_view(old["actions"], frames["actions"], "captured_at", captured)
     # The ETF action endpoints return the complete fund history. Treat the new
     # response as the authoritative current vintage and retain old rows only
     # when a declared local update contains a bounded fragment.
     if source["mode"] == "live_public_api":
-        merged["actions"] = frames["actions"]
-        old_action_ids = set(old["actions"].get("event_id", []))
-        new_action_ids = set(frames["actions"].get("event_id", []))
-        revised["actions"] = len(old_action_ids.symmetric_difference(new_action_ids))
+        merged["actions"] = action_view
     elif frames["actions"].empty:
         merged["actions"] = old["actions"].copy()
-        revised["actions"] = 0
     else:
-        merged["actions"], revised["actions"] = _merge_by_key(
-            old["actions"], frames["actions"], ["symbol", "ex_date"], end=end_day
+        merged["actions"], _ = _merge_by_key(
+            old["actions"], action_view, ["symbol", "ex_date"], end=end_day
         )
+    revised["actions"] = sum(action_changes[key] for key in ("added", "removed", "revised"))
     merged = _normalize_frames(merged, symbols=symbols, start=start_day, end=end_day)
     validation = validate_dataset_frames(merged, symbols=symbols, start=start_day, end=end_day)
     master_root = None
@@ -1067,8 +1166,11 @@ def update_dataset(
             "fetched_from": pd.Timestamp(price_start).date().isoformat(),
             "previous_end": old_end.date().isoformat(),
             "revised_rows": revised,
+            "action_changes": action_changes,
         },
         instrument_master_root=master_root,
+        previous_history=old["history"],
+        action_observations=frames["actions"],
     )
 
 

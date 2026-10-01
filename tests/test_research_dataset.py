@@ -4,6 +4,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from quant_data_kit import research_dataset as dataset
 from quant_data_kit.instrument_master import import_instrument_master
 from quant_data_kit.providers.corporate_actions import normalize_etf_actions
 from quant_data_kit.research_coverage import load_history
@@ -297,3 +298,148 @@ def test_coverage_distinguishes_leading_unavailability_from_later_gaps(tmp_path)
         _build(tmp_path / "dataset", source, end="2026-01-19")
     assert "missing_after_first_available_bar" in str(exc.value)
     assert "listing_date_basis" in str(exc.value)
+
+
+def _live_action_refresh(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    dates = pd.DatetimeIndex(["2026-01-15", "2026-01-16", "2026-01-19", "2026-01-20"])
+    _source(source, dates, [10, 10, 9, 9.1], [9, 9, 9, 9.1])
+    response = {
+        name: pd.read_parquet(source / f"{name}.parquet")
+        for name in ("raw", "adjusted", "benchmark", "calendar", "actions")
+    }
+
+    def fetch(*args, **kwargs):
+        return {key: value.copy() for key, value in response.items()}, {
+            "mode": "live_public_api",
+            "provider": "akshare_sina_etf",
+        }
+
+    monkeypatch.setattr(dataset, "_fetch_live_source", fetch)
+    root = tmp_path / "dataset"
+    parent = build_dataset(
+        root,
+        symbols=["510300"],
+        start="2026-01-15",
+        end="2026-01-20",
+        captured_at="2026-01-22T00:00:00Z",
+    )
+    response["actions"]["captured_at"] = "2026-01-23T00:00:00Z"
+    return root, parent, response
+
+
+def test_live_recapture_preserves_first_receipt_and_seals_fresh_evidence(tmp_path, monkeypatch):
+    root, parent, response = _live_action_refresh(tmp_path, monkeypatch)
+    _, previous = load_research_snapshot(root)
+    child = update_dataset(root, end="2026-01-20", captured_at="2026-01-23T00:00:00Z")
+    _, current = load_research_snapshot(root)
+    pd.testing.assert_frame_equal(previous["actions"], current["actions"])
+    pd.testing.assert_frame_equal(previous["history"], current["history"])
+    assert child["parent_snapshot_id"] == parent["snapshot_id"]
+    assert child["update_evidence"]["revised_rows"]["actions"] == 0
+    assert child["update_evidence"]["action_changes"] == {
+        "added": 0,
+        "removed": 0,
+        "revised": 0,
+        "unchanged": 1,
+    }
+    receipt_path = root / "snapshots" / child["snapshot_id"] / "action-observations.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["records"][0]["captured_at"] == "2026-01-23T00:00:00Z"
+    assert receipt["observed_at"] == child["captured_at"]
+    response["actions"]["captured_at"] = "2026-01-24T00:00:00Z"
+    update_dataset(root, end="2026-01-20", captured_at="2026-01-24T00:00:00Z")
+    _, repeated = load_research_snapshot(root)
+    pd.testing.assert_frame_equal(previous["actions"], repeated["actions"])
+    receipt_path.write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="evidence integrity"):
+        load_research_snapshot(root, child["snapshot_id"])
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("event_id", "revised-source-document"),
+        ("source_record", '{"document":"corrected"}'),
+        ("source", "another-provider"),
+        ("announced_date", pd.Timestamp("2026-01-13")),
+        ("pay_date", pd.Timestamp("2026-01-28")),
+    ],
+)
+def test_live_action_revision_cannot_inherit_old_availability(tmp_path, monkeypatch, field, value):
+    root, parent, response = _live_action_refresh(tmp_path, monkeypatch)
+    response["actions"].loc[0, field] = value
+    child = update_dataset(root, end="2026-01-20", captured_at="2026-01-23T00:00:00Z")
+    _, current = load_research_snapshot(root)
+    assert current["actions"].iloc[0].captured_at == "2026-01-23T00:00:00Z"
+    assert child["update_evidence"]["action_changes"]["revised"] == 1
+    assert child["update_evidence"]["revised_rows"]["actions"] == 1
+    assert child["files"]["actions"]["sha256"] != parent["files"]["actions"]["sha256"]
+    assert (
+        current["history"]
+        .loc[current["history"].domain == "corporate_actions", "available_at"]
+        .eq(pd.Timestamp("2026-01-23T00:00:00Z"))
+        .all()
+    )
+
+
+def test_live_changed_cash_and_removed_action_are_not_hidden(tmp_path, monkeypatch):
+    root, _, response = _live_action_refresh(tmp_path, monkeypatch)
+    response["actions"].loc[0, "cash_per_share"] = "2"
+    before_ex = response["adjusted"].date < pd.Timestamp("2026-01-19")
+    response["adjusted"].loc[before_ex, ["open", "high", "low", "close"]] = 8
+    child = update_dataset(root, end="2026-01-20", captured_at="2026-01-23T00:00:00Z")
+    _, current = load_research_snapshot(root)
+    assert current["actions"].iloc[0].captured_at == "2026-01-23T00:00:00Z"
+    assert child["update_evidence"]["action_changes"]["revised"] == 1
+    response["actions"] = response["actions"].iloc[:0]
+    response["adjusted"] = response["raw"].assign(adjustment="qfq")
+    removed = update_dataset(root, end="2026-01-20", captured_at="2026-01-24T00:00:00Z")
+    _, current = load_research_snapshot(root)
+    assert current["actions"].empty
+    assert removed["update_evidence"]["action_changes"]["removed"] == 1
+    assert removed["update_evidence"]["revised_rows"]["actions"] == 1
+
+
+@pytest.mark.parametrize(
+    "receipt", [None, "2026-01-23", "2026-01-24T00:00:00Z", "2026-01-21T00:00:00Z"]
+)
+def test_bad_or_regressed_action_receipt_cannot_publish(tmp_path, monkeypatch, receipt):
+    root, parent, response = _live_action_refresh(tmp_path, monkeypatch)
+    response["actions"]["captured_at"] = receipt
+    with pytest.raises(ValueError, match="receipt|time zone"):
+        update_dataset(root, end="2026-01-20", captured_at="2026-01-23T00:00:00Z")
+    assert load_research_snapshot(root)[0]["snapshot_id"] == parent["snapshot_id"]
+
+
+def test_snapshot_capture_cannot_move_backwards(tmp_path, monkeypatch):
+    root, parent, _ = _live_action_refresh(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="capture cannot move backwards"):
+        update_dataset(root, end="2026-01-20", captured_at="2026-01-21T00:00:00Z")
+    assert load_research_snapshot(root)[0]["snapshot_id"] == parent["snapshot_id"]
+
+
+def test_action_refresh_preserves_pipeline_prefix_but_revisions_do_not(tmp_path, monkeypatch):
+    paper = pytest.importorskip("quant_pipeline.research_paper")
+    root, _, response = _live_action_refresh(tmp_path, monkeypatch)
+    master = tmp_path / "master"
+    import_instrument_master(_master_source(tmp_path / "master-source"), master)
+    initial = bind_instrument_master(root, master, captured_at="2026-09-26T00:00:00Z")
+
+    def inputs(manifest):
+        snapshot = root / "snapshots" / manifest["snapshot_id"]
+        return {
+            "bundle": str(snapshot),
+            "catalog": str(snapshot / "catalog.csv"),
+            "history": str(snapshot / "history"),
+        }
+
+    frozen = paper.input_prefix(inputs(initial), "2026-09-26")
+    response["actions"]["captured_at"] = "2026-09-27T00:00:00Z"
+    refreshed = update_dataset(root, end="2026-01-20", captured_at="2026-09-27T00:00:00Z")
+    assert paper.input_lineage(inputs(refreshed)) == paper.input_lineage(inputs(initial))
+    assert paper.input_prefix(inputs(refreshed), "2026-09-26") == frozen
+    response["actions"]["captured_at"] = "2026-09-28T00:00:00Z"
+    response["actions"]["source_record"] = '{"document":"corrected"}'
+    revised = update_dataset(root, end="2026-01-20", captured_at="2026-09-28T00:00:00Z")
+    assert paper.input_prefix(inputs(revised), "2026-09-26") != frozen
