@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import multiprocessing
-import os
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict
@@ -30,6 +29,7 @@ from quant_data_kit.data_lake import (
     write_raw_bytes,
 )
 from quant_data_kit.exceptions import ValidationError
+from tests.process_helpers import hard_exit
 from tests.test_adapters_v2 import binance_adapter, cn_adapter, load_messages, okx_adapter
 from tests.test_m2_audit_regressions import trade
 
@@ -57,7 +57,7 @@ def _raw_process(
                 if Path(source).parent.name == ".staging" and Path(destination).name.startswith(
                     "object="
                 ):
-                    os._exit(73)
+                    hard_exit(73)
                 real_replace(source, destination)
 
             lake_module.os.replace = crash
@@ -141,7 +141,7 @@ def _atomic_hard_exit_process(root: str, target_name: str, body: bytes) -> None:
 
     def crash_before_replace(source: Path, destination: Path) -> None:
         if Path(destination) == target:
-            os._exit(71)
+            hard_exit(71)
         real_replace(source, destination)
 
     lake_module.os.replace = crash_before_replace
@@ -158,7 +158,7 @@ def _normalized_hard_exit_process(
 
     def crash_before_publish(source: Path, destination: Path) -> None:
         if Path(destination).parent.name == "snapshots":
-            os._exit(72)
+            hard_exit(72)
         real_replace(source, destination)
 
     lake_module.os.replace = crash_before_publish
@@ -202,7 +202,7 @@ def _curated_hard_exit_process(root: str, normalized_snapshot_id: str) -> None:
 
     def crash_before_publish(source: Path, destination: Path) -> None:
         if Path(destination).parent.name == "snapshots":
-            os._exit(73)
+            hard_exit(73)
         real_replace(source, destination)
 
     lake_module.os.replace = crash_before_publish
