@@ -44,6 +44,7 @@ from quant_data_kit.exceptions import ProviderError, ValidationError
 from tests import test_capture_v2_collector_cli_transport as collector_fixtures
 from tests import test_capture_v2_models_storage as storage_fixtures
 from tests import test_capture_v2_synchronizers_epoch as epoch_fixtures
+from tests.process_helpers import hard_exit
 
 
 def _process_publish(
@@ -67,13 +68,13 @@ def _process_crash_after_epoch_snapshot(root_text: str, epoch_id: str) -> None:
 
     def terminate_after_snapshot(*_args: object, **_kwargs: object) -> None:
         (Path(root_text) / "receipt-boundary-reached.marker").write_bytes(b"snapshot-published")
-        os._exit(87)
+        hard_exit(87)
 
     journal._write_committed_receipt = (  # type: ignore[method-assign]
         terminate_after_snapshot
     )
     journal.finalize(created_at=epoch_fixtures.NOW)
-    os._exit(88)
+    hard_exit(88)
 
 
 def test_durable_audit_commits_before_state_and_reloads(tmp_path: Path) -> None:

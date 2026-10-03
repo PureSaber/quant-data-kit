@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from quant_data_kit import research_dataset as dataset
+from quant_data_kit.exceptions import ValidationError
 from quant_data_kit.instrument_master import import_instrument_master
 from quant_data_kit.providers.corporate_actions import normalize_etf_actions
 from quant_data_kit.research_coverage import load_history
@@ -107,6 +108,25 @@ def _build(root: Path, source: Path, end="2026-01-21"):
         source_version="vendor-export-7",
         license_note="test fixture declaration",
     )
+
+
+@pytest.mark.parametrize("kind", ["raw", "adjusted"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), ""])
+def test_incomplete_volume_cannot_publish_a_research_snapshot(tmp_path, kind, value):
+    source = tmp_path / "source"
+    dates = pd.DatetimeIndex(["2026-01-15", "2026-01-16", "2026-01-19", "2026-01-20", "2026-01-21"])
+    _source(source, dates, [10, 10, 9, 9.1, 9.2], [9, 9, 9, 9.1, 9.2])
+    path = source / f"{kind}.parquet"
+    frame = pd.read_parquet(path)
+    if isinstance(value, str):
+        frame["volume"] = frame["volume"].astype(str)
+    frame.loc[0, "volume"] = value
+    frame.to_parquet(path, index=False)
+    root = tmp_path / "dataset"
+
+    with pytest.raises(ValidationError, match="Missing ratio|must be finite"):
+        _build(root, source)
+    assert not (root / "catalog.json").exists()
 
 
 def test_local_build_is_immutable_asm_compatible_and_records_deferred_cash(tmp_path):
