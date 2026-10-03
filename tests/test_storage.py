@@ -30,6 +30,23 @@ def test_validate_price_frame_missing_column():
         validate_price_frame(df)
 
 
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), "not-a-number"])
+def test_validate_price_frame_rejects_invalid_volume(value):
+    frame = pd.DataFrame(
+        {
+            "symbol": ["510300"],
+            "date": ["2026-01-02"],
+            "open": [1.0],
+            "high": [1.2],
+            "low": [0.9],
+            "close": [1.1],
+            "volume": [value],
+        }
+    )
+    with pytest.raises(ValidationError, match="must be finite|must be numeric"):
+        validate_price_frame(frame)
+
+
 def test_cache_covers_range():
     df = pd.DataFrame({"date": pd.date_range("2024-01-01", periods=5)})
     assert cache_covers_range(df, "2024-01-02", "2024-01-04")

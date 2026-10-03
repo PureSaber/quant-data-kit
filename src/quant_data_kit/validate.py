@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+import numpy as np
 import pandas as pd
 
 from quant_data_kit.exceptions import ValidationError
@@ -26,10 +27,6 @@ def validate_price_frame(
         raise ValidationError("Dataframe is empty")
 
     numeric_cols = [c for c in ("open", "high", "low", "close", "volume") if c in df.columns]
-    missing_ratio = float(df[numeric_cols].isna().mean().mean()) if numeric_cols else 0.0
-    if missing_ratio > max_missing_ratio:
-        raise ValidationError(f"Missing ratio {missing_ratio:.2%} exceeds {max_missing_ratio:.2%}")
-
     dup = (
         df.duplicated(subset=["symbol", "date"]).sum()
         if {"symbol", "date"}.issubset(df.columns)
@@ -38,7 +35,15 @@ def validate_price_frame(
     if dup:
         raise ValidationError(f"Found {dup} duplicate symbol-date rows")
 
-    numeric = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
+    try:
+        numeric = df[numeric_cols].apply(pd.to_numeric, errors="raise")
+    except (TypeError, ValueError) as exc:
+        raise ValidationError("OHLCV values must be numeric") from exc
+    missing_ratio = float(numeric.isna().mean().mean()) if numeric_cols else 0.0
+    if missing_ratio > max_missing_ratio:
+        raise ValidationError(f"Missing ratio {missing_ratio:.2%} exceeds {max_missing_ratio:.2%}")
+    if np.isinf(numeric.to_numpy(dtype=float, na_value=np.nan)).any():
+        raise ValidationError("OHLCV values must be finite")
     if (numeric[[c for c in ("open", "high", "low", "close") if c in numeric]] <= 0).any().any():
         raise ValidationError("OHLC prices must be positive")
     if "volume" in numeric and (numeric["volume"] < 0).any():

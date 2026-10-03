@@ -558,8 +558,8 @@ def validate_dataset_frames(
     end: pd.Timestamp,
 ) -> dict[str, Any]:
     """Validate coverage, raw/adjusted identity and evidenced cash adjustments."""
-    validate_price_frame(frames["raw"])
-    validate_price_frame(frames["adjusted"])
+    validate_price_frame(frames["raw"], max_missing_ratio=0.0)
+    validate_price_frame(frames["adjusted"], max_missing_ratio=0.0)
     if not frames["raw"]["adjustment"].eq("none").all():
         raise ValueError("raw prices must be unadjusted")
     if not frames["adjusted"]["adjustment"].eq("qfq").all():
