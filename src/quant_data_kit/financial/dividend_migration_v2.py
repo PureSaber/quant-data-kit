@@ -275,15 +275,6 @@ class DividendLifecycleMigrationV2:
         )
 
 
-def _source_at_pointer(payload: Mapping[str, object], pointer: str) -> object:
-    current: object = payload
-    for component in pointer.lstrip("/").split("/"):
-        if not isinstance(current, Mapping) or component not in current:
-            raise ValueError(f"legacy timing pointer does not resolve: {pointer}")
-        current = current[component]
-    return current
-
-
 def _phase_evidence_by_event(lifecycle: DividendLifecycleV2) -> dict[str, PhaseEvidenceV2]:
     values = [
         lifecycle.proposal,
@@ -296,6 +287,22 @@ def _phase_evidence_by_event(lifecycle: DividendLifecycleV2) -> dict[str, PhaseE
     if lifecycle.payment_policy is not None and lifecycle.payment_policy.evidence is not None:
         evidence[lifecycle.payment_policy.evidence.event_id] = lifecycle.payment_policy.evidence
     return evidence
+
+
+def _source_phase_evidence(source: DividendLifecycle):
+    values = [
+        ("/proposal/evidence/timing", source.proposal),
+        ("/entitlement/evidence/timing", source.entitlement),
+        ("/election/evidence/timing", source.election),
+        ("/conversion/evidence/timing", source.conversion),
+        ("/payment_policy/evidence/timing", source.payment_policy),
+        ("/payment/evidence/timing", source.payment),
+    ]
+    return tuple(
+        (pointer, phase.evidence)
+        for pointer, phase in values
+        if phase is not None and phase.evidence is not None
+    )
 
 
 def _without_timing(payload: Mapping[str, object]) -> dict[str, object]:
@@ -353,21 +360,23 @@ def validate_legacy_v1_binding_v2(lifecycle: DividendLifecycleV2) -> None:
     if _source_economic_projection(source) != _without_timing(lifecycle.to_dict()):
         raise ValueError("migrated lifecycle economic facts differ from the embedded v1 source")
     targets = _phase_evidence_by_event(lifecycle)
-    if {item.target_event_id for item in binding.timing_bindings} != set(targets):
-        raise ValueError("legacy timing bindings must cover every migrated phase evidence")
-    for item in binding.timing_bindings:
-        source_value = EvidenceTiming.from_dict(
-            _source_at_pointer(binding.source_v1_payload, item.source_pointer)
-        )
+    expected: list[tuple[LegacyTimingBindingV2, EvidenceTimingV2]] = []
+    for pointer, source_evidence in _source_phase_evidence(source):
         expected_timing, expected_binding = _migrated_timing(
-            source_value,
-            pointer=item.source_pointer,
-            event_id=item.target_event_id,
+            source_evidence.timing,
+            pointer=pointer,
+            event_id=source_evidence.event_id,
             migrated_at=binding.migrated_at,
         )
-        if item != expected_binding:
-            raise ValueError("legacy timing binding values differ from the embedded v1 source")
-        target = targets[item.target_event_id].timing
+        expected.append((expected_binding, expected_timing))
+    declared_by_event = {item.target_event_id: item for item in binding.timing_bindings}
+    expected_by_event = {item.target_event_id: item for item, _ in expected}
+    if declared_by_event != expected_by_event:
+        raise ValueError("legacy timing bindings differ from embedded v1 phase identities")
+    if {item.target_event_id for item in binding.timing_bindings} != set(targets):
+        raise ValueError("legacy timing bindings must cover every migrated phase evidence")
+    for expected_binding, expected_timing in expected:
+        target = targets[expected_binding.target_event_id].timing
         if target != expected_timing:
             raise ValueError(
                 "migrated timing facts differ from the embedded v1 source and migration rule"

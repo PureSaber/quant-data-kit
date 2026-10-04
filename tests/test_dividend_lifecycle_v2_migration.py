@@ -125,6 +125,24 @@ def complete_v1(*, date_fixing: bool = False) -> DividendLifecycle:
     )
 
 
+def complete_v1_with_shared_timing() -> DividendLifecycle:
+    source = complete_v1()
+    shared = source.entitlement.evidence.timing
+
+    def bind(phase):
+        return replace(phase, evidence=replace(phase.evidence, timing=shared))
+
+    return replace(
+        source,
+        proposal=bind(source.proposal),
+        entitlement=bind(source.entitlement),
+        election=bind(source.election),
+        conversion=bind(source.conversion),
+        payment_policy=bind(source.payment_policy),
+        payment=bind(source.payment),
+    )
+
+
 def test_a1_a2_v1_golden_bytes_fingerprints_and_schemas_are_unchanged():
     exact = fixture_bytes("dividend_lifecycle_v1_exact.json")
     dated = fixture_bytes("dividend_lifecycle_v1_date.json")
@@ -325,6 +343,34 @@ def test_direct_v2_parser_rejects_mutated_legacy_time_facts(field, value):
         timing[field] = value
 
     with pytest.raises(ValueError, match="timing facts"):
+        DividendLifecycleV2.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    "phase",
+    ["proposal", "election", "conversion", "payment_policy", "payment"],
+)
+def test_source_pointer_identity_cannot_move_between_phases_with_equal_times(phase):
+    lifecycle = migrate_dividend_lifecycle_v1_to_v2(
+        complete_v1_with_shared_timing().to_json(),
+        migration_id="phase-pointer-identity",
+        migrated_at="2026-10-04T00:00:00Z",
+    ).lifecycle
+    payload = lifecycle.to_dict()
+    bindings = payload["legacy_binding"]["timing_bindings"]
+    event_ids = {name: payload[name]["evidence"]["event_id"] for name in (phase, "entitlement")}
+    by_event = {item["target_event_id"]: item for item in bindings}
+    original = copy.deepcopy(by_event)
+    for target_phase, source_phase in ((phase, "entitlement"), ("entitlement", phase)):
+        target = by_event[event_ids[target_phase]]
+        source = original[event_ids[source_phase]]
+        for field in ("source_pointer", "source_available_at", "source_captured_at"):
+            target[field] = source[field]
+        payload[target_phase]["evidence"]["timing"]["availability"]["legacy_timing_pointer"] = (
+            source["source_pointer"]
+        )
+
+    with pytest.raises(ValueError, match="phase identities"):
         DividendLifecycleV2.from_dict(payload)
 
 
