@@ -12,6 +12,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
@@ -71,6 +72,7 @@ from quant_data_kit.schemas_v2 import (
     validate_arrow_table,
     validate_json_record,
 )
+from quant_data_kit.temporal_v2 import parse_timestamp_exact
 
 _SNAPSHOT_ID = re.compile(r"^sha256-[0-9a-f]{64}$")
 _EVENT_TYPE_BY_SCHEMA = {
@@ -100,21 +102,21 @@ def _hash_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def _utc(value: str | datetime, field_name: str) -> datetime:
+def _utc(value: str | datetime, field_name: str) -> datetime | pd.Timestamp:
     try:
         parsed = (
-            value
-            if isinstance(value, datetime)
-            else datetime.fromisoformat(value.replace("Z", "+00:00"))
+            value if isinstance(value, datetime) else parse_timestamp_exact(value, field=field_name)
         )
     except (TypeError, ValueError) as exc:
         raise ValidationError(f"{field_name} must be a valid UTC timestamp") from exc
     if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
         raise ValidationError(f"{field_name} must be UTC-aware")
+    if isinstance(parsed, pd.Timestamp):
+        return parsed.tz_convert("UTC")
     return parsed.astimezone(timezone.utc)
 
 
-def _parse_optional_utc(value: Any, field_name: str) -> datetime | None:
+def _parse_optional_utc(value: Any, field_name: str) -> datetime | pd.Timestamp | None:
     return None if value is None else _utc(value, field_name)
 
 

@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -165,6 +166,59 @@ def test_market_context_and_verified_normalized_input_are_content_bound(tmp_path
     ]
     assert verified.to_contract()["rows"] == "2"
     assert verified.to_contract()["aggregation"] is None
+
+
+def test_market_context_and_event_bars_preserve_nanoseconds(tmp_path: Path) -> None:
+    context_start = pd.Timestamp("2025-01-01T00:00:00.000000900Z")
+    instrument = replace(
+        market_context(tmp_path / "base").instruments[0],
+        effective_from=context_start,
+        available_at=context_start + pd.Timedelta(1, unit="ns"),
+    )
+    session = replace(
+        market_context(tmp_path / "session-base").sessions[0],
+        available_at=context_start + pd.Timedelta(2, unit="ns"),
+    )
+    context = create_market_context_snapshot(
+        tmp_path,
+        calendar_id="cffex-v1",
+        session_policy_version="cffex-nanosecond-v1",
+        instruments=[instrument],
+        sessions=[session],
+        policy=TEST_POLICY,
+    )
+    restored_context = load_market_context_snapshot(tmp_path, context.snapshot_id)
+    assert pd.Timestamp(restored_context.instruments[0].effective_from).value == context_start.value
+    assert (
+        pd.Timestamp(restored_context.instruments[0].available_at).value == context_start.value + 1
+    )
+    assert pd.Timestamp(restored_context.sessions[0].available_at).value == context_start.value + 2
+
+    first = pd.Timestamp("2026-01-05T01:30:01.000000900Z")
+    second = first + pd.Timedelta(50, unit="ns")
+    source = normalized(
+        tmp_path,
+        [
+            trade("ns-1", first.isoformat().replace("+00:00", "Z"), 1),
+            trade("ns-2", second.isoformat().replace("+00:00", "Z"), 2),
+        ],
+        key="nanosecond-bars",
+    )
+    bars = curate_trade_event_bars_from_snapshot(
+        tmp_path,
+        normalized_snapshot_id=source.snapshot_id,
+        dataset="nanosecond-event-bars",
+        revision_id="r1",
+        recipe_version="event-v1",
+        basis="trade_count",
+        threshold=FixedPoint(1, 0),
+        market_context_snapshot_id=context.snapshot_id,
+        policy=TEST_POLICY,
+    )
+    verified = load_verified_curated_bars(tmp_path, "nanosecond-event-bars", bars.snapshot_id)
+    rows = verified.table.to_pylist()
+    assert [pd.Timestamp(row["event_time"]).value for row in rows] == [first.value, second.value]
+    assert [pd.Timestamp(row["bar_end"]).value for row in rows] == [first.value, second.value]
 
 
 def test_fixed_session_and_event_bars_all_load_through_certified_factory(

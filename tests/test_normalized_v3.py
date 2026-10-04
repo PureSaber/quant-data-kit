@@ -6,6 +6,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pandas as pd
 import pyarrow as pa
 import pytest
 
@@ -157,6 +158,25 @@ def test_native_writer_validator_matches_frozen_validator_for_l2_edges() -> None
             validate_json_record(schema_id, deepcopy(record))
         with pytest.raises(ValidationError):
             normalized_v3._validate_event_record(schema_id, deepcopy(record))
+
+
+def test_arrow_writer_preserves_nanosecond_timestamps(tmp_path: Path) -> None:
+    instant = pd.Timestamp("2026-01-02T00:00:01.000000900Z")
+    record = trade("nanosecond-arrow")
+    record["event_time"] = instant.isoformat().replace("+00:00", "Z")
+    record["received_at"] = (
+        (instant + pd.Timedelta(1, unit="ns")).isoformat().replace("+00:00", "Z")
+    )
+    record["available_at"] = (
+        (instant + pd.Timedelta(2, unit="ns")).isoformat().replace("+00:00", "Z")
+    )
+
+    result = _strict_batches(tmp_path, [_record_batch([record])], key="nanosecond-arrow")
+    assert result.snapshot is not None
+    restored = read_normalized_events(tmp_path, result.snapshot.snapshot_id)[0]
+    assert pd.Timestamp(restored["event_time"]).value == instant.value
+    assert pd.Timestamp(restored["received_at"]).value == instant.value + 1
+    assert pd.Timestamp(restored["available_at"]).value == instant.value + 2
 
 
 def test_v3_manifest_is_compact_and_does_not_create_per_event_json(tmp_path: Path) -> None:

@@ -385,6 +385,19 @@ def test_snapshot_and_delta_time_and_sequence_must_strictly_advance() -> None:
         reconstructor.apply_delta(backwards)
 
 
+def test_l2_time_order_distinguishes_nanoseconds_within_one_microsecond() -> None:
+    first = snapshot()
+    for field in ("event_time", "received_at", "available_at"):
+        first[field] = "2026-01-02T00:00:00.000000900Z"
+    changed = delta(101, 100)
+    for field in ("event_time", "received_at", "available_at"):
+        changed[field] = "2026-01-02T00:00:00.000000950Z"
+
+    result = replay_l2([first, changed])
+    assert result.final_checkpoint.sequence == 101
+    assert result.final_checkpoint.event_time.endswith("000000950Z")
+
+
 def test_validated_snapshot_and_batch_guards_preserve_state() -> None:
     reconstructor = L2BookReconstructor()
     initial = reconstructor.apply_snapshot(snapshot())

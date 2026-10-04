@@ -9,9 +9,12 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Protocol
 
+import pandas as pd
+
 from quant_data_kit.exceptions import ValidationError
 from quant_data_kit.fixed_point import FixedPoint
 from quant_data_kit.schemas_v2 import validate_event_stream
+from quant_data_kit.temporal_v2 import parse_timestamp_exact
 
 BOOK_SEQUENCE_FACTOR = 1_000_000
 
@@ -63,14 +66,14 @@ def utc_from_milliseconds(value: int | str, field_name: str) -> datetime:
     return parsed
 
 
-def utc_from_text(value: str, field_name: str) -> datetime:
+def utc_from_text(value: str, field_name: str) -> datetime | pd.Timestamp:
     try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = parse_timestamp_exact(str(value), field=field_name)
     except ValueError as exc:
         raise ValidationError(f"{field_name} must be an ISO-8601 timestamp") from exc
     if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
         raise ValidationError(f"{field_name} must be UTC")
-    return parsed.astimezone(timezone.utc)
+    return parsed.tz_convert("UTC")
 
 
 def fixed(value: str | int | Decimal, scale: int, field_name: str) -> FixedPoint:

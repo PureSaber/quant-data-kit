@@ -22,6 +22,7 @@ from urllib.parse import quote, unquote, urlparse
 from urllib.request import url2pathname
 
 import duckdb
+import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 from typing_extensions import Self
@@ -45,6 +46,7 @@ from quant_data_kit.schemas_v2 import (
     validate_event_stream,
     validate_json_record,
 )
+from quant_data_kit.temporal_v2 import parse_timestamp_exact
 
 _SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _WINDOWS_RESERVED_NAMES = {
@@ -359,14 +361,14 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _utc_datetime(value: datetime | str, field_name: str) -> datetime:
+def _utc_datetime(value: datetime | str, field_name: str) -> datetime | pd.Timestamp:
     parsed = (
-        value
-        if isinstance(value, datetime)
-        else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        value if isinstance(value, datetime) else parse_timestamp_exact(value, field=field_name)
     )
     if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
         raise ValidationError(f"{field_name} must be UTC-aware")
+    if isinstance(parsed, pd.Timestamp):
+        return parsed.tz_convert("UTC")
     return parsed.astimezone(timezone.utc)
 
 

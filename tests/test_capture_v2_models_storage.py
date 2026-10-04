@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from quant_data_kit.capture_v2.models import (
@@ -259,6 +260,18 @@ def test_raw_frame_round_trip_and_monotonic_clock() -> None:
     observed_two, received_two = monotonic.now()
     assert observed_two == observed_one
     assert received_two > received_one
+
+
+def test_raw_frame_record_round_trip_preserves_nanoseconds() -> None:
+    stream = default_crypto_l2_streams()[0]
+    instant = pd.Timestamp("2026-08-29T00:00:00.000000900Z")
+    frame = raw_frame(stream, 1, received_at=instant)
+
+    record = frame.record()
+    assert record["received_at"].endswith("000000900Z")
+    restored = RawFrame.from_record(record)
+    for field_name in ("received_at", "observed_at", "event_time"):
+        assert pd.Timestamp(getattr(restored, field_name)).value == instant.value
 
 
 def test_state_machine_audits_legal_illegal_and_sink_failure() -> None:

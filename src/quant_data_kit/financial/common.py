@@ -4,9 +4,11 @@ from decimal import Decimal, InvalidOperation
 
 import pandas as pd
 
+from quant_data_kit.temporal_v2 import parse_timestamp_exact
+
 
 def utc(value, field="timestamp") -> pd.Timestamp:
-    result = pd.Timestamp(value)
+    result = parse_timestamp_exact(value, field=field)
     if pd.isna(result) or result.tzinfo is None:
         raise ValueError(f"{field} requires a nonmissing timezone-aware timestamp")
     return result.tz_convert("UTC")

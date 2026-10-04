@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -11,11 +12,24 @@ import pandas as pd
 from quant_data_kit.exceptions import ValidationError
 
 _UTC_ZONE_NAMES = {"UTC", "Etc/UTC", "GMT", "Etc/GMT", "Z"}
+_FRACTIONAL_SECONDS = re.compile(r"(?:T|\s)\d{2}:\d{2}:\d{2}[.,](\d+)")
 
 
-def ensure_utc_datetime(value: datetime | pd.Timestamp, *, field: str) -> datetime:
-    """Return a normalized UTC datetime and reject naive or non-UTC zones."""
-    timestamp = value.to_pydatetime() if isinstance(value, pd.Timestamp) else value
+def parse_timestamp_exact(value: object, *, field: str) -> pd.Timestamp:
+    """Parse a timestamp without silently discarding sub-nanosecond digits."""
+    if isinstance(value, str):
+        match = _FRACTIONAL_SECONDS.search(value)
+        if match is not None and any(digit != "0" for digit in match.group(1)[9:]):
+            raise ValueError(f"{field} has precision finer than nanoseconds")
+    try:
+        return pd.Timestamp(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be a valid timestamp") from exc
+
+
+def ensure_utc_datetime(value: datetime | pd.Timestamp, *, field: str) -> datetime | pd.Timestamp:
+    """Return a normalized UTC instant without discarding Timestamp nanoseconds."""
+    timestamp = value
     if not isinstance(timestamp, datetime):
         raise ValidationError(f"{field} must be a datetime")
     if timestamp.tzinfo is None or timestamp.utcoffset() is None:
@@ -26,6 +40,8 @@ def ensure_utc_datetime(value: datetime | pd.Timestamp, *, field: str) -> dateti
             raise ValidationError(f"{field} must use UTC, got {zone_name}")
     elif timestamp.utcoffset().total_seconds() != 0:
         raise ValidationError(f"{field} must use UTC")
+    if isinstance(timestamp, pd.Timestamp):
+        return timestamp.tz_convert("UTC")
     return timestamp.astimezone(timezone.utc)
 
 

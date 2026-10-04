@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
 import pytest
 
 from quant_data_kit import (
@@ -51,6 +52,7 @@ from quant_data_kit.schemas_v2 import (
     TRADING_SESSION_SCHEMA_ID,
     get_arrow_schema,
 )
+from quant_data_kit.temporal_v2 import parse_timestamp_exact
 
 UTC = timezone.utc
 T0 = datetime(2026, 1, 2, 1, 0, tzinfo=UTC)
@@ -85,6 +87,102 @@ def test_fixed_point_is_exact_and_utc_is_strict() -> None:
             datetime(2026, 1, 1, tzinfo=timezone(timedelta(hours=8))),
             field="event_time",
         )
+
+
+def test_public_temporal_contracts_preserve_nanosecond_instants() -> None:
+    available = pd.Timestamp("2026-10-04T11:00:00.000000900Z")
+    before = available - pd.Timedelta(1, unit="ns")
+    assert (
+        pd.Timestamp(ensure_utc_datetime(available, field="available_at")).value == available.value
+    )
+
+    facts = pd.DataFrame(
+        {
+            "instrument_id": ["asset-1"],
+            "effective_from": [T0],
+            "effective_to": [pd.NaT],
+            "available_at": [available],
+            "superseded_at": [available + pd.Timedelta(1, unit="ns")],
+            "value": [7],
+        }
+    )
+    observations = pd.DataFrame(
+        {
+            "instrument_id": ["asset-1", "asset-1"],
+            "observation_time": [available, available],
+            "as_of": [before, available],
+        }
+    )
+    joined = point_in_time_join_bitemporal(observations, facts, fact_columns=["value"])
+    assert pd.isna(joined.loc[0, "value"])
+    assert joined.loc[1, "value"] == 7
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-10-04T11:00:00.000000900Z",
+        "2026-10-04T11:00:00.0000009000Z",
+        "2026-10-04T11:00:00.000000900000Z",
+    ],
+)
+def test_exact_timestamp_parser_accepts_representable_fraction(value: str) -> None:
+    expected = pd.Timestamp("2026-10-04T11:00:00.000000900Z")
+    assert parse_timestamp_exact(value, field="event_time").value == expected.value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-10-04T11:00:00.0000009001Z",
+        "1969-12-31T23:59:59.9999999991Z",
+    ],
+)
+def test_exact_timestamp_parser_rejects_unrepresentable_fraction(value: str) -> None:
+    with pytest.raises(ValueError, match="finer than nanoseconds"):
+        parse_timestamp_exact(value, field="event_time")
+
+
+def test_market_event_json_and_arrow_preserve_nanosecond_instants() -> None:
+    event_time = pd.Timestamp("2026-10-04T11:00:00.000000900Z")
+    received_at = event_time + pd.Timedelta(1, unit="ns")
+    available_at = received_at + pd.Timedelta(1, unit="ns")
+    trade = TradeEvent(
+        **{
+            **event_base(20),
+            "event_time": event_time,
+            "received_at": received_at,
+            "available_at": available_at,
+        },
+        price=fp("100.00"),
+        quantity=fp("1.00"),
+    )
+    payload = market_event_payload(trade)
+    assert payload["event_time"].endswith("000000900Z")
+    assert payload["received_at"].endswith("000000901Z")
+    assert payload["available_at"].endswith("000000902Z")
+    validate_json_record(TRADE_EVENT_SCHEMA_ID, payload)
+
+    ready = dict(payload)
+    for field_name in ("event_time", "received_at", "available_at"):
+        ready[field_name] = pd.Timestamp(ready[field_name])
+    ready["trading_day"] = date.fromisoformat(ready["trading_day"])
+    table = pa.Table.from_pylist([ready], schema=get_arrow_schema(TRADE_EVENT_SCHEMA_ID))
+    row = table.to_pylist()[0]
+    assert pd.Timestamp(row["event_time"]).value == event_time.value
+    assert pd.Timestamp(row["received_at"]).value == received_at.value
+    assert pd.Timestamp(row["available_at"]).value == available_at.value
+
+    invalid = dict(payload)
+    invalid["event_time"] = "2026-10-04T11:00:00.000000902Z"
+    invalid["received_at"] = "2026-10-04T11:00:00.000000901Z"
+    with pytest.raises(ValidationError, match="received_at"):
+        validate_json_record(TRADE_EVENT_SCHEMA_ID, invalid)
+
+    unrepresentable = dict(payload)
+    unrepresentable["event_time"] = "2026-10-04T11:00:00.0000009001Z"
+    with pytest.raises(ValidationError, match="exactly representable"):
+        validate_json_record(TRADE_EVENT_SCHEMA_ID, unrepresentable)
 
 
 def test_instrument_spec_matches_json_and_arrow_contracts() -> None:

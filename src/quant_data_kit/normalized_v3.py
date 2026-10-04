@@ -90,6 +90,7 @@ _CLAIM_FILE_SCHEMA = pa.schema(
         pa.field("claim_sha256", pa.string()),
     ]
 )
+_CLAIM_DATABASE_SCHEMA = pa.schema([pa.field("shard", pa.string()), *_CLAIM_FILE_SCHEMA])
 
 _SortKey = tuple[datetime, int, str]
 
@@ -561,62 +562,6 @@ def _sql_path_list(paths: Iterable[Path]) -> str:
     return "[" + ",".join(_sql_text(path) for path in paths) + "]"
 
 
-def _sql_identifier(value: str) -> str:
-    return '"' + value.replace('"', '""') + '"'
-
-
-def _canonical_sql_value(data_type: pa.DataType, expression: str) -> str:
-    if pa.types.is_timestamp(data_type):
-        return (
-            "CASE WHEN microsecond("
-            + expression
-            + ") % 1000000 = 0 THEN strftime("
-            + expression
-            + ", '%Y-%m-%dT%H:%M:%SZ') ELSE strftime("
-            + expression
-            + ", '%Y-%m-%dT%H:%M:%S.%fZ') END"
-        )
-    if pa.types.is_date32(data_type):
-        return f"strftime({expression}, '%Y-%m-%d')"
-    if pa.types.is_struct(data_type):
-        entries: list[str] = []
-        for field in sorted(data_type, key=lambda item: item.name):
-            child = f"({expression}).{_sql_identifier(field.name)}"
-            entries.extend(
-                [
-                    _sql_text(field.name),
-                    _canonical_sql_value(field.type, child),
-                ]
-            )
-        return "json_object(" + ",".join(entries) + ")"
-    if pa.types.is_list(data_type):
-        child = _canonical_sql_value(data_type.value_type, "claim_item")
-        return f"list_transform({expression}, claim_item -> {child})"
-    return expression
-
-
-def _canonical_row_sql(schema_id: str) -> str:
-    entries: list[str] = []
-    for schema_field in sorted(get_arrow_schema(schema_id), key=lambda item: item.name):
-        entries.extend(
-            [
-                _sql_text(schema_field.name),
-                _canonical_sql_value(schema_field.type, _sql_identifier(schema_field.name)),
-            ]
-        )
-    return "json_object(" + ",".join(entries) + ")"
-
-
-def _canonical_event_sql(schema_id: str) -> str:
-    return (
-        "json_object('record',"
-        + _canonical_row_sql(schema_id)
-        + ",'schema_id',"
-        + _sql_text(schema_id)
-        + ")"
-    )
-
-
 def _sort_partition(partition: _OpenPartition) -> None:
     if partition.monotonic or partition.rows == 0:
         return
@@ -718,36 +663,6 @@ def _scan_partition(
                 f"Arrow schema mismatch for {schema_id}: "
                 f"expected={schema}, actual={parquet.schema_arrow}"
             )
-        if not any(_contains_floating_type(field.type) for field in schema):
-            expected_rows = parquet.metadata.num_rows
-            parquet.close()
-            connection = duckdb.connect(database=":memory:")
-            try:
-                connection.execute("SET TimeZone = 'UTC'")
-                connection.execute("SET threads = 8")
-                connection.execute("SET preserve_insertion_order = true")
-                reader = connection.sql(
-                    "SELECT "
-                    + _canonical_row_sql(schema_id)
-                    + " AS canonical_row FROM read_parquet(?, hive_partitioning=false)",
-                    params=[str(path)],
-                ).to_arrow_reader(_BATCH_ROWS)
-                digest = hashlib.sha256(b"[")
-                rows = 0
-                first = True
-                for batch in reader:
-                    values = batch.column(0).to_pylist()
-                    if not first:
-                        digest.update(b",")
-                    digest.update(",".join(values).encode("utf-8"))
-                    first = False
-                    rows += len(values)
-                digest.update(b"]")
-            finally:
-                connection.close()
-            if rows != expected_rows:
-                raise ValidationError("Normalized Parquet row count changed during scan")
-            return rows, digest.hexdigest()
         rows = 0
         logical = _JsonArrayDigest(preserve_stdlib_float_format=True)
         for batch in parquet.iter_batches(batch_size=_BATCH_ROWS):
@@ -972,49 +887,32 @@ def _claim_database(
     for partition in partitions:
         path = snapshot_root / partition.relative_path
         schema = get_arrow_schema(partition.schema_id)
-        if any(_contains_floating_type(field.type) for field in schema):
-            parquet = pq.ParquetFile(path)
-            try:
-                for batch in parquet.iter_batches(batch_size=_BATCH_ROWS):
-                    rows = _logical_rows(schema, pa.Table.from_batches([batch]).to_pylist())
-                    claims = [_event_claim_reference(partition.schema_id, row) for row in rows]
-                    connection.executemany(
-                        "INSERT INTO claims VALUES (?, ?, ?, ?, ?, ?)",
-                        [
-                            (
-                                claim.event_id_hash[:_CLAIM_SHARD_PREFIX_LENGTH],
-                                claim.event_id_hash,
-                                claim.event_id,
-                                claim.schema_id,
-                                claim.event_sha256,
-                                claim.claim_sha256,
-                            )
-                            for claim in claims
-                        ],
-                    )
-            finally:
-                parquet.close()
-            continue
-        canonical_event = _canonical_event_sql(partition.schema_id)
-        connection.execute(
-            "INSERT INTO claims "
-            "WITH event_rows AS ("
-            "SELECT event_id, sha256(event_id) AS event_id_hash, "
-            "sha256(" + canonical_event + ") AS event_sha256 "
-            "FROM read_parquet(?, hive_partitioning=false) t"
-            ") "
-            "SELECT substr(event_id_hash, 1, ?), event_id_hash, event_id, ?, "
-            "event_sha256, sha256(json_object("
-            "'event_id', event_id, 'event_id_hash', event_id_hash, "
-            "'event_sha256', event_sha256, 'layer', 'normalized-event-claim', "
-            "'schema_id', ?, 'schema_version', '2.0.0')) FROM event_rows",
-            [
-                str(path),
-                _CLAIM_SHARD_PREFIX_LENGTH,
-                partition.schema_id,
-                partition.schema_id,
-            ],
-        )
+        parquet = pq.ParquetFile(path)
+        try:
+            for batch in parquet.iter_batches(batch_size=_BATCH_ROWS):
+                rows = _logical_rows(schema, pa.Table.from_batches([batch]).to_pylist())
+                claims = [_event_claim_reference(partition.schema_id, row) for row in rows]
+                claim_table = pa.Table.from_pylist(
+                    [
+                        {
+                            "shard": claim.event_id_hash[:_CLAIM_SHARD_PREFIX_LENGTH],
+                            "event_id_hash": claim.event_id_hash,
+                            "event_id": claim.event_id,
+                            "schema_id": claim.schema_id,
+                            "event_sha256": claim.event_sha256,
+                            "claim_sha256": claim.claim_sha256,
+                        }
+                        for claim in claims
+                    ],
+                    schema=_CLAIM_DATABASE_SCHEMA,
+                )
+                connection.register("claim_batch", claim_table)
+                try:
+                    connection.execute("INSERT INTO claims SELECT * FROM claim_batch")
+                finally:
+                    connection.unregister("claim_batch")
+        finally:
+            parquet.close()
     repeated = connection.execute(
         "SELECT event_id_hash, min(event_id), max(event_id), count(*) FROM claims "
         "GROUP BY event_id_hash HAVING count(*) > 1 LIMIT 1"
@@ -1024,7 +922,7 @@ def _claim_database(
         if repeated[1] != repeated[2]:
             raise ValidationError("Normalized batch contains colliding event_id hashes")
         raise ValidationError(
-            f"Normalized accepted set still contains duplicate event_id: {repeated[1]}"
+            f"Normalized event-claim index contains duplicate claims for event_id: {repeated[1]}"
         )
     return connection
 
@@ -1120,28 +1018,6 @@ def _export_claim_index(
     )
 
 
-def _claim_select_sql(snapshot_root: Path, partition: PartitionManifest) -> str:
-    path = snapshot_root / partition.relative_path
-    canonical_event = _canonical_event_sql(partition.schema_id)
-    return (
-        "SELECT substr(event_id_hash, 1, "
-        + str(_CLAIM_SHARD_PREFIX_LENGTH)
-        + ") AS shard, event_id_hash, event_id, "
-        + _sql_text(partition.schema_id)
-        + " AS schema_id, event_sha256, sha256(json_object("
-        "'event_id', event_id, 'event_id_hash', event_id_hash, "
-        "'event_sha256', event_sha256, 'layer', 'normalized-event-claim', "
-        "'schema_id', "
-        + _sql_text(partition.schema_id)
-        + ", 'schema_version', '2.0.0')) AS claim_sha256 FROM ("
-        "SELECT event_id, sha256(event_id) AS event_id_hash, sha256("
-        + canonical_event
-        + ") AS event_sha256 FROM read_parquet("
-        + _sql_text(path)
-        + ", hive_partitioning=false)) event_rows"
-    )
-
-
 def _claim_file_order(path: Path) -> tuple[str, int, str]:
     suffix = path.stem.rsplit("-", 1)[-1]
     return path.parent.name, int(suffix) if suffix.isdigit() else -1, path.name
@@ -1220,50 +1096,20 @@ def _build_claim_index_files(
 ) -> tuple[EventClaimShardManifest, ...]:
     if not partitions:
         return ()
-    contains_float = any(
-        _contains_floating_type(field.type)
-        for partition in partitions
-        for field in get_arrow_schema(partition.schema_id)
-    )
     if index_root.exists():
         shutil.rmtree(index_root)
     temporary_root.mkdir(parents=True, exist_ok=True)
     index_root.mkdir(parents=True)
-    if contains_float:
-        connection = _claim_database(
-            temporary_root / "floating-claims.duckdb",
-            snapshot_root,
-            partitions,
-        )
-        try:
-            connection.execute("SET threads = 1")
-            connection.execute(
-                "COPY (SELECT event_id_hash, event_id, schema_id, event_sha256, claim_sha256 "
-                "FROM claims) TO "
-                + _sql_text(index_root / "claims.parquet")
-                + " (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 65536)"
-            )
-        finally:
-            connection.close()
-        paths = _claim_index_files(index_root)
-        if not paths:
-            raise ValidationError("Normalized event-claim export produced no segments")
-        return _claim_shard_manifests_from_paths(paths)
-    connection = duckdb.connect(database=":memory:")
+    connection = _claim_database(
+        temporary_root / "claims.duckdb",
+        snapshot_root,
+        partitions,
+    )
     try:
-        connection.execute("SET TimeZone = 'UTC'")
-        connection.execute("SET threads = 8")
-        connection.execute("SET preserve_insertion_order = true")
-        connection.execute("SET memory_limit = '2GB'")
-        connection.execute("SET temp_directory = " + _sql_text(temporary_root))
-        union = " UNION ALL ".join(
-            _claim_select_sql(snapshot_root, partition) for partition in partitions
-        )
+        connection.execute("SET threads = 1")
         connection.execute(
             "COPY (SELECT event_id_hash, event_id, schema_id, event_sha256, claim_sha256 "
-            "FROM ("
-            + union
-            + ") claims) TO "
+            "FROM claims) TO "
             + _sql_text(index_root / "claims.parquet")
             + " (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 65536)"
         )
@@ -1272,19 +1118,6 @@ def _build_claim_index_files(
     paths = _claim_index_files(index_root)
     if not paths:
         raise ValidationError("Normalized event-claim export produced no segments")
-    connection = duckdb.connect(database=":memory:")
-    try:
-        connection.execute("SET memory_limit = '2GB'")
-        connection.execute("SET temp_directory = " + _sql_text(temporary_root))
-        repeated = connection.execute(
-            "SELECT event_id_hash FROM read_parquet(?, hive_partitioning=false) "
-            "GROUP BY event_id_hash HAVING count(*) > 1 LIMIT 1",
-            [str(index_root / "claims.parquet")],
-        ).fetchone()
-    finally:
-        connection.close()
-    if repeated is not None:
-        raise ValidationError("Normalized event-claim index contains duplicate claims")
     return _claim_shard_manifests_from_paths(paths)
 
 
@@ -2026,17 +1859,6 @@ def _validate_common_arrow_batch(
     event_time = batch.column(expected.get_field_index("event_time"))
     received_at = batch.column(expected.get_field_index("received_at"))
     available_at = batch.column(expected.get_field_index("available_at"))
-    for name, values in (
-        ("event_time", event_time),
-        ("received_at", received_at),
-        ("available_at", available_at),
-    ):
-        try:
-            pc.cast(values, pa.timestamp("us", tz="UTC"), safe=True)
-        except pa.ArrowInvalid as exc:
-            raise ValidationError(
-                f"Arrow {name} has nanoseconds that frozen JSON cannot preserve"
-            ) from exc
     _require_all(
         pc.less_equal(event_time, received_at),
         "received_at must not be earlier than event_time",

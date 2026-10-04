@@ -40,6 +40,7 @@ from quant_data_kit.schemas_v2 import (
     BOOK_SNAPSHOT_EVENT_SCHEMA_ID,
     get_arrow_schema,
 )
+from quant_data_kit.temporal_v2 import parse_timestamp_exact
 
 UTC = timezone.utc
 _DEFAULT_POLICY = StoragePolicy()
@@ -283,7 +284,7 @@ def _load_epoch_parts(hot_root: Path, root: Path) -> tuple[EpochPart, ...]:
 
 def _parse_created_at(value: object, description: str) -> str:
     try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = parse_timestamp_exact(value, field=f"{description} created_at")
         normalized = utc_text(parsed, f"{description} created_at")
     except (TypeError, ValueError) as exc:
         raise ValidationError(f"{description} created_at is malformed") from exc
@@ -1336,10 +1337,11 @@ class NormalizedEpochJournal:
                     )
                 latest = pending[0] if pending else prepared_payloads[-1]
                 try:
-                    created_at = datetime.fromisoformat(
+                    created_at = parse_timestamp_exact(
                         _parse_created_at(
                             latest.get("created_at"), "Normalized epoch recovery transaction"
-                        ).replace("Z", "+00:00")
+                        ),
+                        field="Normalized epoch recovery transaction created_at",
                     )
                     journal = cls.recover(
                         hot_root,

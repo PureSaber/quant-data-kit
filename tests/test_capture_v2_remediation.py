@@ -1528,6 +1528,10 @@ def test_epoch_binding_rejects_noncanonical_time_and_missing_raw_lineage(
 
     with pytest.raises(ValidationError, match="not canonical UTC"):
         epoch_module._parse_created_at("2026-08-29T01:00:00+00:00", "test transaction")
+    assert (
+        epoch_module._parse_created_at("2026-08-29T01:00:00.000000900Z", "test transaction")
+        == "2026-08-29T01:00:00.000000900Z"
+    )
     with pytest.raises(ValidationError, match="require Raw segment lineage"):
         epoch_module._validate_prepared_binding(
             journal.hot_root,
