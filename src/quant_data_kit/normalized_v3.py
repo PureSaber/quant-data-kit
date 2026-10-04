@@ -566,14 +566,41 @@ def _sort_partition(partition: _OpenPartition) -> None:
     if partition.monotonic or partition.rows == 0:
         return
     sorted_path = partition.path.with_name("data.sorted.parquet")
+    sort_input_path = partition.path.with_name("data.sort-input.parquet")
     schema = get_arrow_schema(partition.schema_id)
+    sort_schema = pa.schema(
+        [
+            pa.field(field.name, pa.int64(), field.nullable, field.metadata)
+            if pa.types.is_timestamp(field.type)
+            else field
+            for field in schema
+        ],
+        metadata=schema.metadata,
+    )
+    parquet = pq.ParquetFile(partition.path)
+    input_writer: pq.ParquetWriter | None = None
+    try:
+        input_writer = pq.ParquetWriter(
+            sort_input_path,
+            sort_schema,
+            compression="zstd",
+            use_dictionary=False,
+        )
+        for batch in parquet.iter_batches(batch_size=_BATCH_ROWS):
+            table = pa.Table.from_batches([batch]).cast(sort_schema, safe=True)
+            input_writer.write_table(table, row_group_size=_BATCH_ROWS)
+    finally:
+        parquet.close()
+        if input_writer is not None:
+            input_writer.close()
+
     connection = duckdb.connect(database=":memory:")
     writer: pq.ParquetWriter | None = None
     try:
         connection.execute("SET TimeZone = 'UTC'")
         reader = connection.sql(
             "SELECT * FROM read_parquet("
-            + _sql_text(partition.path)
+            + _sql_text(sort_input_path)
             + ", hive_partitioning=false) "
             "ORDER BY event_time, sequence, event_id"
         ).to_arrow_reader(_BATCH_ROWS)
@@ -591,6 +618,8 @@ def _sort_partition(partition: _OpenPartition) -> None:
         if writer is not None:
             writer.close()
         connection.close()
+        if sort_input_path.exists():
+            sort_input_path.unlink()
     os.replace(sorted_path, partition.path)
 
 

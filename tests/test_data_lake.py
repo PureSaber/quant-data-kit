@@ -316,6 +316,33 @@ def test_event_claims_distinguish_nanoseconds_within_one_microsecond(tmp_path: P
         )
 
 
+def test_normalized_external_sort_preserves_nanosecond_timestamps(tmp_path: Path) -> None:
+    early = "2026-01-02T00:00:01.000000900Z"
+    late = "2026-01-02T00:00:01.000000950Z"
+    raw = admitted_raw(tmp_path, key="nanosecond-sort")
+    result = write_normalized_events(
+        tmp_path,
+        [
+            trade_record(event_id="late", event_time=late, sequence=1),
+            trade_record(event_id="early", event_time=early, sequence=2),
+        ],
+        provider="binance",
+        venue="BINANCE",
+        upstream_raw_references=[raw.reference()],
+        policy=TEST_POLICY,
+    )
+    assert result.snapshot is not None
+
+    rows = read_normalized_events(tmp_path, result.snapshot.snapshot_id)
+    assert [row["event_id"] for row in rows] == ["early", "late"]
+    assert [pd.Timestamp(row["event_time"]).value for row in rows] == [
+        pd.Timestamp(early).value,
+        pd.Timestamp(late).value,
+    ]
+    for row in rows:
+        assert row["event_time"] == row["received_at"] == row["available_at"]
+
+
 def test_normalized_partition_mutation_fails_hash_validation(tmp_path: Path) -> None:
     raw = admitted_raw(tmp_path)
     result = write_normalized_events(

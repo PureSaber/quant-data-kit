@@ -140,6 +140,9 @@ def test_open_intervals_overlap_at_maximum_timestamp() -> None:
         "2026-10-04T11:00:00.000000900Z",
         "2026-10-04T11:00:00.0000009000Z",
         "2026-10-04T11:00:00.000000900000Z",
+        "20261004T110000.0000009000Z",
+        "2026-10-04t11:00:00.0000009000z",
+        "2026-10-04T110000.0000009000Z",
     ],
 )
 def test_exact_timestamp_parser_accepts_representable_fraction(value: str) -> None:
@@ -152,6 +155,9 @@ def test_exact_timestamp_parser_accepts_representable_fraction(value: str) -> No
     [
         "2026-10-04T11:00:00.0000009001Z",
         "1969-12-31T23:59:59.9999999991Z",
+        "20261004T110000.0000009001Z",
+        "2026-10-04t11:00:00.0000009001z",
+        "2026-10-04T110000.0000009001Z",
     ],
 )
 def test_exact_timestamp_parser_rejects_unrepresentable_fraction(value: str) -> None:

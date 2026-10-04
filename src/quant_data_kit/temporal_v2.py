@@ -12,7 +12,10 @@ import pandas as pd
 from quant_data_kit.exceptions import ValidationError
 
 _UTC_ZONE_NAMES = {"UTC", "Etc/UTC", "GMT", "Etc/GMT", "Z"}
-_FRACTIONAL_SECONDS = re.compile(r"(?:T|\s)\d{2}:\d{2}:\d{2}[.,](\d+)")
+_FRACTIONAL_SECONDS = re.compile(
+    r"(?:^|[T\s])\d{2}:?\d{2}:?\d{2}[.,](\d+)",
+    re.IGNORECASE,
+)
 
 
 def parse_timestamp_exact(value: object, *, field: str) -> pd.Timestamp:
