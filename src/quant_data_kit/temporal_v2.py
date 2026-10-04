@@ -12,7 +12,15 @@ import pandas as pd
 from quant_data_kit.exceptions import ValidationError
 
 _UTC_ZONE_NAMES = {"UTC", "Etc/UTC", "GMT", "Etc/GMT", "Z"}
-_CLOCK_END = r"(?=\s*(?:[Zz]|[+-]\d{1,2}(?::?\d{2}){0,2}|[A-Za-z][\w./+-]*)?\s*$)"
+_MERIDIEM = r"[AaPp]\.?[Mm]\.?"
+_TIME_ZONE = (
+    r"(?:[Zz]|[+-]\d{1,2}(?::?\d{2}){0,2}|"
+    r"[A-Za-z][\w./+-]*(?::\d{2})?(?:\s*[+-]\d{1,2}(?::?\d{2}){0,2})?)"
+)
+_CLOCK_END = (
+    rf"(?=\s*(?:{_MERIDIEM}(?:\s+{_TIME_ZONE})?|"
+    rf"{_TIME_ZONE}(?:\s+{_MERIDIEM})?)?\s*$)"
+)
 _FRACTIONAL_TIME_COMPONENTS = (
     (
         re.compile(
@@ -70,14 +78,24 @@ def parse_timestamp_exact(value: object, *, field: str) -> pd.Timestamp:
             else:
                 lower_time = ""
             fractional_seconds = f".{nanoseconds:09d}".rstrip("0") if nanoseconds else ""
-            value = (
-                value[: match.start("separator")]
-                + lower_time
-                + fractional_seconds
-                + value[match.end("fraction") :]
+            base_value = (
+                value[: match.start("separator")] + lower_time + value[match.end("fraction") :]
             )
             try:
-                return pd.Timestamp(value)
+                result = pd.Timestamp(
+                    value[: match.start("separator")]
+                    + lower_time
+                    + fractional_seconds
+                    + value[match.end("fraction") :]
+                )
+                actual_nanoseconds = result.microsecond * 1_000 + result.nanosecond
+                if actual_nanoseconds == nanoseconds:
+                    return result
+                base = pd.Timestamp(base_value).as_unit("s")
+                epoch_nanoseconds = int(base.asm8.view("i8")) * 1_000_000_000 + nanoseconds
+                if base.tzinfo is None:
+                    return pd.Timestamp(epoch_nanoseconds, unit="ns")
+                return pd.Timestamp(epoch_nanoseconds, unit="ns", tz="UTC").tz_convert(base.tzinfo)
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"{field} must be a valid timestamp") from exc
         if _FRACTIONAL_CLOCK.search(value) is not None:

@@ -260,6 +260,52 @@ def test_exact_timestamp_parser_does_not_rewrite_date_token(value: str, expected
     assert parse_timestamp_exact(value, field="event_time") == pd.Timestamp(expected)
 
 
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "AM UTC",
+        "AM +00:00",
+        "a.m. GMT",
+        "AM GMT+0000",
+        "AM GMT +0000",
+        "UTC AM",
+        "+00:00 AM",
+    ],
+)
+def test_exact_timestamp_parser_checks_fraction_before_meridiem_timezone(
+    suffix: str,
+) -> None:
+    value = f"October 4, 2026 12:00:00.000000900 {suffix}"
+    expected = pd.Timestamp("2026-10-04T00:00:00.000000900Z")
+    assert parse_timestamp_exact(value, field="event_time") == expected
+    with pytest.raises(ValueError, match="finer than nanoseconds"):
+        parse_timestamp_exact(
+            f"October 4, 2026 12:00:00.0000009001 {suffix}",
+            field="event_time",
+        )
+
+
+def test_exact_fractional_minute_with_meridiem_timezone() -> None:
+    base = pd.Timestamp("2026-10-04T00:00:00Z").value
+    assert (
+        parse_timestamp_exact(
+            "October 4, 2026 12:00.0000009001 AM UTC",
+            field="event_time",
+        ).value
+        == base + 54_006
+    )
+    with pytest.raises(ValueError, match="finer than nanoseconds"):
+        parse_timestamp_exact(
+            "October 4, 2026 12:00.00000000001 AM UTC",
+            field="event_time",
+        )
+    naive = parse_timestamp_exact(
+        "October 4, 2026 12:00.0000009001 AM",
+        field="event_time",
+    )
+    assert naive.value == pd.Timestamp("2026-10-04T00:00:00").value + 54_006
+
+
 def test_market_event_json_and_arrow_preserve_nanosecond_instants() -> None:
     event_time = pd.Timestamp("2026-10-04T11:00:00.000000900Z")
     received_at = event_time + pd.Timedelta(1, unit="ns")
