@@ -562,6 +562,89 @@ def _sql_path_list(paths: Iterable[Path]) -> str:
     return "[" + ",".join(_sql_text(path) for path in paths) + "]"
 
 
+def _sql_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _canonical_claim_timestamp_sql(expression: str) -> str:
+    remainder = f"(((epoch_ns({expression}) % 1000000000) + 1000000000) % 1000000000)"
+    base = f"strftime({expression}, '%Y-%m-%dT%H:%M:%S')"
+    return (
+        f"CASE WHEN {remainder} = 0 THEN {base} || 'Z' "
+        f"WHEN {remainder} % 1000 = 0 THEN {base} || '.' || "
+        f"printf('%06d', ({remainder}) // 1000) || 'Z' "
+        f"ELSE {base} || '.' || printf('%09d', {remainder}) || 'Z' END"
+    )
+
+
+def _canonical_claim_sql_value(data_type: pa.DataType, expression: str) -> str:
+    if pa.types.is_timestamp(data_type):
+        return _canonical_claim_timestamp_sql(expression)
+    if pa.types.is_date32(data_type):
+        return f"strftime({expression}, '%Y-%m-%d')"
+    if pa.types.is_struct(data_type):
+        entries: list[str] = []
+        for field in sorted(data_type, key=lambda item: item.name):
+            child = f"({expression}).{_sql_identifier(field.name)}"
+            entries.extend(
+                [
+                    _sql_text(field.name),
+                    _canonical_claim_sql_value(field.type, child),
+                ]
+            )
+        return "json_object(" + ",".join(entries) + ")"
+    if pa.types.is_list(data_type):
+        child = _canonical_claim_sql_value(data_type.value_type, "claim_item")
+        return f"list_transform({expression}, claim_item -> {child})"
+    return expression
+
+
+def _canonical_claim_event_sql(schema_id: str) -> str:
+    entries: list[str] = []
+    for schema_field in sorted(get_arrow_schema(schema_id), key=lambda item: item.name):
+        entries.extend(
+            [
+                _sql_text(schema_field.name),
+                _canonical_claim_sql_value(
+                    schema_field.type,
+                    _sql_identifier(schema_field.name),
+                ),
+            ]
+        )
+    return (
+        "json_object('record',json_object("
+        + ",".join(entries)
+        + "),'schema_id',"
+        + _sql_text(schema_id)
+        + ")"
+    )
+
+
+def _claim_ready_table(schema: pa.Schema, batch: pa.RecordBatch) -> pa.Table:
+    columns: list[pa.Array] = []
+    fields: list[pa.Field] = []
+    for schema_field, values in zip(schema, batch.columns, strict=True):
+        claim_type = schema_field.type
+        if pa.types.is_timestamp(schema_field.type):
+            if schema_field.type != pa.timestamp("ns", tz="UTC"):
+                raise ValidationError("Claim timestamps must be UTC nanoseconds")
+            claim_type = pa.timestamp("ns")
+            values = pc.cast(values, claim_type, safe=True)
+        columns.append(values)
+        fields.append(
+            pa.field(
+                schema_field.name,
+                claim_type,
+                schema_field.nullable,
+                schema_field.metadata,
+            )
+        )
+    return pa.Table.from_arrays(
+        columns,
+        schema=pa.schema(fields, metadata=schema.metadata),
+    )
+
+
 def _sort_partition(partition: _OpenPartition) -> None:
     if partition.monotonic or partition.rows == 0:
         return
@@ -677,6 +760,16 @@ def _contains_floating_type(data_type: pa.DataType) -> bool:
         return any(_contains_floating_type(field.type) for field in data_type)
     if pa.types.is_list(data_type):
         return _contains_floating_type(data_type.value_type)
+    return False
+
+
+def _contains_temporal_type(data_type: pa.DataType) -> bool:
+    if pa.types.is_timestamp(data_type) or pa.types.is_date(data_type):
+        return True
+    if pa.types.is_struct(data_type):
+        return any(_contains_temporal_type(field.type) for field in data_type)
+    if pa.types.is_list(data_type):
+        return _contains_temporal_type(data_type.value_type)
     return False
 
 
@@ -916,28 +1009,61 @@ def _claim_database(
     for partition in partitions:
         path = snapshot_root / partition.relative_path
         schema = get_arrow_schema(partition.schema_id)
+        use_python_claims = any(
+            _contains_floating_type(field.type)
+            or (
+                (pa.types.is_struct(field.type) or pa.types.is_list(field.type))
+                and _contains_temporal_type(field.type)
+            )
+            for field in schema
+        )
+        canonical_event = (
+            None if use_python_claims else _canonical_claim_event_sql(partition.schema_id)
+        )
         parquet = pq.ParquetFile(path)
         try:
             for batch in parquet.iter_batches(batch_size=_BATCH_ROWS):
-                rows = _logical_rows(schema, pa.Table.from_batches([batch]).to_pylist())
-                claims = [_event_claim_reference(partition.schema_id, row) for row in rows]
-                claim_table = pa.Table.from_pylist(
-                    [
-                        {
-                            "shard": claim.event_id_hash[:_CLAIM_SHARD_PREFIX_LENGTH],
-                            "event_id_hash": claim.event_id_hash,
-                            "event_id": claim.event_id,
-                            "schema_id": claim.schema_id,
-                            "event_sha256": claim.event_sha256,
-                            "claim_sha256": claim.claim_sha256,
-                        }
-                        for claim in claims
-                    ],
-                    schema=_CLAIM_DATABASE_SCHEMA,
-                )
+                if use_python_claims:
+                    rows = _logical_rows(schema, pa.Table.from_batches([batch]).to_pylist())
+                    claims = [_event_claim_reference(partition.schema_id, row) for row in rows]
+                    claim_table = pa.Table.from_pylist(
+                        [
+                            {
+                                "shard": claim.event_id_hash[:_CLAIM_SHARD_PREFIX_LENGTH],
+                                "event_id_hash": claim.event_id_hash,
+                                "event_id": claim.event_id,
+                                "schema_id": claim.schema_id,
+                                "event_sha256": claim.event_sha256,
+                                "claim_sha256": claim.claim_sha256,
+                            }
+                            for claim in claims
+                        ],
+                        schema=_CLAIM_DATABASE_SCHEMA,
+                    )
+                else:
+                    claim_table = _claim_ready_table(schema, batch)
                 connection.register("claim_batch", claim_table)
                 try:
-                    connection.execute("INSERT INTO claims SELECT * FROM claim_batch")
+                    if use_python_claims:
+                        connection.execute("INSERT INTO claims SELECT * FROM claim_batch")
+                    else:
+                        connection.execute(
+                            "INSERT INTO claims WITH event_rows AS ("
+                            "SELECT event_id, sha256(event_id) AS event_id_hash, sha256("
+                            + str(canonical_event)
+                            + ") AS event_sha256 FROM claim_batch) "
+                            "SELECT substr(event_id_hash, 1, ?), event_id_hash, event_id, ?, "
+                            "event_sha256, sha256(json_object("
+                            "'event_id', event_id, 'event_id_hash', event_id_hash, "
+                            "'event_sha256', event_sha256, 'layer', "
+                            "'normalized-event-claim', 'schema_id', ?, "
+                            "'schema_version', '2.0.0')) FROM event_rows",
+                            [
+                                _CLAIM_SHARD_PREFIX_LENGTH,
+                                partition.schema_id,
+                                partition.schema_id,
+                            ],
+                        )
                 finally:
                     connection.unregister("claim_batch")
         finally:

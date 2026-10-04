@@ -6,6 +6,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
+import duckdb
 import pandas as pd
 import pyarrow as pa
 import pytest
@@ -177,6 +178,50 @@ def test_arrow_writer_preserves_nanosecond_timestamps(tmp_path: Path) -> None:
     assert pd.Timestamp(restored["event_time"]).value == instant.value
     assert pd.Timestamp(restored["received_at"]).value == instant.value + 1
     assert pd.Timestamp(restored["available_at"]).value == instant.value + 2
+    schema_id = lake_module._event_schema_id(record)
+    expected_claim = lake_module._event_claim_reference(schema_id, record)
+    assert tuple(result.snapshot.event_claims) == (expected_claim,)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("1969-12-31T23:59:59.999999999Z", "1969-12-31T23:59:59.999999999Z"),
+        ("2026-01-02T00:00:01Z", "2026-01-02T00:00:01Z"),
+        ("2026-01-02T00:00:01.123000Z", "2026-01-02T00:00:01.123000Z"),
+        ("2026-01-02T00:00:01.000000900Z", "2026-01-02T00:00:01.000000900Z"),
+        ("2026-01-02T00:00:01.123456789Z", "2026-01-02T00:00:01.123456789Z"),
+    ],
+)
+def test_claim_timestamp_sql_preserves_canonical_nanoseconds(
+    value: str,
+    expected: str,
+) -> None:
+    timestamp_type = pa.timestamp("ns", tz="UTC")
+    schema = pa.schema([pa.field("instant", timestamp_type, nullable=False)])
+    batch = pa.RecordBatch.from_arrays(
+        [pa.array([pd.Timestamp(value)], type=timestamp_type)],
+        schema=schema,
+    )
+    table = normalized_v3._claim_ready_table(schema, batch)
+    assert table.schema.field("instant").type == pa.timestamp("ns")
+    assert (
+        table.column("instant").chunk(0).buffers()[1].address
+        == batch.column(0).buffers()[1].address
+    )
+
+    connection = duckdb.connect(database=":memory:")
+    try:
+        connection.register("claim_batch", table)
+        actual_type, actual = connection.execute(
+            "SELECT typeof(instant), "
+            + normalized_v3._canonical_claim_timestamp_sql("instant")
+            + " FROM claim_batch"
+        ).fetchone()
+    finally:
+        connection.close()
+    assert actual_type == "TIMESTAMP_NS"
+    assert actual == expected
 
 
 def test_v3_manifest_is_compact_and_does_not_create_per_event_json(tmp_path: Path) -> None:
