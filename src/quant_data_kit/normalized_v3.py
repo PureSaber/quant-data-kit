@@ -592,7 +592,11 @@ def _canonical_claim_sql_value(data_type: pa.DataType, expression: str) -> str:
                     _canonical_claim_sql_value(field.type, child),
                 ]
             )
-        return "json_object(" + ",".join(entries) + ")"
+        return (
+            f"CASE WHEN {expression} IS NULL THEN NULL ELSE json_object("
+            + ",".join(entries)
+            + ") END"
+        )
     if pa.types.is_list(data_type):
         child = _canonical_claim_sql_value(data_type.value_type, "claim_item")
         return f"list_transform({expression}, claim_item -> {child})"
@@ -770,6 +774,36 @@ def _contains_temporal_type(data_type: pa.DataType) -> bool:
         return any(_contains_temporal_type(field.type) for field in data_type)
     if pa.types.is_list(data_type):
         return _contains_temporal_type(data_type.value_type)
+    return False
+
+
+def _contains_string_type(data_type: pa.DataType) -> bool:
+    if pa.types.is_string(data_type) or pa.types.is_large_string(data_type):
+        return True
+    if pa.types.is_struct(data_type):
+        return any(_contains_string_type(field.type) for field in data_type)
+    if pa.types.is_list(data_type):
+        return _contains_string_type(data_type.value_type)
+    return False
+
+
+def _batch_has_noncanonical_json_control(
+    schema: pa.Schema,
+    batch: pa.RecordBatch,
+) -> bool:
+    for schema_field, values in zip(schema, batch.columns, strict=True):
+        if not (
+            pa.types.is_string(schema_field.type) or pa.types.is_large_string(schema_field.type)
+        ):
+            continue
+        matches = pc.match_substring_regex(
+            values,
+            # DuckDB uppercases the hexadecimal digits in these JSON escapes;
+            # the frozen stdlib canonical form uses lowercase digits.
+            pattern=r"[\x0b\x0e\x0f\x1a-\x1f]",
+        )
+        if pc.any(pc.fill_null(matches, False)).as_py():
+            return True
     return False
 
 
@@ -1009,20 +1043,25 @@ def _claim_database(
     for partition in partitions:
         path = snapshot_root / partition.relative_path
         schema = get_arrow_schema(partition.schema_id)
-        use_python_claims = any(
+        schema_requires_python_claims = any(
             _contains_floating_type(field.type)
             or (
                 (pa.types.is_struct(field.type) or pa.types.is_list(field.type))
-                and _contains_temporal_type(field.type)
+                and (_contains_temporal_type(field.type) or _contains_string_type(field.type))
             )
             for field in schema
         )
         canonical_event = (
-            None if use_python_claims else _canonical_claim_event_sql(partition.schema_id)
+            None
+            if schema_requires_python_claims
+            else _canonical_claim_event_sql(partition.schema_id)
         )
         parquet = pq.ParquetFile(path)
         try:
             for batch in parquet.iter_batches(batch_size=_BATCH_ROWS):
+                use_python_claims = schema_requires_python_claims or (
+                    _batch_has_noncanonical_json_control(schema, batch)
+                )
                 if use_python_claims:
                     rows = _logical_rows(schema, pa.Table.from_batches([batch]).to_pylist())
                     claims = [_event_claim_reference(partition.schema_id, row) for row in rows]

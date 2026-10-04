@@ -224,6 +224,56 @@ def test_claim_timestamp_sql_preserves_canonical_nanoseconds(
     assert actual == expected
 
 
+@pytest.mark.parametrize(
+    ("event_type", "fields"),
+    [
+        (
+            "corporate_action",
+            {
+                "action_type": "distribution",
+                "effective_date": "2026-01-02",
+                "ratio": None,
+                "cash_amount": {"units": 5, "scale": 1},
+                "currency": "HKD",
+            },
+        ),
+        (
+            "corporate_action",
+            {
+                "action_type": "distribution",
+                "effective_date": "2026-01-02",
+                "ratio": {"units": 1, "scale": 0},
+                "cash_amount": None,
+                "currency": None,
+            },
+        ),
+        ("status", {"status": "trading", "reason": "".join(chr(i) for i in range(32))}),
+        ("status", {"status": "trading", "reason": r"\u000B"}),
+    ],
+    ids=["null-ratio", "null-cash", "control-text", "literal-unicode-escape"],
+)
+def test_claims_preserve_nullable_structs_and_control_text(
+    tmp_path: Path,
+    event_type: str,
+    fields: dict,
+) -> None:
+    record = trade("claim-canonical-edge")
+    for field_name in ("price", "quantity", "aggressor_side"):
+        record.pop(field_name)
+    record.update({"event_type": event_type, **fields})
+    batch = _record_batch([record])
+    result = _strict_batches(
+        tmp_path,
+        [batch],
+        key=f"claim-{event_type}",
+    )
+    assert result.snapshot is not None
+    schema_id = lake_module._event_schema_id(record)
+    canonical_record = normalized_v3._logical_rows(batch.schema, batch.to_pylist())[0]
+    expected_claim = lake_module._event_claim_reference(schema_id, canonical_record)
+    assert tuple(result.snapshot.event_claims) == (expected_claim,)
+
+
 def test_v3_manifest_is_compact_and_does_not_create_per_event_json(tmp_path: Path) -> None:
     admitted = _raw(tmp_path)
     records = [snapshot()]
