@@ -90,7 +90,6 @@ def validate_bitemporal_frame(
     if invalid_knowledge.any():
         raise ValidationError("superseded_at must be later than available_at")
 
-    far_future = pd.Timestamp.max.tz_localize("UTC")
     ambiguous = 0
     group_key: str | list[str] = key_columns[0] if len(key_columns) == 1 else list(key_columns)
     for _, group in work.groupby(group_key, dropna=False, sort=False):
@@ -102,17 +101,16 @@ def validate_bitemporal_frame(
                 right_effective_end = right[names[effective_to]]
                 left_knowledge_end = left[names[superseded_at]]
                 right_knowledge_end = right[names[superseded_at]]
-                business_overlap = max(
-                    left[names[effective_from]], right[names[effective_from]]
-                ) < min(
-                    left_effective_end if pd.notna(left_effective_end) else far_future,
-                    right_effective_end if pd.notna(right_effective_end) else far_future,
+                business_overlap = (
+                    pd.isna(left_effective_end) or right[names[effective_from]] < left_effective_end
+                ) and (
+                    pd.isna(right_effective_end)
+                    or left[names[effective_from]] < right_effective_end
                 )
-                knowledge_overlap = max(
-                    left[names[available_at]], right[names[available_at]]
-                ) < min(
-                    left_knowledge_end if pd.notna(left_knowledge_end) else far_future,
-                    right_knowledge_end if pd.notna(right_knowledge_end) else far_future,
+                knowledge_overlap = (
+                    pd.isna(left_knowledge_end) or right[names[available_at]] < left_knowledge_end
+                ) and (
+                    pd.isna(right_knowledge_end) or left[names[available_at]] < right_knowledge_end
                 )
                 if business_overlap and knowledge_overlap:
                     ambiguous += 1

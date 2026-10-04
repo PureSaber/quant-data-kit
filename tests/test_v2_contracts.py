@@ -33,6 +33,7 @@ from quant_data_kit import (
     ensure_utc_datetime,
     market_event_payload,
     point_in_time_join_bitemporal,
+    validate_bitemporal_frame,
     validate_event_stream,
     validate_json_record,
 )
@@ -116,6 +117,21 @@ def test_public_temporal_contracts_preserve_nanosecond_instants() -> None:
     joined = point_in_time_join_bitemporal(observations, facts, fact_columns=["value"])
     assert pd.isna(joined.loc[0, "value"])
     assert joined.loc[1, "value"] == 7
+
+
+def test_open_intervals_overlap_at_maximum_timestamp() -> None:
+    maximum = pd.Timestamp.max.tz_localize("UTC")
+    facts = pd.DataFrame(
+        {
+            "instrument_id": ["asset-1", "asset-1"],
+            "effective_from": [T0, maximum],
+            "effective_to": [pd.NaT, pd.NaT],
+            "available_at": [T0, T0],
+            "superseded_at": [pd.NaT, pd.NaT],
+        }
+    )
+    with pytest.raises(ValidationError, match="ambiguous"):
+        validate_bitemporal_frame(facts, key_columns=["instrument_id"])
 
 
 @pytest.mark.parametrize(
