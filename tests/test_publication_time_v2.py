@@ -558,7 +558,7 @@ def test_leaf_parsers_reject_wrong_container_missing_fields_and_bad_scalars():
             revision_id="r",
             local_date="bad",
         )
-    with pytest.raises(ValueError, match="canonical ISO"):
+    with pytest.raises(ValueError, match="plain ISO"):
         build_evidence_timing_v2(
             effective_at="2026-01-01T00:00:00Z",
             captured_at="2026-01-02T00:00:00Z",
