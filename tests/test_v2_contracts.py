@@ -184,6 +184,8 @@ def test_temporal_validation_rejects_invalid_shapes_and_intervals() -> None:
         ("2026-10-04T11:00:00,5Z", 500_000_000),
         ("2026-10-04T11:00.0000009001Z", 54_006),
         ("2026-10-04T11.00000000005Z", 180),
+        ("2026-10-04 11:0:0.0000009000+00:00", 900),
+        ("2026-10-04 11:0.0000009001+00:00", 54_006),
     ],
 )
 def test_exact_timestamp_parser_accepts_representable_fraction(
@@ -203,6 +205,8 @@ def test_exact_timestamp_parser_accepts_representable_fraction(
         "2026-10-04T110000.0000009001Z",
         "2026-10-04T11:00.00000000001Z",
         "2026-10-04T11.0000000000001Z",
+        "2026-10-04 0:0:0.0000009001+00:00",
+        "2026-10-04 0:0.00000000001+00:00",
     ],
 )
 def test_exact_timestamp_parser_rejects_unrepresentable_fraction(value: str) -> None:
@@ -237,6 +241,11 @@ def test_exact_timestamp_parser_rejects_unrepresentable_fraction(value: str) -> 
 )
 def test_exact_timestamp_parser_preserves_calendar_domain(value: str, expected) -> None:
     assert parse_timestamp_exact(value, field="event_time") == expected
+
+
+def test_exact_timestamp_parser_rejects_unrecognized_fractional_clock() -> None:
+    with pytest.raises(ValueError, match="valid timestamp"):
+        parse_timestamp_exact("2026-10-04T1::2.000000900Z", field="event_time")
 
 
 def test_market_event_json_and_arrow_preserve_nanosecond_instants() -> None:

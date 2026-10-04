@@ -15,7 +15,7 @@ _UTC_ZONE_NAMES = {"UTC", "Etc/UTC", "GMT", "Etc/GMT", "Z"}
 _FRACTIONAL_TIME_COMPONENTS = (
     (
         re.compile(
-            r"(?P<time>(?:^|[T\s])\d{2}:?\d{2}:?\d{2})"
+            r"(?P<time>(?:^|[T\s])(?:(?:\d{1,2}:){2}\d{1,2}|\d{6}))"
             r"(?P<separator>[.,])(?P<fraction>\d+)",
             re.IGNORECASE,
         ),
@@ -24,7 +24,7 @@ _FRACTIONAL_TIME_COMPONENTS = (
     ),
     (
         re.compile(
-            r"(?P<time>(?:^|[T\s])\d{2}:?\d{2})"
+            r"(?P<time>(?:^|[T\s])(?:\d{1,2}:\d{1,2}|\d{4}))"
             r"(?P<separator>[.,])(?P<fraction>\d+)",
             re.IGNORECASE,
         ),
@@ -33,13 +33,17 @@ _FRACTIONAL_TIME_COMPONENTS = (
     ),
     (
         re.compile(
-            r"(?P<time>(?:^|[T\s])\d{2})"
+            r"(?P<time>(?:^|[T\s])\d{1,2})"
             r"(?P<separator>[.,])(?P<fraction>\d+)",
             re.IGNORECASE,
         ),
         3_600_000_000_000,
         2,
     ),
+)
+_FRACTIONAL_CLOCK = re.compile(
+    r"(?:^|[T\s])\d[\d:]*(?:[.,])\d+",
+    re.IGNORECASE,
 )
 
 
@@ -75,6 +79,8 @@ def parse_timestamp_exact(value: object, *, field: str) -> pd.Timestamp:
                 return pd.Timestamp(value)
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"{field} must be a valid timestamp") from exc
+        if _FRACTIONAL_CLOCK.search(value) is not None:
+            raise ValueError(f"{field} must be a valid timestamp")
     try:
         return pd.Timestamp(value)
     except (TypeError, ValueError) as exc:
