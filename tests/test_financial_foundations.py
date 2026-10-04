@@ -27,14 +27,20 @@ T2 = "2024-03-01T00:00:00Z"
 
 
 def test_financial_utc_preserves_nanoseconds_and_rejects_sub_nanoseconds() -> None:
-    expected = pd.Timestamp("2026-10-04T11:00:00.000000900Z")
-    for value in (
-        "2026-10-04T11:00:00.000000900Z",
-        "2026-10-04T11:00:00.0000009000Z",
+    base = pd.Timestamp("2026-10-04T11:00:00Z").value
+    for value, offset_nanoseconds in (
+        ("2026-10-04T11:00:00.000000900Z", 900),
+        ("2026-10-04T11:00:00.0000009000Z", 900),
+        ("2026-10-04T11:00:00,000000900Z", 900),
+        ("2026-10-04T11:00.0000009001Z", 54_006),
     ):
-        assert utc(value).value == expected.value
-    with pytest.raises(ValueError, match="finer than nanoseconds"):
-        utc("2026-10-04T11:00:00.0000009001Z")
+        assert utc(value).value == base + offset_nanoseconds
+    for value in (
+        "2026-10-04T11:00:00.0000009001Z",
+        "2026-10-04T11:00.00000000001Z",
+    ):
+        with pytest.raises(ValueError, match="finer than nanoseconds"):
+            utc(value)
 
 
 def test_financial_common_boundaries_fail_closed() -> None:

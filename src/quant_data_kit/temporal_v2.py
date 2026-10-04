@@ -12,18 +12,48 @@ import pandas as pd
 from quant_data_kit.exceptions import ValidationError
 
 _UTC_ZONE_NAMES = {"UTC", "Etc/UTC", "GMT", "Etc/GMT", "Z"}
-_FRACTIONAL_SECONDS = re.compile(
-    r"(?:^|[T\s])\d{2}:?\d{2}:?\d{2}[.,](\d+)",
-    re.IGNORECASE,
+_FRACTIONAL_TIME_COMPONENTS = (
+    (
+        re.compile(
+            r"(?:^|[T\s])\d{2}:?\d{2}:?\d{2}(?P<separator>[.,])(?P<fraction>\d+)",
+            re.IGNORECASE,
+        ),
+        1_000_000_000,
+    ),
+    (
+        re.compile(
+            r"(?:^|[T\s])\d{2}:?\d{2}(?P<separator>[.,])(?P<fraction>\d+)",
+            re.IGNORECASE,
+        ),
+        60_000_000_000,
+    ),
+    (
+        re.compile(
+            r"(?:^|[T\s])\d{2}(?P<separator>[.,])(?P<fraction>\d+)",
+            re.IGNORECASE,
+        ),
+        3_600_000_000_000,
+    ),
 )
 
 
 def parse_timestamp_exact(value: object, *, field: str) -> pd.Timestamp:
-    """Parse a timestamp without silently discarding sub-nanosecond digits."""
+    """Parse a timestamp without silently rounding its lowest time component."""
     if isinstance(value, str):
-        match = _FRACTIONAL_SECONDS.search(value)
-        if match is not None and any(digit != "0" for digit in match.group(1)[9:]):
-            raise ValueError(f"{field} has precision finer than nanoseconds")
+        for pattern, component_nanoseconds in _FRACTIONAL_TIME_COMPONENTS:
+            match = pattern.search(value)
+            if match is None:
+                continue
+            fraction = match.group("fraction")
+            numerator = int(fraction) * component_nanoseconds
+            offset_nanoseconds, remainder = divmod(numerator, 10 ** len(fraction))
+            if remainder:
+                raise ValueError(f"{field} has precision finer than nanoseconds")
+            value = value[: match.start("separator")] + value[match.end("fraction") :]
+            try:
+                return pd.Timestamp(value) + pd.Timedelta(offset_nanoseconds, unit="ns")
+            except (OverflowError, TypeError, ValueError) as exc:
+                raise ValueError(f"{field} must be a valid timestamp") from exc
     try:
         return pd.Timestamp(value)
     except (TypeError, ValueError) as exc:

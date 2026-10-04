@@ -173,19 +173,24 @@ def test_temporal_validation_rejects_invalid_shapes_and_intervals() -> None:
 
 
 @pytest.mark.parametrize(
-    "value",
+    ("value", "offset_nanoseconds"),
     [
-        "2026-10-04T11:00:00.000000900Z",
-        "2026-10-04T11:00:00.0000009000Z",
-        "2026-10-04T11:00:00.000000900000Z",
-        "20261004T110000.0000009000Z",
-        "2026-10-04t11:00:00.0000009000z",
-        "2026-10-04T110000.0000009000Z",
+        ("2026-10-04T11:00:00.000000900Z", 900),
+        ("2026-10-04T11:00:00.0000009000Z", 900),
+        ("2026-10-04T11:00:00.000000900000Z", 900),
+        ("20261004T110000.0000009000Z", 900),
+        ("2026-10-04t11:00:00.0000009000z", 900),
+        ("2026-10-04T110000.0000009000Z", 900),
+        ("2026-10-04T11:00:00,5Z", 500_000_000),
+        ("2026-10-04T11:00.0000009001Z", 54_006),
+        ("2026-10-04T11.00000000005Z", 180),
     ],
 )
-def test_exact_timestamp_parser_accepts_representable_fraction(value: str) -> None:
-    expected = pd.Timestamp("2026-10-04T11:00:00.000000900Z")
-    assert parse_timestamp_exact(value, field="event_time").value == expected.value
+def test_exact_timestamp_parser_accepts_representable_fraction(
+    value: str, offset_nanoseconds: int
+) -> None:
+    expected = pd.Timestamp("2026-10-04T11:00:00Z").value + offset_nanoseconds
+    assert parse_timestamp_exact(value, field="event_time").value == expected
 
 
 @pytest.mark.parametrize(
@@ -196,6 +201,8 @@ def test_exact_timestamp_parser_accepts_representable_fraction(value: str) -> No
         "20261004T110000.0000009001Z",
         "2026-10-04t11:00:00.0000009001z",
         "2026-10-04T110000.0000009001Z",
+        "2026-10-04T11:00.00000000001Z",
+        "2026-10-04T11.0000000000001Z",
     ],
 )
 def test_exact_timestamp_parser_rejects_unrepresentable_fraction(value: str) -> None:
