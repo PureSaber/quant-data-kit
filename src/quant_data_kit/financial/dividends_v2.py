@@ -127,7 +127,7 @@ def _exact(value: str) -> Fraction:
 
 
 def _timing_boundary(timing: EvidenceTimingV2):
-    return utc(timing.availability.boundary_at).to_pydatetime()
+    return utc(timing.availability.boundary_at)
 
 
 @dataclass(frozen=True)
@@ -481,10 +481,7 @@ class IssuerFxConversionV2:
         if not isinstance(self.published_payment_amount, PublishedAmount):
             raise TypeError("published_payment_amount must be PublishedAmount")
         boundary = _timing_boundary(self.evidence.timing)
-        if (
-            self.fixing_time.kind == "exact_timestamp"
-            and utc(self.fixing_time.exact_at).to_pydatetime() > boundary
-        ):
+        if self.fixing_time.kind == "exact_timestamp" and utc(self.fixing_time.exact_at) > boundary:
             raise ValueError("issuer conversion cannot be available before its fixing")
         if self.fixing_time.kind == "date":
             zone = ZoneInfo(self.fixing_time.timezone_name)
@@ -660,10 +657,7 @@ class DividendPaymentV2:
             raise ValueError("cash deduction IDs must be unique")
         if self.receipt_status != "received":
             raise ValueError("payment phase requires actual received cash")
-        if (
-            _timing_boundary(self.evidence.timing)
-            < utc(self.evidence.timing.effective_at).to_pydatetime()
-        ):
+        if _timing_boundary(self.evidence.timing) < utc(self.evidence.timing.effective_at):
             raise ValueError("actual payment cannot be available before cash is received")
         total = sum(
             (

@@ -155,6 +155,141 @@ def test_e1_e2_closed_upper_requires_strictly_after_without_epsilon():
     assert "epsilon" not in timing.to_json()
 
 
+NANOSECOND_BOUNDARY = "2026-10-04T11:00:00.000000900Z"
+NANOSECOND_BEFORE = "2026-10-04T11:00:00.000000899Z"
+NANOSECOND_AFTER = "2026-10-04T11:00:00.000000950Z"
+
+
+def nanosecond_timing(*, closed_interval: bool = False) -> EvidenceTimingV2:
+    kwargs = {
+        "effective_at": "2026-10-04T10:00:00Z",
+        "captured_at": "2026-10-04T12:05:00Z",
+        "raw_text": NANOSECOND_BOUNDARY,
+        "revision_id": "nanosecond-boundary",
+        "source_materials": (material("display"),),
+        "display_material_ids": ("display",),
+        "study_mode": "retrospective",
+        "trust_model": "trust_source_declared_time",
+    }
+    if closed_interval:
+        kwargs.update(
+            precision="interval",
+            explicit_interval=NominalPublicationIntervalV2(
+                NANOSECOND_BEFORE,
+                True,
+                NANOSECOND_BOUNDARY,
+                True,
+                "explicit_interval",
+                ("display",),
+            ),
+            display_rule="explicit_interval",
+        )
+    else:
+        kwargs.update(
+            precision="exact_timestamp",
+            exact_at=NANOSECOND_BOUNDARY,
+            display_rule="exact",
+        )
+    return build_evidence_timing_v2(**kwargs).timing
+
+
+@pytest.mark.parametrize(
+    ("cutoff", "expected"),
+    [
+        (NANOSECOND_BEFORE, False),
+        (NANOSECOND_BOUNDARY, True),
+        (NANOSECOND_AFTER, True),
+    ],
+)
+def test_exact_timestamp_admission_preserves_nanosecond_order(cutoff, expected):
+    assert (
+        nanosecond_timing().is_admitted(
+            cutoff,
+            study_mode="retrospective",
+            trust_model="trust_source_declared_time",
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("cutoff", "expected"),
+    [
+        (NANOSECOND_BEFORE, False),
+        (NANOSECOND_BOUNDARY, False),
+        (NANOSECOND_AFTER, True),
+    ],
+)
+def test_strict_interval_admission_preserves_nanosecond_order(cutoff, expected):
+    timing = nanosecond_timing(closed_interval=True)
+    assert timing.availability.admission_relation == "strictly_after"
+    assert (
+        timing.is_admitted(
+            cutoff,
+            study_mode="retrospective",
+            trust_model="trust_source_declared_time",
+        )
+        is expected
+    )
+
+
+def test_natural_forward_acquisition_floor_preserves_nanoseconds():
+    acquired = build_evidence_timing_v2(
+        effective_at="2026-10-04T10:00:00Z",
+        captured_at=NANOSECOND_BEFORE,
+        raw_text="",
+        precision="unknown",
+        revision_id="nanosecond-acquisition",
+        source_materials=(material("display", acquired_at=NANOSECOND_BOUNDARY),),
+        acquired_at=NANOSECOND_BEFORE,
+    ).timing
+
+    assert acquired.revision.acquired_at == NANOSECOND_BOUNDARY
+    boundary = acquired.admission_boundary(
+        study_mode="natural_forward", trust_model="capture_receipt_only"
+    )
+    assert boundary.boundary_at == NANOSECOND_BOUNDARY
+    assert not boundary.admits(NANOSECOND_BEFORE)
+    assert boundary.admits(NANOSECOND_BOUNDARY)
+    with pytest.raises(ValueError, match="source material cannot be acquired after"):
+        replace(
+            acquired,
+            revision=replace(acquired.revision, acquired_at=NANOSECOND_BEFORE),
+        )
+
+    captured = build_evidence_timing_v2(
+        effective_at="2026-10-04T10:00:00Z",
+        captured_at=NANOSECOND_BOUNDARY,
+        raw_text="",
+        precision="unknown",
+        revision_id="nanosecond-capture",
+    ).timing
+    with pytest.raises(ValueError, match="cannot precede captured_at"):
+        replace(
+            captured,
+            revision=replace(captured.revision, acquired_at=NANOSECOND_BEFORE),
+        )
+
+
+def test_nominal_boundary_after_capture_by_one_nanosecond_downgrades():
+    result = build_evidence_timing_v2(
+        effective_at="2026-10-04T10:00:00Z",
+        captured_at=NANOSECOND_BOUNDARY,
+        raw_text=NANOSECOND_AFTER,
+        precision="exact_timestamp",
+        revision_id="nanosecond-after-capture",
+        source_materials=(material("display"),),
+        exact_at=NANOSECOND_AFTER,
+        display_rule="exact",
+        display_material_ids=("display",),
+        study_mode="retrospective",
+        trust_model="trust_source_declared_time",
+    )
+
+    assert result.timing.availability.mode == "captured_only"
+    assert "NOMINAL_BOUND_AFTER_CAPTURE" in reason_codes(result)
+
+
 @pytest.mark.parametrize(
     ("minute", "inclusive"),
     [("2026-09-01T12:02", True), ("2026-09-01T12:01", False)],

@@ -283,6 +283,51 @@ def test_migrated_target_economics_remain_bound_to_original_v1(change):
         DividendLifecycleV2.from_dict(payload)
 
 
+@pytest.mark.parametrize(
+    "phase",
+    ["proposal", "entitlement", "election", "conversion", "payment_policy", "payment"],
+)
+def test_migrated_timing_facts_remain_bound_across_every_phase(phase):
+    lifecycle = migrate_dividend_lifecycle_v1_to_v2(
+        complete_v1().to_json(),
+        migration_id="timing-binding-phases",
+        migrated_at="2026-10-04T00:00:00Z",
+    ).lifecycle
+    payload = lifecycle.to_dict()
+    payload[phase]["evidence"]["timing"]["source_publication"]["raw_text"] = "2026-07-01T00:00:01Z"
+
+    with pytest.raises(ValueError, match="timing facts"):
+        DividendLifecycleV2.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("effective_at", "2026-01-09T01:30:00Z"),
+        ("effective_at", "2026-01-11T01:30:00Z"),
+        ("source_exact_at", "2026-01-01T00:00:01Z"),
+        ("source_raw_text", "2026-01-01T00:00:01Z"),
+    ],
+)
+def test_direct_v2_parser_rejects_mutated_legacy_time_facts(field, value):
+    lifecycle = migrate_dividend_lifecycle_v1_to_v2(
+        fixture_bytes("dividend_lifecycle_v1_exact.json"),
+        migration_id="timing-binding-direct-parse",
+        migrated_at="2026-10-04T00:00:00Z",
+    ).lifecycle
+    payload = lifecycle.to_dict()
+    timing = payload["entitlement"]["evidence"]["timing"]
+    if field == "source_exact_at":
+        timing["source_publication"]["exact_at"] = value
+    elif field == "source_raw_text":
+        timing["source_publication"]["raw_text"] = value
+    else:
+        timing[field] = value
+
+    with pytest.raises(ValueError, match="timing facts"):
+        DividendLifecycleV2.from_dict(payload)
+
+
 def test_legacy_binding_is_deeply_immutable_after_validation():
     lifecycle = migrate_dividend_lifecycle_v1_to_v2(
         fixture_bytes("dividend_lifecycle_v1_exact.json"),

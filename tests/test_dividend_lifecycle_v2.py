@@ -220,6 +220,27 @@ def test_exact_fixing_after_availability_boundary_rejected():
         replace(lifecycle.conversion, fixing_time=late)
 
 
+def test_exact_fixing_comparison_preserves_nanoseconds():
+    lifecycle = full_lifecycle()
+    boundary = "2026-07-01T00:00:00.000000900Z"
+    conversion = replace(
+        lifecycle.conversion,
+        evidence=evidence("conversion-nanoseconds", "2026-06-19T10:00:00Z", boundary),
+        fixing_time=IssuerFixingTimeV2(
+            "exact_timestamp", "2026-07-01T00:00:00.000000899Z", None, None, None, None
+        ),
+    )
+    assert conversion.fixing_time.exact_at.endswith("000000899Z")
+
+    with pytest.raises(ValueError, match="before its fixing"):
+        replace(
+            conversion,
+            fixing_time=IssuerFixingTimeV2(
+                "exact_timestamp", "2026-07-01T00:00:00.000000901Z", None, None, None, None
+            ),
+        )
+
+
 def test_payment_balance_and_duplicate_deductions_fail_closed():
     lifecycle = full_lifecycle()
     with pytest.raises(ValueError, match="gross=net"):
@@ -240,6 +261,17 @@ def test_payment_cannot_be_available_before_receipt():
     early = evidence("early-payment", "2026-07-02T00:00:00Z", "2026-07-01T00:00:00Z")
     with pytest.raises(ValueError, match="before cash is received"):
         replace(lifecycle.payment, evidence=early)
+
+
+def test_payment_receipt_comparison_preserves_nanoseconds():
+    lifecycle = full_lifecycle()
+    boundary = "2026-07-01T00:00:00.000000900Z"
+    received = evidence("payment-nanoseconds", "2026-07-01T00:00:00.000000899Z", boundary)
+    assert replace(lifecycle.payment, evidence=received).evidence == received
+
+    premature = evidence("payment-nanoseconds", "2026-07-01T00:00:00.000000901Z", boundary)
+    with pytest.raises(ValueError, match="before cash is received"):
+        replace(lifecycle.payment, evidence=premature)
 
 
 def test_entitlement_currency_and_status_invariants():

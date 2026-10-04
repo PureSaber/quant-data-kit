@@ -98,8 +98,8 @@ def _timestamp(value: object, field: str) -> str:
     return utc(value, field).isoformat().replace("+00:00", "Z")
 
 
-def _instant(value: str) -> datetime:
-    return utc(value).to_pydatetime()
+def _instant(value: str):
+    return utc(value)
 
 
 def _plain_minute(value: object, field: str) -> str:
@@ -787,7 +787,7 @@ class AdmissionBoundaryV2:
             raise ValueError("unsupported admission boundary relation")
 
     def admits(self, cutoff: str | datetime) -> bool:
-        point = utc(cutoff, "cutoff").to_pydatetime()
+        point = utc(cutoff, "cutoff")
         boundary = _instant(self.boundary_at)
         return point >= boundary if self.relation == "at_or_after" else point > boundary
 

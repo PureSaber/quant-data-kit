@@ -359,25 +359,19 @@ def validate_legacy_v1_binding_v2(lifecycle: DividendLifecycleV2) -> None:
         source_value = EvidenceTiming.from_dict(
             _source_at_pointer(binding.source_v1_payload, item.source_pointer)
         )
-        if (
-            source_value.available_at != item.source_available_at
-            or source_value.captured_at != item.source_captured_at
-        ):
+        expected_timing, expected_binding = _migrated_timing(
+            source_value,
+            pointer=item.source_pointer,
+            event_id=item.target_event_id,
+            migrated_at=binding.migrated_at,
+        )
+        if item != expected_binding:
             raise ValueError("legacy timing binding values differ from the embedded v1 source")
         target = targets[item.target_event_id].timing
-        if target.captured_at != source_value.captured_at:
-            raise ValueError("migrated timing did not preserve source captured_at")
-        if utc(target.revision.acquired_at) < utc(binding.migrated_at):
-            raise ValueError("migrated evidence revision predates the migration")
-        if source_value.source_published_at is not None:
-            if (
-                target.availability.basis != "legacy_available_at"
-                or target.availability.legacy_timing_pointer != item.source_pointer
-                or target.availability.boundary_at != source_value.available_at
-            ):
-                raise ValueError("legacy exact availability is not closed against its v1 source")
-        elif target.availability.mode != "captured_only":
-            raise ValueError("legacy date or unknown timing must remain captured_only")
+        if target != expected_timing:
+            raise ValueError(
+                "migrated timing facts differ from the embedded v1 source and migration rule"
+            )
 
 
 def _migrated_timing(
