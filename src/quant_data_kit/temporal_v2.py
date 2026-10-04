@@ -15,24 +15,30 @@ _UTC_ZONE_NAMES = {"UTC", "Etc/UTC", "GMT", "Etc/GMT", "Z"}
 _FRACTIONAL_TIME_COMPONENTS = (
     (
         re.compile(
-            r"(?:^|[T\s])\d{2}:?\d{2}:?\d{2}(?P<separator>[.,])(?P<fraction>\d+)",
+            r"(?P<time>(?:^|[T\s])\d{2}:?\d{2}:?\d{2})"
+            r"(?P<separator>[.,])(?P<fraction>\d+)",
             re.IGNORECASE,
         ),
         1_000_000_000,
+        0,
     ),
     (
         re.compile(
-            r"(?:^|[T\s])\d{2}:?\d{2}(?P<separator>[.,])(?P<fraction>\d+)",
+            r"(?P<time>(?:^|[T\s])\d{2}:?\d{2})"
+            r"(?P<separator>[.,])(?P<fraction>\d+)",
             re.IGNORECASE,
         ),
         60_000_000_000,
+        1,
     ),
     (
         re.compile(
-            r"(?:^|[T\s])\d{2}(?P<separator>[.,])(?P<fraction>\d+)",
+            r"(?P<time>(?:^|[T\s])\d{2})"
+            r"(?P<separator>[.,])(?P<fraction>\d+)",
             re.IGNORECASE,
         ),
         3_600_000_000_000,
+        2,
     ),
 )
 
@@ -40,7 +46,7 @@ _FRACTIONAL_TIME_COMPONENTS = (
 def parse_timestamp_exact(value: object, *, field: str) -> pd.Timestamp:
     """Parse a timestamp without silently rounding its lowest time component."""
     if isinstance(value, str):
-        for pattern, component_nanoseconds in _FRACTIONAL_TIME_COMPONENTS:
+        for pattern, component_nanoseconds, lower_components in _FRACTIONAL_TIME_COMPONENTS:
             match = pattern.search(value)
             if match is None:
                 continue
@@ -49,10 +55,25 @@ def parse_timestamp_exact(value: object, *, field: str) -> pd.Timestamp:
             offset_nanoseconds, remainder = divmod(numerator, 10 ** len(fraction))
             if remainder:
                 raise ValueError(f"{field} has precision finer than nanoseconds")
-            value = value[: match.start("separator")] + value[match.end("fraction") :]
+            whole_seconds, nanoseconds = divmod(offset_nanoseconds, 1_000_000_000)
+            if lower_components == 1:
+                separator = ":" if ":" in match.group("time") else ""
+                lower_time = f"{separator}{whole_seconds:02d}"
+            elif lower_components == 2:
+                minutes, seconds = divmod(whole_seconds, 60)
+                lower_time = f":{minutes:02d}:{seconds:02d}"
+            else:
+                lower_time = ""
+            fractional_seconds = f".{nanoseconds:09d}".rstrip("0") if nanoseconds else ""
+            value = (
+                value[: match.start("separator")]
+                + lower_time
+                + fractional_seconds
+                + value[match.end("fraction") :]
+            )
             try:
-                return pd.Timestamp(value) + pd.Timedelta(offset_nanoseconds, unit="ns")
-            except (OverflowError, TypeError, ValueError) as exc:
+                return pd.Timestamp(value)
+            except (TypeError, ValueError) as exc:
                 raise ValueError(f"{field} must be a valid timestamp") from exc
     try:
         return pd.Timestamp(value)

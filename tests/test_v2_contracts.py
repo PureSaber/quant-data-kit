@@ -210,6 +210,35 @@ def test_exact_timestamp_parser_rejects_unrepresentable_fraction(value: str) -> 
         parse_timestamp_exact(value, field="event_time")
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (
+            "0001-01-01T00:00:00.000001Z",
+            datetime(1, 1, 1, microsecond=1, tzinfo=timezone.utc),
+        ),
+        (
+            "9999-01-01T00:00:00.500000Z",
+            datetime(9999, 1, 1, microsecond=500_000, tzinfo=timezone.utc),
+        ),
+        (
+            pd.Timestamp(pd.Timestamp.min.value, unit="ns", tz="UTC")
+            .isoformat()
+            .replace("+00:00", "Z"),
+            pd.Timestamp(pd.Timestamp.min.value, unit="ns", tz="UTC"),
+        ),
+        (
+            pd.Timestamp(pd.Timestamp.max.value, unit="ns", tz="UTC")
+            .isoformat()
+            .replace("+00:00", "Z"),
+            pd.Timestamp(pd.Timestamp.max.value, unit="ns", tz="UTC"),
+        ),
+    ],
+)
+def test_exact_timestamp_parser_preserves_calendar_domain(value: str, expected) -> None:
+    assert parse_timestamp_exact(value, field="event_time") == expected
+
+
 def test_market_event_json_and_arrow_preserve_nanosecond_instants() -> None:
     event_time = pd.Timestamp("2026-10-04T11:00:00.000000900Z")
     received_at = event_time + pd.Timedelta(1, unit="ns")
