@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 CORE_THRESHOLDS = {
+    "src/quant_data_kit/financial/common.py": 90,
     "src/quant_data_kit/financial/publication_time_v2.py": 90,
     "src/quant_data_kit/financial/dividends_v2.py": 90,
     "src/quant_data_kit/financial/dividend_migration_v2.py": 90,
@@ -18,6 +19,7 @@ CORE_THRESHOLDS = {
     "src/quant_data_kit/research_inputs_v2.py": 90,
     "src/quant_data_kit/process_lock.py": 90,
     "src/quant_data_kit/schemas_v2.py": 90,
+    "src/quant_data_kit/temporal_v2.py": 90,
     "src/quant_data_kit/l2_replay.py": 90,
     "src/quant_data_kit/adapters_v2/base.py": 90,
     "src/quant_data_kit/adapters_v2/binance.py": 90,

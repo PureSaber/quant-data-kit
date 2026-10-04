@@ -134,6 +134,44 @@ def test_open_intervals_overlap_at_maximum_timestamp() -> None:
         validate_bitemporal_frame(facts, key_columns=["instrument_id"])
 
 
+def test_temporal_validation_rejects_invalid_shapes_and_intervals() -> None:
+    with pytest.raises(ValueError, match="valid timestamp"):
+        parse_timestamp_exact(object(), field="event_time")
+    with pytest.raises(ValidationError, match="must be a datetime"):
+        ensure_utc_datetime(object(), field="event_time")  # type: ignore[arg-type]
+
+    valid = pd.DataFrame(
+        {
+            "instrument_id": ["asset-1"],
+            "effective_from": [T0],
+            "effective_to": [pd.NaT],
+            "available_at": [T0],
+            "superseded_at": [pd.NaT],
+            "value": [1],
+        }
+    )
+    with pytest.raises(ValidationError, match="Missing bitemporal keys"):
+        validate_bitemporal_frame(valid, key_columns=["missing"])
+    with pytest.raises(ValidationError, match="Missing temporal column"):
+        validate_bitemporal_frame(
+            valid.drop(columns="effective_from"), key_columns=["instrument_id"]
+        )
+    with pytest.raises(ValidationError, match="effective_to"):
+        validate_bitemporal_frame(valid.assign(effective_to=T0), key_columns=["instrument_id"])
+    with pytest.raises(ValidationError, match="superseded_at"):
+        validate_bitemporal_frame(valid.assign(superseded_at=T0), key_columns=["instrument_id"])
+
+    empty = pd.DataFrame(columns=["instrument_id", "observation_time", "as_of"])
+    assert point_in_time_join_bitemporal(empty, valid).empty
+    observation = pd.DataFrame(
+        {"instrument_id": ["asset-1"], "observation_time": [T0], "as_of": [T0]}
+    )
+    with pytest.raises(ValidationError, match="Missing point-in-time keys"):
+        point_in_time_join_bitemporal(observation.drop(columns="instrument_id"), valid)
+    with pytest.raises(ValidationError, match="Missing fact columns"):
+        point_in_time_join_bitemporal(observation, valid, fact_columns=["missing"])
+
+
 @pytest.mark.parametrize(
     "value",
     [

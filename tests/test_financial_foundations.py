@@ -6,7 +6,18 @@ import pytest
 
 from quant_data_kit.financial import calendars, holdings, lifecycle, macro, reconciliation, status
 from quant_data_kit.financial.actions import ActionTerms
-from quant_data_kit.financial.common import utc
+from quant_data_kit.financial.common import (
+    day as financial_day,
+)
+from quant_data_kit.financial.common import (
+    number as financial_number,
+)
+from quant_data_kit.financial.common import (
+    table as financial_table,
+)
+from quant_data_kit.financial.common import (
+    utc,
+)
 from quant_data_kit.financial.units import normalize_trading_units
 from quant_data_kit.us_research.sec import quarterly_facts, ttm_facts
 
@@ -24,6 +35,54 @@ def test_financial_utc_preserves_nanoseconds_and_rejects_sub_nanoseconds() -> No
         assert utc(value).value == expected.value
     with pytest.raises(ValueError, match="finer than nanoseconds"):
         utc("2026-10-04T11:00:00.0000009001Z")
+
+
+def test_financial_common_boundaries_fail_closed() -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        utc(pd.NaT)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        utc("2026-10-04T11:00:00")
+    assert utc("2026-10-04T19:00:00+08:00") == pd.Timestamp("2026-10-04T11:00:00Z")
+
+    assert financial_day("2026-10-04") == pd.Timestamp("2026-10-04")
+    for invalid_day in (pd.NaT, "2026-10-04T01:00:00", "2026-10-04T00:00:00Z"):
+        with pytest.raises(ValueError, match="plain calendar date"):
+            financial_day(invalid_day)
+
+    with pytest.raises(TypeError, match="boolean"):
+        financial_number(True)
+    with pytest.raises(ValueError, match="invalid financial number"):
+        financial_number("not-a-number")
+    for invalid_number in ("NaN", "Infinity"):
+        with pytest.raises(ValueError, match="finite"):
+            financial_number(invalid_number)
+    with pytest.raises(ValueError, match="sign"):
+        financial_number(-1, nonnegative=True)
+    assert financial_number(-1) == Decimal(-1)
+
+    frame = pd.DataFrame(
+        {
+            "id": ["one", "two"],
+            "known_at": ["2026-10-04T11:00:00Z", "2026-10-04T11:00:01Z"],
+            "day": ["2026-10-04", "2026-10-05"],
+        }
+    )
+    converted = financial_table(
+        frame,
+        ["id", "known_at", "day"],
+        text=["id"],
+        timestamps=["known_at"],
+        dates=["day"],
+        unique=["id"],
+    )
+    assert str(converted["known_at"].dtype) == "datetime64[ns, UTC]"
+    assert str(converted["day"].dtype) == "datetime64[ns]"
+    with pytest.raises(ValueError, match="missing columns"):
+        financial_table(frame, ["missing"])
+    with pytest.raises(ValueError, match="nonempty strings"):
+        financial_table(frame.assign(id=""), frame.columns, text=["id"])
+    with pytest.raises(ValueError, match="ambiguous duplicate facts"):
+        financial_table(frame.assign(id="one"), frame.columns, unique=["id"])
 
 
 def lifecycle_row(kind, effective=T0, known=T0, **kw):
