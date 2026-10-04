@@ -23,6 +23,7 @@ _LEGACY_CONTEXT_V2 = object()
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _OFFSET = re.compile(r"([+-])(\d{2}):(\d{2})\Z")
+_PLAIN_DATE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 _PRECISIONS = {"exact_timestamp", "minute", "date", "interval", "unknown"}
 _MATERIAL_KINDS = {"official_document", "official_response_metadata", "trusted_archive"}
 _ZONE_STATUSES = {"evidenced_iana", "evidenced_offset", "unverified", "not_applicable"}
@@ -118,12 +119,14 @@ def _minute_value(value: str) -> datetime:
 
 def _plain_date(value: object, field: str) -> str:
     value = _text(value, field)
+    if _PLAIN_DATE.fullmatch(value) is None:
+        if re.fullmatch(r"\d{8}", value):
+            raise ValueError(f"{field} must be a canonical ISO calendar date")
+        raise ValueError(f"{field} must be a plain ISO calendar date")
     try:
-        parsed = date.fromisoformat(value)
+        date.fromisoformat(value)
     except ValueError as exc:
         raise ValueError(f"{field} must be a plain ISO calendar date") from exc
-    if parsed.isoformat() != value:
-        raise ValueError(f"{field} must be a canonical ISO calendar date")
     return value
 
 
