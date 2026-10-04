@@ -35,6 +35,16 @@
 
 快照和裁决有内容哈希，不等于数字签名/审批权限控制。调用者仍须保管完整来源、旧版本和运行依赖图。
 
+## 07 股息来源发布时间与生命周期v2
+
+`financial.EvidenceTimingV2`以`puresaber.evidence-timing/2`显式区分精确带offset时间、来源本地分钟、发布日期、绝对区间和未知精度。名义区间保存上下端点及开闭；排他上界用`at_or_after`准入，闭上界用`strictly_after`准入，不添加微秒或其他epsilon。分钟先用有证据的offset，或IANA zone加fold/offset，解析为唯一绝对锚点，再在绝对时间线上执行截断或舍入推导。日期分别解析相邻两个本地午夜，因此23/25小时日合法，歧义或不存在的午夜不会被猜测。
+
+被标为evidenced的zone、显示规则、日期语义、区间和clock accuracy必须引用`SourceMaterialReferenceV2`。材料包含冻结版本、SHA-256、定位、审查引用和实际获得时间；QDK只验证结构闭合，不认证调用方ID、发布者或归档机构。材料不完整时`build_evidence_timing_v2()`产生带稳定降级原因的合法`captured_only`；严格`from_dict()`拒绝残缺或矛盾的evidenced声明。物理clock accuracy为unknown不冒充物理边界，也不单独推翻材料完整的名义来源模型。
+
+名义时间只在调用方同时选择`study_mode="retrospective"`和`trust_source_declared_time`时可用。自然前向准入取本地capture、修订/迁移和所用材料实际获得时间的最大值，后来取得的材料不能回填旧运行。`trusted_archive`允许清单由外层治理维护，不写入QDK。
+
+`financial.DividendLifecycleV2`是独立`puresaber.dividend-lifecycle/2`类型，完整覆盖proposal、entitlement、payment election、issuer conversion、payment policy和payment的金额、币种、账户、顺序及现金恒等式。它不继承v1，旧消费者的`isinstance(DividendLifecycle)`不会接纳它。`migrate_dividend_lifecycle_v1_to_v2()`只接受实际规范v1 JSON字节，重新解析并计算source fingerprint，绑定嵌入v1 payload、每个timing JSON pointer、旧available/captured值和迁移规则；普通v2对象不能手写`legacy_available_at`。v1类型、解析器、规范字节和指纹保持不变。
+
 ## 08 SEC 独立季度、TTM、重述
 
 `us_research.sec.quarterly_facts(facts, at)` 按实际 fiscal period 边界识别直接季度、同年度累计差分；不按自然季度硬切，不把累计数字当独立季度。保留 accession 与 vintage_consistent。
