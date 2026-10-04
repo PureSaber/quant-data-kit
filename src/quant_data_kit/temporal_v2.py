@@ -12,11 +12,12 @@ import pandas as pd
 from quant_data_kit.exceptions import ValidationError
 
 _UTC_ZONE_NAMES = {"UTC", "Etc/UTC", "GMT", "Etc/GMT", "Z"}
+_CLOCK_END = r"(?=\s*(?:[Zz]|[+-]\d{1,2}(?::?\d{2}){0,2}|[A-Za-z][\w./+-]*)?\s*$)"
 _FRACTIONAL_TIME_COMPONENTS = (
     (
         re.compile(
             r"(?P<time>(?:^|[T\s])(?:(?:\d{1,2}:){2}\d{1,2}|\d{6}))"
-            r"(?P<separator>[.,])(?P<fraction>\d+)",
+            r"(?P<separator>[.,])(?P<fraction>\d+)" + _CLOCK_END,
             re.IGNORECASE,
         ),
         1_000_000_000,
@@ -25,7 +26,7 @@ _FRACTIONAL_TIME_COMPONENTS = (
     (
         re.compile(
             r"(?P<time>(?:^|[T\s])(?:\d{1,2}:\d{1,2}|\d{4}))"
-            r"(?P<separator>[.,])(?P<fraction>\d+)",
+            r"(?P<separator>[.,])(?P<fraction>\d+)" + _CLOCK_END,
             re.IGNORECASE,
         ),
         60_000_000_000,
@@ -34,7 +35,7 @@ _FRACTIONAL_TIME_COMPONENTS = (
     (
         re.compile(
             r"(?P<time>(?:^|[T\s])\d{1,2})"
-            r"(?P<separator>[.,])(?P<fraction>\d+)",
+            r"(?P<separator>[.,])(?P<fraction>\d+)" + _CLOCK_END,
             re.IGNORECASE,
         ),
         3_600_000_000_000,
@@ -42,7 +43,7 @@ _FRACTIONAL_TIME_COMPONENTS = (
     ),
 )
 _FRACTIONAL_CLOCK = re.compile(
-    r"(?:^|[T\s])\d[\d:]*(?:[.,])\d+",
+    r"(?:^|[T\s])\d[\d:]*(?:[.,])\d+" + _CLOCK_END,
     re.IGNORECASE,
 )
 

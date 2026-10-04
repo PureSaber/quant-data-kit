@@ -248,6 +248,18 @@ def test_exact_timestamp_parser_rejects_unrecognized_fractional_clock() -> None:
         parse_timestamp_exact("2026-10-04T1::2.000000900Z", field="event_time")
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("2026.10.04 00:00:00+00:00", "2026-10-04T00:00:00Z"),
+        ("2026.10.04T00:00:00.000900Z", "2026-10-04T00:00:00.000900Z"),
+        ("04.10.2026 00:00:00+00:00", "2026-04-10T00:00:00Z"),
+    ],
+)
+def test_exact_timestamp_parser_does_not_rewrite_date_token(value: str, expected: str) -> None:
+    assert parse_timestamp_exact(value, field="event_time") == pd.Timestamp(expected)
+
+
 def test_market_event_json_and_arrow_preserve_nanosecond_instants() -> None:
     event_time = pd.Timestamp("2026-10-04T11:00:00.000000900Z")
     received_at = event_time + pd.Timedelta(1, unit="ns")
