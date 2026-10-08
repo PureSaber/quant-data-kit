@@ -47,6 +47,6 @@ jobs:
 
       - name: Pytest with pure branch coverage gates
         run: |
-          coverage run --branch -m pytest -q
+          coverage run --branch --source=quant_data_kit -m pytest -q
           coverage json -o coverage.json
           python tools/check_branch_coverage.py coverage.json

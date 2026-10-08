@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
 import pytest
 
 from quant_data_kit import (
@@ -32,6 +33,7 @@ from quant_data_kit import (
     ensure_utc_datetime,
     market_event_payload,
     point_in_time_join_bitemporal,
+    validate_bitemporal_frame,
     validate_event_stream,
     validate_json_record,
 )
@@ -51,6 +53,7 @@ from quant_data_kit.schemas_v2 import (
     TRADING_SESSION_SCHEMA_ID,
     get_arrow_schema,
 )
+from quant_data_kit.temporal_v2 import parse_timestamp_exact
 
 UTC = timezone.utc
 T0 = datetime(2026, 1, 2, 1, 0, tzinfo=UTC)
@@ -85,6 +88,264 @@ def test_fixed_point_is_exact_and_utc_is_strict() -> None:
             datetime(2026, 1, 1, tzinfo=timezone(timedelta(hours=8))),
             field="event_time",
         )
+
+
+def test_public_temporal_contracts_preserve_nanosecond_instants() -> None:
+    available = pd.Timestamp("2026-10-04T11:00:00.000000900Z")
+    before = available - pd.Timedelta(1, unit="ns")
+    assert (
+        pd.Timestamp(ensure_utc_datetime(available, field="available_at")).value == available.value
+    )
+
+    facts = pd.DataFrame(
+        {
+            "instrument_id": ["asset-1"],
+            "effective_from": [T0],
+            "effective_to": [pd.NaT],
+            "available_at": [available],
+            "superseded_at": [available + pd.Timedelta(1, unit="ns")],
+            "value": [7],
+        }
+    )
+    observations = pd.DataFrame(
+        {
+            "instrument_id": ["asset-1", "asset-1"],
+            "observation_time": [available, available],
+            "as_of": [before, available],
+        }
+    )
+    joined = point_in_time_join_bitemporal(observations, facts, fact_columns=["value"])
+    assert pd.isna(joined.loc[0, "value"])
+    assert joined.loc[1, "value"] == 7
+
+
+def test_open_intervals_overlap_at_maximum_timestamp() -> None:
+    maximum = pd.Timestamp.max.tz_localize("UTC")
+    facts = pd.DataFrame(
+        {
+            "instrument_id": ["asset-1", "asset-1"],
+            "effective_from": [T0, maximum],
+            "effective_to": [pd.NaT, pd.NaT],
+            "available_at": [T0, T0],
+            "superseded_at": [pd.NaT, pd.NaT],
+        }
+    )
+    with pytest.raises(ValidationError, match="ambiguous"):
+        validate_bitemporal_frame(facts, key_columns=["instrument_id"])
+
+
+def test_temporal_validation_rejects_invalid_shapes_and_intervals() -> None:
+    with pytest.raises(ValueError, match="valid timestamp"):
+        parse_timestamp_exact(object(), field="event_time")
+    with pytest.raises(ValidationError, match="must be a datetime"):
+        ensure_utc_datetime(object(), field="event_time")  # type: ignore[arg-type]
+
+    valid = pd.DataFrame(
+        {
+            "instrument_id": ["asset-1"],
+            "effective_from": [T0],
+            "effective_to": [pd.NaT],
+            "available_at": [T0],
+            "superseded_at": [pd.NaT],
+            "value": [1],
+        }
+    )
+    with pytest.raises(ValidationError, match="Missing bitemporal keys"):
+        validate_bitemporal_frame(valid, key_columns=["missing"])
+    with pytest.raises(ValidationError, match="Missing temporal column"):
+        validate_bitemporal_frame(
+            valid.drop(columns="effective_from"), key_columns=["instrument_id"]
+        )
+    with pytest.raises(ValidationError, match="effective_to"):
+        validate_bitemporal_frame(valid.assign(effective_to=T0), key_columns=["instrument_id"])
+    with pytest.raises(ValidationError, match="superseded_at"):
+        validate_bitemporal_frame(valid.assign(superseded_at=T0), key_columns=["instrument_id"])
+
+    empty = pd.DataFrame(columns=["instrument_id", "observation_time", "as_of"])
+    assert point_in_time_join_bitemporal(empty, valid).empty
+    observation = pd.DataFrame(
+        {"instrument_id": ["asset-1"], "observation_time": [T0], "as_of": [T0]}
+    )
+    with pytest.raises(ValidationError, match="Missing point-in-time keys"):
+        point_in_time_join_bitemporal(observation.drop(columns="instrument_id"), valid)
+    with pytest.raises(ValidationError, match="Missing fact columns"):
+        point_in_time_join_bitemporal(observation, valid, fact_columns=["missing"])
+
+
+@pytest.mark.parametrize(
+    ("value", "offset_nanoseconds"),
+    [
+        ("2026-10-04T11:00:00.000000900Z", 900),
+        ("2026-10-04T11:00:00.0000009000Z", 900),
+        ("2026-10-04T11:00:00.000000900000Z", 900),
+        ("20261004T110000.0000009000Z", 900),
+        ("2026-10-04t11:00:00.0000009000z", 900),
+        ("2026-10-04T110000.0000009000Z", 900),
+        ("2026-10-04T11:00:00,5Z", 500_000_000),
+        ("2026-10-04T11:00.0000009001Z", 54_006),
+        ("2026-10-04T11.00000000005Z", 180),
+        ("2026-10-04 11:0:0.0000009000+00:00", 900),
+        ("2026-10-04 11:0.0000009001+00:00", 54_006),
+    ],
+)
+def test_exact_timestamp_parser_accepts_representable_fraction(
+    value: str, offset_nanoseconds: int
+) -> None:
+    expected = pd.Timestamp("2026-10-04T11:00:00Z").value + offset_nanoseconds
+    assert parse_timestamp_exact(value, field="event_time").value == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-10-04T11:00:00.0000009001Z",
+        "1969-12-31T23:59:59.9999999991Z",
+        "20261004T110000.0000009001Z",
+        "2026-10-04t11:00:00.0000009001z",
+        "2026-10-04T110000.0000009001Z",
+        "2026-10-04T11:00.00000000001Z",
+        "2026-10-04T11.0000000000001Z",
+        "2026-10-04 0:0:0.0000009001+00:00",
+        "2026-10-04 0:0.00000000001+00:00",
+    ],
+)
+def test_exact_timestamp_parser_rejects_unrepresentable_fraction(value: str) -> None:
+    with pytest.raises(ValueError, match="finer than nanoseconds"):
+        parse_timestamp_exact(value, field="event_time")
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (
+            "0001-01-01T00:00:00.000001Z",
+            datetime(1, 1, 1, microsecond=1, tzinfo=timezone.utc),
+        ),
+        (
+            "9999-01-01T00:00:00.500000Z",
+            datetime(9999, 1, 1, microsecond=500_000, tzinfo=timezone.utc),
+        ),
+        (
+            pd.Timestamp(pd.Timestamp.min.value, unit="ns", tz="UTC")
+            .isoformat()
+            .replace("+00:00", "Z"),
+            pd.Timestamp(pd.Timestamp.min.value, unit="ns", tz="UTC"),
+        ),
+        (
+            pd.Timestamp(pd.Timestamp.max.value, unit="ns", tz="UTC")
+            .isoformat()
+            .replace("+00:00", "Z"),
+            pd.Timestamp(pd.Timestamp.max.value, unit="ns", tz="UTC"),
+        ),
+    ],
+)
+def test_exact_timestamp_parser_preserves_calendar_domain(value: str, expected) -> None:
+    assert parse_timestamp_exact(value, field="event_time") == expected
+
+
+def test_exact_timestamp_parser_rejects_unrecognized_fractional_clock() -> None:
+    with pytest.raises(ValueError, match="valid timestamp"):
+        parse_timestamp_exact("2026-10-04T1::2.000000900Z", field="event_time")
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("2026.10.04 00:00:00+00:00", "2026-10-04T00:00:00Z"),
+        ("2026.10.04T00:00:00.000900Z", "2026-10-04T00:00:00.000900Z"),
+        ("04.10.2026 00:00:00+00:00", "2026-04-10T00:00:00Z"),
+    ],
+)
+def test_exact_timestamp_parser_does_not_rewrite_date_token(value: str, expected: str) -> None:
+    assert parse_timestamp_exact(value, field="event_time") == pd.Timestamp(expected)
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "AM UTC",
+        "AM +00:00",
+        "a.m. GMT",
+        "AM GMT+0000",
+        "AM GMT +0000",
+        "UTC AM",
+        "+00:00 AM",
+    ],
+)
+def test_exact_timestamp_parser_checks_fraction_before_meridiem_timezone(
+    suffix: str,
+) -> None:
+    value = f"October 4, 2026 12:00:00.000000900 {suffix}"
+    expected = pd.Timestamp("2026-10-04T00:00:00.000000900Z")
+    assert parse_timestamp_exact(value, field="event_time") == expected
+    with pytest.raises(ValueError, match="finer than nanoseconds"):
+        parse_timestamp_exact(
+            f"October 4, 2026 12:00:00.0000009001 {suffix}",
+            field="event_time",
+        )
+
+
+def test_exact_fractional_minute_with_meridiem_timezone() -> None:
+    base = pd.Timestamp("2026-10-04T00:00:00Z").value
+    assert (
+        parse_timestamp_exact(
+            "October 4, 2026 12:00.0000009001 AM UTC",
+            field="event_time",
+        ).value
+        == base + 54_006
+    )
+    with pytest.raises(ValueError, match="finer than nanoseconds"):
+        parse_timestamp_exact(
+            "October 4, 2026 12:00.00000000001 AM UTC",
+            field="event_time",
+        )
+    naive = parse_timestamp_exact(
+        "October 4, 2026 12:00.0000009001 AM",
+        field="event_time",
+    )
+    assert naive.value == pd.Timestamp("2026-10-04T00:00:00").value + 54_006
+
+
+def test_market_event_json_and_arrow_preserve_nanosecond_instants() -> None:
+    event_time = pd.Timestamp("2026-10-04T11:00:00.000000900Z")
+    received_at = event_time + pd.Timedelta(1, unit="ns")
+    available_at = received_at + pd.Timedelta(1, unit="ns")
+    trade = TradeEvent(
+        **{
+            **event_base(20),
+            "event_time": event_time,
+            "received_at": received_at,
+            "available_at": available_at,
+        },
+        price=fp("100.00"),
+        quantity=fp("1.00"),
+    )
+    payload = market_event_payload(trade)
+    assert payload["event_time"].endswith("000000900Z")
+    assert payload["received_at"].endswith("000000901Z")
+    assert payload["available_at"].endswith("000000902Z")
+    validate_json_record(TRADE_EVENT_SCHEMA_ID, payload)
+
+    ready = dict(payload)
+    for field_name in ("event_time", "received_at", "available_at"):
+        ready[field_name] = pd.Timestamp(ready[field_name])
+    ready["trading_day"] = date.fromisoformat(ready["trading_day"])
+    table = pa.Table.from_pylist([ready], schema=get_arrow_schema(TRADE_EVENT_SCHEMA_ID))
+    row = table.to_pylist()[0]
+    assert pd.Timestamp(row["event_time"]).value == event_time.value
+    assert pd.Timestamp(row["received_at"]).value == received_at.value
+    assert pd.Timestamp(row["available_at"]).value == available_at.value
+
+    invalid = dict(payload)
+    invalid["event_time"] = "2026-10-04T11:00:00.000000902Z"
+    invalid["received_at"] = "2026-10-04T11:00:00.000000901Z"
+    with pytest.raises(ValidationError, match="received_at"):
+        validate_json_record(TRADE_EVENT_SCHEMA_ID, invalid)
+
+    unrepresentable = dict(payload)
+    unrepresentable["event_time"] = "2026-10-04T11:00:00.0000009001Z"
+    with pytest.raises(ValidationError, match="exactly representable"):
+        validate_json_record(TRADE_EVENT_SCHEMA_ID, unrepresentable)
 
 
 def test_instrument_spec_matches_json_and_arrow_contracts() -> None:

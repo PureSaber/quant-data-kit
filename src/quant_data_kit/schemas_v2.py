@@ -10,11 +10,13 @@ from decimal import Decimal
 from functools import cache
 from typing import Any
 
+import pandas as pd
 import pyarrow as pa
 from jsonschema import Draft202012Validator, FormatChecker
 
 from quant_data_kit.domain_v2 import AssetClass, MarginMode, SessionPhase
 from quant_data_kit.exceptions import ValidationError
+from quant_data_kit.temporal_v2 import parse_timestamp_exact
 
 SCHEMA_VERSION_V2 = "2.0.0"
 
@@ -390,11 +392,14 @@ _EVENT_SCHEMA_BY_TYPE = {
 }
 
 
-def _timestamp(payload: Mapping[str, Any], field_name: str) -> datetime:
-    value = datetime.fromisoformat(str(payload[field_name]).replace("Z", "+00:00"))
+def _timestamp(payload: Mapping[str, Any], field_name: str) -> datetime | pd.Timestamp:
+    try:
+        value = parse_timestamp_exact(str(payload[field_name]), field=field_name)
+    except ValueError as exc:
+        raise ValidationError(f"{field_name} must be exactly representable") from exc
     if value.tzinfo is None or value.utcoffset() != timezone.utc.utcoffset(value):
         raise ValidationError(f"{field_name} must be stored as UTC")
-    return value
+    return value.tz_convert("UTC")
 
 
 def _fixed_value(payload: Mapping[str, Any], field_name: str) -> Decimal:

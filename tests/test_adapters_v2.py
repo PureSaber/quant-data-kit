@@ -6,6 +6,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from quant_data_kit.adapters_v2 import (
@@ -345,6 +346,10 @@ def test_adapter_context_time_and_sequence_primitives_fail_closed() -> None:
         utc_from_text("invalid", "ts")
     with pytest.raises(ValidationError, match="must be UTC"):
         utc_from_text("2026-01-02T00:00:00+08:00", "ts")
+    nanosecond = pd.Timestamp("2026-01-02T00:00:00.000000900Z")
+    assert pd.Timestamp(utc_from_text(nanosecond.isoformat(), "ts")).value == nanosecond.value
+    with pytest.raises(ValidationError, match="ISO-8601"):
+        utc_from_text("2026-01-02T00:00:00.0000009001Z", "ts")
     event_time = datetime(2026, 1, 2, tzinfo=timezone.utc)
     with pytest.raises(ValidationError, match="precedes event_time"):
         event_identity(

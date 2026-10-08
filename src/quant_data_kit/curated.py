@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote
 
+import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -45,6 +46,7 @@ from quant_data_kit.schemas_v2 import (
     validate_arrow_table,
     validate_json_record,
 )
+from quant_data_kit.temporal_v2 import parse_timestamp_exact
 
 
 class Curator(Protocol):
@@ -141,14 +143,14 @@ def _revision_segment(revision_id: str) -> str:
         raise ValidationError("revision_id must be one Windows-safe immutable identifier") from exc
 
 
-def _utc(value: str | datetime, field_name: str) -> datetime:
+def _utc(value: str | datetime, field_name: str) -> datetime | pd.Timestamp:
     parsed = (
-        value
-        if isinstance(value, datetime)
-        else datetime.fromisoformat(value.replace("Z", "+00:00"))
+        value if isinstance(value, datetime) else parse_timestamp_exact(value, field=field_name)
     )
     if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
         raise ValidationError(f"{field_name} must be UTC-aware")
+    if isinstance(parsed, pd.Timestamp):
+        return parsed.tz_convert("UTC")
     return parsed.astimezone(timezone.utc)
 
 

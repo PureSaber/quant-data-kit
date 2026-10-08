@@ -18,7 +18,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 from quant_data_kit.domain_v2 import SymbolMapping
 from quant_data_kit.exceptions import ValidationError
-from quant_data_kit.temporal_v2 import ensure_utc_datetime
+from quant_data_kit.temporal_v2 import ensure_utc_datetime, parse_timestamp_exact
 
 UTC = timezone.utc
 M7_PROVIDERS = ("binance", "okx")
@@ -442,14 +442,10 @@ class RawFrame:
             raise ValidationError("unsupported Raw frame schema")
         try:
             payload = base64.b64decode(str(record["payload_base64"]), validate=True)
-            received = datetime.fromisoformat(str(record["received_at"]).replace("Z", "+00:00"))
-            observed = datetime.fromisoformat(str(record["observed_at"]).replace("Z", "+00:00"))
+            received = parse_timestamp_exact(record["received_at"], field="received_at")
+            observed = parse_timestamp_exact(record["observed_at"], field="observed_at")
             event_text = record.get("event_time")
-            event = (
-                datetime.fromisoformat(str(event_text).replace("Z", "+00:00"))
-                if event_text
-                else None
-            )
+            event = parse_timestamp_exact(event_text, field="event_time") if event_text else None
             frame = cls(
                 frame_kind=str(record["frame_kind"]),
                 provider=str(record["provider"]),

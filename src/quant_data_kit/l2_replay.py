@@ -6,9 +6,10 @@ import hashlib
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
-from datetime import datetime
 from functools import lru_cache
 from typing import Any
+
+import pandas as pd
 
 from quant_data_kit.exceptions import ValidationError
 from quant_data_kit.schemas_v2 import (
@@ -16,6 +17,7 @@ from quant_data_kit.schemas_v2 import (
     BOOK_SNAPSHOT_EVENT_SCHEMA_ID,
     validate_json_record,
 )
+from quant_data_kit.temporal_v2 import parse_timestamp_exact
 
 
 class L2ReplayError(ValidationError):
@@ -464,8 +466,8 @@ class L2BookReconstructor:
 
 
 @lru_cache(maxsize=4096)
-def _parsed_timestamp(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+def _parsed_timestamp(value: str) -> pd.Timestamp:
+    return parse_timestamp_exact(value, field="event_time")
 
 
 def replay_l2(

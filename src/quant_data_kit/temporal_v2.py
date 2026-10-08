@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -11,11 +12,103 @@ import pandas as pd
 from quant_data_kit.exceptions import ValidationError
 
 _UTC_ZONE_NAMES = {"UTC", "Etc/UTC", "GMT", "Etc/GMT", "Z"}
+_MERIDIEM = r"[AaPp]\.?[Mm]\.?"
+_TIME_ZONE = (
+    r"(?:[Zz]|[+-]\d{1,2}(?::?\d{2}){0,2}|"
+    r"[A-Za-z][\w./+-]*(?::\d{2})?(?:\s*[+-]\d{1,2}(?::?\d{2}){0,2})?)"
+)
+_CLOCK_END = (
+    rf"(?=\s*(?:{_MERIDIEM}(?:\s+{_TIME_ZONE})?|"
+    rf"{_TIME_ZONE}(?:\s+{_MERIDIEM})?)?\s*$)"
+)
+_FRACTIONAL_TIME_COMPONENTS = (
+    (
+        re.compile(
+            r"(?P<time>(?:^|[T\s])(?:(?:\d{1,2}:){2}\d{1,2}|\d{6}))"
+            r"(?P<separator>[.,])(?P<fraction>\d+)" + _CLOCK_END,
+            re.IGNORECASE,
+        ),
+        1_000_000_000,
+        0,
+    ),
+    (
+        re.compile(
+            r"(?P<time>(?:^|[T\s])(?:\d{1,2}:\d{1,2}|\d{4}))"
+            r"(?P<separator>[.,])(?P<fraction>\d+)" + _CLOCK_END,
+            re.IGNORECASE,
+        ),
+        60_000_000_000,
+        1,
+    ),
+    (
+        re.compile(
+            r"(?P<time>(?:^|[T\s])\d{1,2})"
+            r"(?P<separator>[.,])(?P<fraction>\d+)" + _CLOCK_END,
+            re.IGNORECASE,
+        ),
+        3_600_000_000_000,
+        2,
+    ),
+)
+_FRACTIONAL_CLOCK = re.compile(
+    r"(?:^|[T\s])\d[\d:]*(?:[.,])\d+" + _CLOCK_END,
+    re.IGNORECASE,
+)
 
 
-def ensure_utc_datetime(value: datetime | pd.Timestamp, *, field: str) -> datetime:
-    """Return a normalized UTC datetime and reject naive or non-UTC zones."""
-    timestamp = value.to_pydatetime() if isinstance(value, pd.Timestamp) else value
+def parse_timestamp_exact(value: object, *, field: str) -> pd.Timestamp:
+    """Parse a timestamp without silently rounding its lowest time component."""
+    if isinstance(value, str):
+        for pattern, component_nanoseconds, lower_components in _FRACTIONAL_TIME_COMPONENTS:
+            match = pattern.search(value)
+            if match is None:
+                continue
+            fraction = match.group("fraction")
+            numerator = int(fraction) * component_nanoseconds
+            offset_nanoseconds, remainder = divmod(numerator, 10 ** len(fraction))
+            if remainder:
+                raise ValueError(f"{field} has precision finer than nanoseconds")
+            whole_seconds, nanoseconds = divmod(offset_nanoseconds, 1_000_000_000)
+            if lower_components == 1:
+                separator = ":" if ":" in match.group("time") else ""
+                lower_time = f"{separator}{whole_seconds:02d}"
+            elif lower_components == 2:
+                minutes, seconds = divmod(whole_seconds, 60)
+                lower_time = f":{minutes:02d}:{seconds:02d}"
+            else:
+                lower_time = ""
+            fractional_seconds = f".{nanoseconds:09d}".rstrip("0") if nanoseconds else ""
+            base_value = (
+                value[: match.start("separator")] + lower_time + value[match.end("fraction") :]
+            )
+            try:
+                result = pd.Timestamp(
+                    value[: match.start("separator")]
+                    + lower_time
+                    + fractional_seconds
+                    + value[match.end("fraction") :]
+                )
+                actual_nanoseconds = result.microsecond * 1_000 + result.nanosecond
+                if actual_nanoseconds == nanoseconds:
+                    return result
+                base = pd.Timestamp(base_value).as_unit("s")
+                epoch_nanoseconds = int(base.asm8.view("i8")) * 1_000_000_000 + nanoseconds
+                if base.tzinfo is None:
+                    return pd.Timestamp(epoch_nanoseconds, unit="ns")
+                return pd.Timestamp(epoch_nanoseconds, unit="ns", tz="UTC").tz_convert(base.tzinfo)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{field} must be a valid timestamp") from exc
+        if _FRACTIONAL_CLOCK.search(value) is not None:
+            raise ValueError(f"{field} must be a valid timestamp")
+    try:
+        return pd.Timestamp(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be a valid timestamp") from exc
+
+
+def ensure_utc_datetime(value: datetime | pd.Timestamp, *, field: str) -> datetime | pd.Timestamp:
+    """Return a normalized UTC instant without discarding Timestamp nanoseconds."""
+    timestamp = value
     if not isinstance(timestamp, datetime):
         raise ValidationError(f"{field} must be a datetime")
     if timestamp.tzinfo is None or timestamp.utcoffset() is None:
@@ -26,6 +119,8 @@ def ensure_utc_datetime(value: datetime | pd.Timestamp, *, field: str) -> dateti
             raise ValidationError(f"{field} must use UTC, got {zone_name}")
     elif timestamp.utcoffset().total_seconds() != 0:
         raise ValidationError(f"{field} must use UTC")
+    if isinstance(timestamp, pd.Timestamp):
+        return timestamp.tz_convert("UTC")
     return timestamp.astimezone(timezone.utc)
 
 
@@ -74,7 +169,6 @@ def validate_bitemporal_frame(
     if invalid_knowledge.any():
         raise ValidationError("superseded_at must be later than available_at")
 
-    far_future = pd.Timestamp.max.tz_localize("UTC")
     ambiguous = 0
     group_key: str | list[str] = key_columns[0] if len(key_columns) == 1 else list(key_columns)
     for _, group in work.groupby(group_key, dropna=False, sort=False):
@@ -86,17 +180,16 @@ def validate_bitemporal_frame(
                 right_effective_end = right[names[effective_to]]
                 left_knowledge_end = left[names[superseded_at]]
                 right_knowledge_end = right[names[superseded_at]]
-                business_overlap = max(
-                    left[names[effective_from]], right[names[effective_from]]
-                ) < min(
-                    left_effective_end if pd.notna(left_effective_end) else far_future,
-                    right_effective_end if pd.notna(right_effective_end) else far_future,
+                business_overlap = (
+                    pd.isna(left_effective_end) or right[names[effective_from]] < left_effective_end
+                ) and (
+                    pd.isna(right_effective_end)
+                    or left[names[effective_from]] < right_effective_end
                 )
-                knowledge_overlap = max(
-                    left[names[available_at]], right[names[available_at]]
-                ) < min(
-                    left_knowledge_end if pd.notna(left_knowledge_end) else far_future,
-                    right_knowledge_end if pd.notna(right_knowledge_end) else far_future,
+                knowledge_overlap = (
+                    pd.isna(left_knowledge_end) or right[names[available_at]] < left_knowledge_end
+                ) and (
+                    pd.isna(right_knowledge_end) or left[names[available_at]] < right_knowledge_end
                 )
                 if business_overlap and knowledge_overlap:
                     ambiguous += 1

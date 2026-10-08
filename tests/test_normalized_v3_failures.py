@@ -519,7 +519,7 @@ def test_arrow_vector_action_quantity_contract(
         )
 
 
-def test_arrow_common_null_empty_precision_source_and_sequence_guards(tmp_path: Path) -> None:
+def test_arrow_common_null_empty_source_and_sequence_guards(tmp_path: Path) -> None:
     base = _record_batch([delta(101, 100)])
     cases = [
         ("null", _replace_column(base, "event_id", pa.array([None], type=pa.string())), "null"),
@@ -531,14 +531,6 @@ def test_arrow_common_null_empty_precision_source_and_sequence_guards(tmp_path: 
             "sequence must be non-negative",
         ),
     ]
-    nanosecond = pa.array(
-        [1767312000000000001],
-        type=pa.timestamp("ns", tz="UTC"),
-    )
-    precision = base
-    for name in ("event_time", "received_at", "available_at"):
-        precision = _replace_column(precision, name, nanosecond)
-    cases.append(("precision", precision, "nanoseconds"))
     for name, changed, message in cases:
         root = tmp_path / name
         with pytest.raises(ValidationError, match=message):
