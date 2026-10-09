@@ -70,7 +70,9 @@ class _WebsocketsConnection:
         self._connection = connection
 
     async def send(self, payload: bytes) -> None:
-        await self._connection.send(payload)  # type: ignore[attr-defined]
+        # Subscription JSON is a UTF-8 text message. Sending bytes directly uses
+        # a binary frame, which OKX rejects as an invalid latency probe.
+        await self._connection.send(payload.decode("utf-8"))  # type: ignore[attr-defined]
 
     async def receive(self, *, timeout_seconds: float) -> bytes:
         try:

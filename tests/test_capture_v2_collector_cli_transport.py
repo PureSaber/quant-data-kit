@@ -684,10 +684,10 @@ def test_websocket_transport_wrapper_bytes_text_timeout_and_tls(
     class Underlying:
         def __init__(self, values: list[Any]) -> None:
             self.values = values
-            self.sent: list[bytes] = []
+            self.sent: list[str] = []
             self.closed = False
 
-        async def send(self, payload: bytes) -> None:
+        async def send(self, payload: str) -> None:
             self.sent.append(payload)
 
         async def recv(self):
@@ -712,7 +712,7 @@ def test_websocket_transport_wrapper_bytes_text_timeout_and_tls(
         asyncio.run(wrapped.receive(timeout_seconds=0.001))
     asyncio.run(wrapped.send(b"subscribe"))
     asyncio.run(wrapped.close())
-    assert underlying.sent == [b"subscribe"] and underlying.closed
+    assert underlying.sent == ["subscribe"] and underlying.closed
 
     connector = WebsocketsConnector()
     with pytest.raises(ValidationError, match="wss"):
