@@ -48,6 +48,7 @@ qdk-providers = "quant_data_kit.cli:main_providers"
 qdk-research-inputs = "quant_data_kit.research_inputs:main"
 qdk-research-dataset = "quant_data_kit.research_dataset:main"
 qdk-financial = "quant_data_kit.financial.cli:main"
+qdk-derivatives = "quant_data_kit.derivatives.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
