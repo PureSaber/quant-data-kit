@@ -93,7 +93,14 @@ def _windows_volume_identity(path: Path) -> VolumeIdentity:
         _fields_ = [("count", wintypes.DWORD), ("extents", DiskExtent * 1)]
 
     anchor = Path(path).resolve(strict=True).anchor.rstrip("\\/")
-    if len(anchor) != 2 or anchor[1] != ":":
+    # Extended-length local paths retain this prefix after resolve(). Only the
+    # volume device handle needs the ordinary drive form; keep file paths long.
+    anchor = anchor.removeprefix("\\\\?\\")
+    if (
+        len(anchor) != 2
+        or anchor[0] not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+        or anchor[1] != ":"
+    ):
         raise CapturePausedError(f"cannot resolve Windows volume anchor for {path}")
     volume_path = rf"\\.\{anchor}"
     create_file = ctypes.windll.kernel32.CreateFileW

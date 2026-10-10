@@ -91,6 +91,13 @@ operator action.
 
 ## Configuration and CLI
 
+On Windows with long-path support disabled, use extended-length local paths in
+the JSON configuration, for example `"hot_root": "\\\\?\\D:\\capture-hot"`.
+Apply the same form to the archive and restore roots. Journal and temporary
+filenames can exceed the legacy path limit even with a short root. The physical
+volume probe maps this spelling to the same drive device and still checks the
+underlying disks; UNC shares and non-drive device paths remain unsupported.
+
 Example configuration, with operator-selected absolute paths:
 
 ```json
