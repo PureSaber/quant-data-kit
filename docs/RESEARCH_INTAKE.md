@@ -54,9 +54,13 @@
 
 支持的类型是`string`、`integer`、`number`、`boolean`、`date`和`datetime`。文本日期必须在`formats`中给出精确格式；没有偏移的`datetime`还必须声明`metadata.timezone`。CSV/TSV必须明确`encoding`和单字符`delimiter`，支持例如`utf-8`、`utf-8-sig`、`gb18030`和制表符。Parquet的`input`只有`format`。
 
-`daily_bars`必须映射`symbol,date,open,high,low,close`，`volume`和`amount`可选。严格的`daily_bars_research`用途还检查实际使用数值列的单位以及`source/provider/timezone/adjustment`。
+`daily_bars`必须映射`symbol,date,open,high,low,close`，`volume`和`amount`可选。严格的`daily_bars_research`用途要求`symbol=string`、`date=date`及OHLC为`integer`或`number`，并检查实际使用数值列的单位以及`source/provider/timezone/adjustment`。严格检查始终以实际scope内的`symbol,date`为自然键核验重复和冲突，不因`primary_key`为空或声明成其他列而跳过。
 
-`history`必须映射`symbol,period_end`和至少一个值列。探索时可以接入没有`available_at`的表，但`historical_financial_factor_backtest`要求`available_at`真实存在、类型为`datetime`、每个scope内的行非空，且`metadata.availability`为`point_in_time`。缺少历史披露时间的最新截面不能用于历史财务因子回放。
+`history`必须映射`symbol,period_end`和至少一个值列。探索时可以接入没有`available_at`的表，但`historical_financial_factor_backtest`要求`period_end=date`、`available_at`真实存在且类型为`datetime`、每个scope内的行非空，并要求`metadata.availability=point_in_time`。缺少历史披露时间的最新截面不能用于历史财务因子回放。
+
+CSV/TSV在交给pandas前先按原始记录校验表头和每行字段数。重复或空表头、字段数与表头不一致都会失败并保留原件及receipt，不允许自动改列名、把首列变成索引或截断多余字段。`inspect-source`只检查返回样本范围内的行结构，并在`structure_validation.rows_checked/complete`中明确范围；`import`会全量扫描。
+
+`daily_bars`和`history`的零行版本会发布为`blocked`且不会替换原有`latest`。泛型`table`可以保留零行探索版本，但报告包含`empty_table`警告。任一严格研究用途的实际scope匹配零行时，`check`返回`empty_research_scope`并拒绝准入。
 
 ## CLI
 
@@ -106,7 +110,7 @@ $python = 'H:\Documents\ChatGPT\temp\puresaber-quant-platform\quant-data-kit\.ve
 }
 ```
 
-`inspect-source`固定返回`columns:[{name,type}]`和`rows`，最多20行，并明确`sample_only:true,quality_checked:false`。CSV/TSV样例按字符串读取，因此证券代码的前导零不会在字段映射前丢失。
+`inspect-source`固定返回`columns:[{name,type}]`和`rows`，最多20行，并明确`sample_only:true,quality_checked:false`及`structure_validation:{rows_checked,complete}`。CSV/TSV样例按字符串读取，因此证券代码的前导零不会在字段映射前丢失。
 
 `import`的`data`始终含`receipt`。成功还含`version`和`report`；容量、契约或读取失败时含`error`且`version:null`。失败receipt会记录已留存原件的hash和路径。质量问题会发布`status=blocked`的不可变版本供查看，但不会推进`latest`。只有`ready`版本推进`latest`；`--parent`提供乐观并发检查，失败刷新不会替换旧版。
 

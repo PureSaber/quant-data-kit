@@ -23,6 +23,7 @@ if __package__ in {None, ""}:
 
 import argparse
 import codecs
+import csv
 import hashlib
 import json
 import math
@@ -356,6 +357,45 @@ def _resolve_format(source: Path, file_format: str | None) -> str:
     return normalized
 
 
+def _validate_delimited_structure(
+    path: Path,
+    *,
+    encoding: str,
+    delimiter: str,
+    max_rows: int,
+) -> tuple[list[str], int, bool]:
+    """Validate raw names and row widths before pandas can reinterpret them."""
+    try:
+        with path.open("r", encoding=encoding, newline="") as handle:
+            reader = csv.reader(handle, delimiter=delimiter, strict=True)
+            try:
+                header = next(reader)
+            except StopIteration as exc:
+                raise ResearchIntakeError("delimited source has no header row") from exc
+            if not header or any(not name for name in header):
+                raise ResearchIntakeError("delimited source header names must be nonempty")
+            duplicates = sorted(name for name, count in Counter(header).items() if count > 1)
+            if duplicates:
+                raise ResearchIntakeError(
+                    f"delimited source contains duplicate raw header names: {duplicates}"
+                )
+            checked = 0
+            complete = True
+            for row in reader:
+                if checked >= max_rows:
+                    complete = False
+                    break
+                checked += 1
+                if len(row) != len(header):
+                    raise ResearchIntakeError(
+                        "delimited source row "
+                        f"{checked + 1} has {len(row)} fields; header has {len(header)}"
+                    )
+    except (UnicodeError, csv.Error) as exc:
+        raise ResearchIntakeError(f"delimited source cannot be parsed exactly: {exc}") from exc
+    return header, checked, complete
+
+
 def inspect_source(
     source: str | Path,
     *,
@@ -392,6 +432,12 @@ def inspect_source(
             separator = "\t"
         if len(separator) != 1 or separator in "\r\n":
             raise ResearchIntakeError("delimiter must be one explicit character")
+        _, structure_rows, structure_complete = _validate_delimited_structure(
+            path,
+            encoding=encoding,
+            delimiter=separator,
+            max_rows=max_sample_rows,
+        )
         frame = pd.read_csv(
             path,
             sep=separator,
@@ -416,6 +462,8 @@ def inspect_source(
         columns = [{"name": field.name, "type": str(field.type)} for field in parquet.schema_arrow]
         output_encoding = None
         output_delimiter = None
+        structure_rows = len(frame)
+        structure_complete = parquet.metadata.num_rows <= max_sample_rows
     rows = [_jsonable(record) for record in frame.to_dict(orient="records")]
     return {
         "source": str(path),
@@ -428,6 +476,10 @@ def inspect_source(
         "sample_limit": max_sample_rows,
         "sample_only": True,
         "quality_checked": False,
+        "structure_validation": {
+            "rows_checked": structure_rows,
+            "complete": structure_complete,
+        },
         "file_bytes": file_bytes,
     }
 
@@ -481,6 +533,14 @@ def _read_source(path: Path, contract: Mapping[str, Any], max_rows: int) -> pd.D
             )
         frame = pd.read_parquet(path)
     else:
+        _, structure_rows, structure_complete = _validate_delimited_structure(
+            path,
+            encoding=input_spec["encoding"],
+            delimiter=input_spec["delimiter"],
+            max_rows=max_rows,
+        )
+        if not structure_complete:
+            raise ResearchIntakeError(f"source rows exceed configured max_rows {max_rows}")
         frame = pd.read_csv(
             path,
             sep=input_spec["delimiter"],
@@ -490,6 +550,10 @@ def _read_source(path: Path, contract: Mapping[str, Any], max_rows: int) -> pd.D
             na_filter=False,
             nrows=max_rows + 1,
         )
+        if len(frame) != structure_rows:
+            raise ResearchIntakeError(
+                "delimited parser row count differs from validated raw records"
+            )
     if len(frame) > max_rows:
         raise ResearchIntakeError(f"source rows {len(frame)} exceed configured max_rows {max_rows}")
     if not frame.columns.is_unique:
@@ -567,6 +631,26 @@ def _normalize(
     ledger: list[dict[str, Any]] = []
     metadata = contract["metadata"]
     source_format = contract["input"]["format"]
+    if mapped.empty:
+        research_kind = contract["kind"] in {"daily_bars", "history"}
+        _issue(
+            ledger,
+            row=None,
+            rule="empty_research_dataset" if research_kind else "empty_table",
+            column=None,
+            value=None,
+            message=(
+                "research dataset contains no data rows"
+                if research_kind
+                else "generic table contains no data rows"
+            ),
+            recommendation=(
+                "provide a nonempty full source before research use"
+                if research_kind
+                else "confirm that an empty exploratory table is intentional"
+            ),
+            severity="error" if research_kind else "warning",
+        )
     for column, declared_type in contract["types"].items():
         values = mapped[column]
         missing = _missing(values)
@@ -753,6 +837,8 @@ def _normalize(
 
     if contract["kind"] == "daily_bars":
         for column in ("open", "high", "low", "close"):
+            if contract["types"].get(column) not in {"integer", "number"}:
+                continue
             invalid = normalized[column].notna() & normalized[column].le(0)
             _issues_for_mask(
                 ledger,
@@ -763,7 +849,7 @@ def _normalize(
                 message="price must be positive",
                 recommendation="correct the source price or document a different table kind",
             )
-        if "volume" in normalized:
+        if "volume" in normalized and contract["types"].get("volume") in {"integer", "number"}:
             invalid = normalized["volume"].notna() & normalized["volume"].lt(0)
             _issues_for_mask(
                 ledger,
@@ -774,20 +860,22 @@ def _normalize(
                 message="volume must be nonnegative",
                 recommendation="correct the source volume and its declared unit",
             )
-        complete = normalized[["open", "high", "low", "close"]].notna().all(axis=1)
-        inconsistent = complete & (
-            normalized["high"].lt(normalized[["open", "close", "low"]].max(axis=1))
-            | normalized["low"].gt(normalized[["open", "close", "high"]].min(axis=1))
-        )
-        _issues_for_mask(
-            ledger,
-            inconsistent,
-            mapped["high"],
-            rule="ohlc_consistency",
-            column="open,high,low,close",
-            message="OHLC values violate high/low bounds",
-            recommendation="correct the source bar; intake does not rewrite prices",
-        )
+        ohlc = ["open", "high", "low", "close"]
+        if all(contract["types"].get(column) in {"integer", "number"} for column in ohlc):
+            complete = normalized[ohlc].notna().all(axis=1)
+            inconsistent = complete & (
+                normalized["high"].lt(normalized[["open", "close", "low"]].max(axis=1))
+                | normalized["low"].gt(normalized[["open", "close", "high"]].min(axis=1))
+            )
+            _issues_for_mask(
+                ledger,
+                inconsistent,
+                mapped["high"],
+                rule="ohlc_consistency",
+                column="open,high,low,close",
+                message="OHLC values violate high/low bounds",
+                recommendation="correct the source bar; intake does not rewrite prices",
+            )
     return normalized, ledger
 
 
@@ -828,7 +916,11 @@ def _row_scope(frame: pd.DataFrame, rows: list[int]) -> dict[str, Any]:
         "date" if "date" in selected else "period_end" if "period_end" in selected else None
     )
     date_min = date_max = None
-    if date_column is not None and selected[date_column].notna().any():
+    if (
+        date_column is not None
+        and pd.api.types.is_datetime64_any_dtype(selected[date_column].dtype)
+        and selected[date_column].notna().any()
+    ):
         date_min = pd.Timestamp(selected[date_column].min()).date().isoformat()
         date_max = pd.Timestamp(selected[date_column].max()).date().isoformat()
     return {
@@ -884,7 +976,11 @@ def _coverage(frame: pd.DataFrame) -> dict[str, Any]:
     symbols = int(frame["symbol"].nunique(dropna=True)) if "symbol" in frame else None
     date_column = "date" if "date" in frame else "period_end" if "period_end" in frame else None
     start = end = None
-    if date_column is not None and frame[date_column].notna().any():
+    if (
+        date_column is not None
+        and pd.api.types.is_datetime64_any_dtype(frame[date_column].dtype)
+        and frame[date_column].notna().any()
+    ):
         start = pd.Timestamp(frame[date_column].min()).date().isoformat()
         end = pd.Timestamp(frame[date_column].max()).date().isoformat()
     return {"rows": len(frame), "symbols": symbols, "start": start, "end": end}
@@ -1353,14 +1449,23 @@ def _scope_masks(
     date_column = "date" if "date" in frame else "period_end" if "period_end" in frame else None
     if (parsed_start is not None or parsed_end is not None) and date_column is None:
         raise ResearchIntakeError("date scope requires canonical date or period_end")
+    typed_date = date_column is not None and pd.api.types.is_datetime64_any_dtype(
+        frame[date_column].dtype
+    )
     if parsed_start is not None:
-        match = frame[date_column].ge(parsed_start)
-        selected &= match.fillna(False)
-        potential &= match.fillna(False) | frame[date_column].isna()
+        if typed_date:
+            match = frame[date_column].ge(parsed_start)
+            selected &= match.fillna(False)
+            potential &= match.fillna(False) | frame[date_column].isna()
+        else:
+            selected &= False
     if parsed_end is not None:
-        match = frame[date_column].le(parsed_end)
-        selected &= match.fillna(False)
-        potential &= match.fillna(False) | frame[date_column].isna()
+        if typed_date:
+            match = frame[date_column].le(parsed_end)
+            selected &= match.fillna(False)
+            potential &= match.fillna(False) | frame[date_column].isna()
+        else:
+            selected &= False
     return selected, potential, parsed_start, parsed_end, date_column
 
 
@@ -1405,6 +1510,57 @@ def _semantic_ledger(
                     f"daily-bars research requires canonical {field}",
                     f"map and type the {field} column explicitly",
                 )
+        required_types = {
+            "symbol": {"string"},
+            "date": {"date"},
+            "open": {"integer", "number"},
+            "high": {"integer", "number"},
+            "low": {"integer", "number"},
+            "close": {"integer", "number"},
+        }
+        for field, accepted in required_types.items():
+            actual = contract["types"].get(field)
+            if actual not in accepted:
+                global_issue(
+                    "purpose_required_type",
+                    field,
+                    f"daily-bars research requires {field} typed as "
+                    + " or ".join(sorted(accepted)),
+                    f"declare types.{field} using the canonical research type",
+                )
+        natural_key = ["symbol", "date"]
+        if all(field in frame for field in natural_key):
+            eligible = selected & frame[natural_key].notna().all(axis=1)
+            duplicate_rows = frame.loc[eligible & frame.duplicated(natural_key, keep=False)]
+            value_columns = [column for column in contract["mapping"] if column not in natural_key]
+            for _, group in duplicate_rows.groupby(natural_key, dropna=False, sort=False):
+                conflicting = (
+                    bool(value_columns)
+                    and len(group[value_columns].astype("string").drop_duplicates()) > 1
+                )
+                rule = (
+                    "daily_bars_natural_key_conflict"
+                    if conflicting
+                    else "daily_bars_natural_key_duplicate"
+                )
+                message = (
+                    "daily-bars natural key is repeated with conflicting values"
+                    if conflicting
+                    else "daily-bars natural key is repeated"
+                )
+                for position in group.index:
+                    _issue(
+                        ledger,
+                        row=int(frame.loc[position, _INTERNAL_ROW]),
+                        rule=rule,
+                        column="symbol,date",
+                        value={field: frame.loc[position, field] for field in natural_key},
+                        message=message,
+                        recommendation=(
+                            "resolve every source row for this symbol and date; "
+                            "intake never chooses a winner"
+                        ),
+                    )
         metadata = contract["metadata"]
         for field in ("source", "provider", "timezone", "adjustment"):
             value = metadata.get(field)
@@ -1434,6 +1590,13 @@ def _semantic_ledger(
                 "historical financial-factor replay requires a history contract",
                 "import the source with an explicit history contract",
             )
+        if contract["types"].get("period_end") != "date":
+            global_issue(
+                "purpose_required_type",
+                "period_end",
+                "historical financial-factor replay requires period_end typed as date",
+                "declare types.period_end=date with the source's exact format",
+            )
         if contract["types"].get("available_at") != "datetime":
             global_issue(
                 "historical_available_at",
@@ -1453,8 +1616,8 @@ def _semantic_ledger(
                     message="historical row lacks disclosure availability time",
                     recommendation="supply actual disclosure availability; do not backdate it",
                 )
-            if "period_end" in frame:
-                period_end = pd.to_datetime(frame["period_end"], errors="coerce", utc=True)
+            if "period_end" in frame and contract["types"].get("period_end") == "date":
+                period_end = pd.to_datetime(frame["period_end"], utc=True)
                 premature = (
                     selected
                     & frame["available_at"].notna()
@@ -1489,6 +1652,13 @@ def _semantic_ledger(
                         f"strict use of {column} requires an explicit unit",
                         f"declare metadata.units.{column}; intake does not infer units",
                     )
+    if purpose != "exploration" and not selected.any():
+        global_issue(
+            "empty_research_scope",
+            None,
+            "strict research scope contains no data rows",
+            "select a scope with complete rows or provide a nonempty source",
+        )
     if symbols is not None and "symbol" in frame:
         present = set(frame.loc[selected, "symbol"].dropna().astype(str))
         missing_symbols = sorted(set(map(str, symbols)) - present)

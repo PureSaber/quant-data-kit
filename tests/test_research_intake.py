@@ -105,6 +105,63 @@ def test_inspect_source_is_bounded_and_preserves_strings(tmp_path):
     assert result["sample_rows"] == 20
     assert result["rows"][0]["ticker"] == "000001"
     assert result["columns"][0] == {"name": "ticker", "type": "string"}
+    assert result["structure_validation"] == {
+        "rows_checked": 20,
+        "complete": False,
+    }
+
+
+def test_duplicate_raw_header_fails_before_pandas_can_mangle_it(tmp_path):
+    source = tmp_path / "duplicate.csv"
+    raw = (
+        b"ticker,trading_day,open_px,high_px,low_px,close_px,close_px,volume_shares\n"
+        b"000001,2026-01-02,10,11,9.5,10.5,99,100\n"
+    )
+    source.write_bytes(raw)
+
+    with pytest.raises(intake.ResearchIntakeError, match="duplicate raw header"):
+        intake.inspect_source(source, encoding="utf-8", delimiter=",")
+
+    root = tmp_path / "catalog"
+    failed = intake.import_dataset(root, source, "bars", _bars_contract())
+    assert failed["receipt"]["status"] == "failed"
+    assert failed["version"] is None
+    assert (root / failed["receipt"]["raw_path"]).read_bytes() == raw
+
+
+def test_delimited_width_is_full_scanned_while_inspection_marks_sample_scope(tmp_path):
+    source = tmp_path / "wide.csv"
+    valid = [f"{index:06d},{index}" for index in range(20)]
+    raw = ("code,value\n" + "\n".join(valid + ["000020,20,200"]) + "\n").encode()
+    source.write_bytes(raw)
+
+    inspected = intake.inspect_source(
+        source,
+        encoding="utf-8",
+        delimiter=",",
+        max_sample_rows=20,
+    )
+    assert inspected["quality_checked"] is False
+    assert inspected["structure_validation"] == {
+        "rows_checked": 20,
+        "complete": False,
+    }
+
+    contract = {
+        "schema_version": intake.CONTRACT_SCHEMA_VERSION,
+        "kind": "table",
+        "input": {"format": "csv", "encoding": "utf-8", "delimiter": ","},
+        "mapping": {"code": "code", "value": "value"},
+        "types": {"code": "string", "value": "number"},
+        "formats": {},
+        "primary_key": ["code"],
+        "metadata": {"source": "test-export", "units": {}},
+    }
+    root = tmp_path / "catalog"
+    failed = intake.import_dataset(root, source, "wide", contract)
+    assert failed["receipt"]["status"] == "failed"
+    assert "has 3 fields; header has 2" in failed["error"]["message"]
+    assert (root / failed["receipt"]["raw_path"]).read_bytes() == raw
 
 
 def test_import_read_preserves_leading_zero_and_raw_bytes(tmp_path):
@@ -187,6 +244,54 @@ def test_invalid_contract_and_stale_parent_retain_raw_without_replacing_latest(t
     assert invalid["receipt"]["raw_sha256"] == hashlib.sha256(second_body).hexdigest()
     assert (root / invalid["receipt"]["raw_path"]).read_bytes() == second_body
     assert intake.list_datasets(root)["datasets"][0]["latest"] == second["id"]
+
+
+def test_empty_research_refresh_keeps_latest_and_empty_strict_scope_is_rejected(tmp_path):
+    root = tmp_path / "catalog"
+    source = tmp_path / "bars.csv"
+    _write_csv(source, _rows())
+    parent = intake.import_dataset(root, source, "bars", _bars_contract())["version"]
+
+    empty_source = tmp_path / "empty.csv"
+    pd.DataFrame(_rows()).head(0).to_csv(empty_source, index=False)
+    empty = intake.import_dataset(
+        root,
+        empty_source,
+        "bars",
+        _bars_contract(),
+        parent=parent["id"],
+    )
+
+    assert empty["version"]["status"] == "blocked"
+    assert any(issue["rule"] == "empty_research_dataset" for issue in empty["report"]["issues"])
+    assert intake.list_datasets(root)["datasets"][0]["latest"] == parent["id"]
+    outside = intake.check_dataset(
+        root,
+        "bars",
+        version=parent["id"],
+        purpose="daily_bars_research",
+        start="2030-01-01",
+        end="2030-01-31",
+    )
+    assert outside["allowed"] is False
+    assert any(issue["rule"] == "empty_research_scope" for issue in outside["issues"])
+
+    table_source = tmp_path / "empty-table.csv"
+    table_source.write_text("code,value\n", encoding="utf-8")
+    table_contract = {
+        "schema_version": intake.CONTRACT_SCHEMA_VERSION,
+        "kind": "table",
+        "input": {"format": "csv", "encoding": "utf-8", "delimiter": ","},
+        "mapping": {"code": "code", "value": "value"},
+        "types": {"code": "string", "value": "number"},
+        "formats": {},
+        "primary_key": [],
+        "metadata": {"source": "empty-export", "units": {}},
+    }
+    table = intake.import_dataset(root, table_source, "empty-table", table_contract)
+    assert table["version"]["status"] == "ready"
+    assert table["report"]["issues"][0]["rule"] == "empty_table"
+    assert table["report"]["issues"][0]["severity"] == "warning"
 
 
 def test_unknown_unit_blocks_only_strict_usage_of_that_column(tmp_path):
@@ -299,6 +404,84 @@ def test_unknown_date_cannot_be_hidden_by_scope_and_boundaries_are_strict(tmp_pa
         )
 
 
+@pytest.mark.parametrize("primary_key", [[], ["volume"]])
+def test_daily_strict_use_checks_natural_key_within_actual_scope(tmp_path, primary_key):
+    source = tmp_path / "bars.csv"
+    rows = _rows()
+    rows.append(
+        {
+            **rows[0],
+            "close_px": "10.75",
+            "volume_shares": "101",
+        }
+    )
+    _write_csv(source, rows)
+    contract = _bars_contract(primary_key=primary_key)
+    root = tmp_path / "catalog"
+    imported = intake.import_dataset(root, source, "bars", contract)
+
+    assert imported["version"]["status"] == "ready"
+    inside = intake.check_dataset(
+        root,
+        "bars",
+        purpose="daily_bars_research",
+        start="2026-01-02",
+        end="2026-01-02",
+    )
+    outside = intake.check_dataset(
+        root,
+        "bars",
+        purpose="daily_bars_research",
+        start="2026-01-05",
+        end="2026-01-05",
+    )
+
+    assert inside["allowed"] is False
+    conflict = next(
+        issue for issue in inside["issues"] if issue["rule"] == "daily_bars_natural_key_conflict"
+    )
+    assert conflict["affected_count"] == 2
+    assert conflict["column"] == "symbol,date"
+    assert outside["allowed"] is True
+
+
+@pytest.mark.parametrize(
+    ("field", "declared_type"),
+    [("date", "string"), ("symbol", "number"), ("close", "string")],
+)
+def test_daily_strict_use_requires_canonical_financial_types(tmp_path, field, declared_type):
+    source = tmp_path / "bars.csv"
+    rows = _rows()
+    contract = _bars_contract()
+    contract["types"][field] = declared_type
+    if field == "date":
+        rows[0]["trading_day"] = "01/02/2026"
+        rows[1]["trading_day"] = "01/05/2026"
+        contract["formats"].pop("date")
+    _write_csv(source, rows)
+    root = tmp_path / "catalog"
+    imported = intake.import_dataset(root, source, "bars", contract)
+
+    assert imported["version"]["status"] == "ready"
+    strict = intake.check_dataset(root, "bars", purpose="daily_bars_research")
+    assert strict["allowed"] is False
+    assert any(
+        issue["rule"] == "purpose_required_type" and issue["column"] == field
+        for issue in strict["issues"]
+    )
+    if field == "date":
+        assert imported["report"]["coverage"]["start"] is None
+        scoped = intake.check_dataset(
+            root,
+            "bars",
+            purpose="daily_bars_research",
+            start="2026-01-01",
+            end="2026-01-31",
+        )
+        assert scoped["allowed"] is False
+        assert scoped["scope"]["matched_rows"] == 0
+
+
 def test_parquet_date_with_time_is_blocked_instead_of_truncated(tmp_path):
     source = tmp_path / "bars.parquet"
     frame = pd.DataFrame(_rows())
@@ -361,6 +544,60 @@ def test_history_without_available_at_never_passes_historical_factor_backtest(tm
     assert strict["allowed"] is False
     assert any(issue["rule"] == "historical_available_at" for issue in strict["issues"])
     assert imported["version"]["status"] == "ready"
+
+
+def test_history_strict_use_requires_period_end_date_type(tmp_path):
+    source = tmp_path / "history.csv"
+    _write_csv(
+        source,
+        [
+            {
+                "ticker": "000001",
+                "period": "2025-12-31",
+                "published": "2026-03-01T08:30:00+08:00",
+                "roe": "0.12",
+            }
+        ],
+    )
+    contract = {
+        "schema_version": intake.CONTRACT_SCHEMA_VERSION,
+        "kind": "history",
+        "input": {"format": "csv", "encoding": "utf-8", "delimiter": ","},
+        "mapping": {
+            "symbol": "ticker",
+            "period_end": "period",
+            "available_at": "published",
+            "roe": "roe",
+        },
+        "types": {
+            "symbol": "string",
+            "period_end": "string",
+            "available_at": "datetime",
+            "roe": "number",
+        },
+        "formats": {"available_at": "%Y-%m-%dT%H:%M:%S%z"},
+        "primary_key": ["symbol", "period_end"],
+        "metadata": {
+            "source": "filings-export",
+            "provider": "test-vendor",
+            "units": {"roe": "ratio"},
+            "availability": "point_in_time",
+        },
+    }
+    root = tmp_path / "catalog"
+    imported = intake.import_dataset(root, source, "history", contract)
+
+    assert imported["version"]["status"] == "ready"
+    strict = intake.check_dataset(
+        root,
+        "history",
+        purpose="historical_financial_factor_backtest",
+    )
+    assert strict["allowed"] is False
+    assert any(
+        issue["rule"] == "purpose_required_type" and issue["column"] == "period_end"
+        for issue in strict["issues"]
+    )
 
 
 def test_naive_history_datetime_without_timezone_is_not_guessed(tmp_path):
