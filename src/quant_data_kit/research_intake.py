@@ -17,9 +17,7 @@ from pathlib import Path
 if __package__ in {None, ""}:
     _SCRIPT_DIRECTORY = Path(__file__).resolve().parent
     sys.path = [
-        entry
-        for entry in sys.path
-        if not entry or Path(entry).resolve() != _SCRIPT_DIRECTORY
+        entry for entry in sys.path if not entry or Path(entry).resolve() != _SCRIPT_DIRECTORY
     ]
     sys.path.insert(0, str(_SCRIPT_DIRECTORY.parent))
 
@@ -387,7 +385,9 @@ def inspect_source(
             codecs.lookup(encoding)
         except LookupError as exc:
             raise ResearchIntakeError(f"unknown source encoding: {encoding}") from exc
-        separator = delimiter if delimiter is not None else ("\t" if selected_format == "tsv" else ",")
+        separator = (
+            delimiter if delimiter is not None else ("\t" if selected_format == "tsv" else ",")
+        )
         if separator == "\\t":
             separator = "\t"
         if len(separator) != 1 or separator in "\r\n":
@@ -408,12 +408,12 @@ def inspect_source(
         parquet = pq.ParquetFile(path)
         batches = parquet.iter_batches(batch_size=max_sample_rows)
         first = next(batches, None)
-        frame = first.to_pandas().head(max_sample_rows) if first is not None else pd.DataFrame(
-            columns=parquet.schema_arrow.names
+        frame = (
+            first.to_pandas().head(max_sample_rows)
+            if first is not None
+            else pd.DataFrame(columns=parquet.schema_arrow.names)
         )
-        columns = [
-            {"name": field.name, "type": str(field.type)} for field in parquet.schema_arrow
-        ]
+        columns = [{"name": field.name, "type": str(field.type)} for field in parquet.schema_arrow]
         output_encoding = None
         output_delimiter = None
     rows = [_jsonable(record) for record in frame.to_dict(orient="records")]
@@ -491,9 +491,7 @@ def _read_source(path: Path, contract: Mapping[str, Any], max_rows: int) -> pd.D
             nrows=max_rows + 1,
         )
     if len(frame) > max_rows:
-        raise ResearchIntakeError(
-            f"source rows {len(frame)} exceed configured max_rows {max_rows}"
-        )
+        raise ResearchIntakeError(f"source rows {len(frame)} exceed configured max_rows {max_rows}")
     if not frame.columns.is_unique:
         duplicates = frame.columns[frame.columns.duplicated()].tolist()
         raise ContractError(f"source contains duplicate column names: {duplicates}")
@@ -560,7 +558,10 @@ def _normalize(
     source: pd.DataFrame, contract: Mapping[str, Any]
 ) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
     mapped = pd.DataFrame(
-        {canonical: source[source_name].copy() for canonical, source_name in contract["mapping"].items()}
+        {
+            canonical: source[source_name].copy()
+            for canonical, source_name in contract["mapping"].items()
+        }
     ).reset_index(drop=True)
     normalized = pd.DataFrame({_INTERNAL_ROW: pd.Series(range(len(mapped)), dtype="int64")})
     ledger: list[dict[str, Any]] = []
@@ -634,11 +635,24 @@ def _normalize(
                             recommendation="map calendar dates separately from instant timestamps",
                         )
                         converted = converted.dt.tz_localize(None)
+                    has_time = converted.notna() & converted.ne(converted.dt.normalize())
+                    _issues_for_mask(
+                        ledger,
+                        has_time,
+                        values,
+                        rule="date_has_time",
+                        column=column,
+                        message="calendar date contains a non-midnight time component",
+                        recommendation="map timestamps as datetime or remove time explicitly upstream",
+                    )
                     converted = converted.dt.normalize()
                 else:
                     if not isinstance(converted.dtype, pd.DatetimeTZDtype):
                         declared_timezone = metadata.get("timezone")
-                        if not isinstance(declared_timezone, str) or declared_timezone.lower() == "unknown":
+                        if (
+                            not isinstance(declared_timezone, str)
+                            or declared_timezone.lower() == "unknown"
+                        ):
                             timezone_values = ~missing & ~invalid
                             _issues_for_mask(
                                 ledger,
@@ -654,9 +668,24 @@ def _normalize(
                             )
                         else:
                             try:
-                                converted = converted.dt.tz_localize(
+                                parsed_naive = converted.copy()
+                                converted = parsed_naive.dt.tz_localize(
                                     declared_timezone, ambiguous="NaT", nonexistent="NaT"
                                 ).dt.tz_convert("UTC")
+                                localization_invalid = parsed_naive.notna() & converted.isna()
+                                _issues_for_mask(
+                                    ledger,
+                                    localization_invalid,
+                                    values,
+                                    rule="datetime_localization",
+                                    column=column,
+                                    message=(
+                                        "datetime is ambiguous or nonexistent in the declared timezone"
+                                    ),
+                                    recommendation=(
+                                        "supply an explicit UTC offset for this source timestamp"
+                                    ),
+                                )
                             except (TypeError, ValueError) as exc:
                                 raise ContractError(
                                     f"invalid or unsupported metadata.timezone: {declared_timezone}"
@@ -705,11 +734,7 @@ def _normalize(
             for _, group in duplicate_rows.groupby(keys, dropna=False, sort=False):
                 original_group = mapped.loc[group.index, nonkeys]
                 conflicting = len(original_group.astype("string").drop_duplicates()) > 1
-                rule = (
-                    "duplicate_primary_key_conflict"
-                    if conflicting
-                    else "duplicate_primary_key"
-                )
+                rule = "duplicate_primary_key_conflict" if conflicting else "duplicate_primary_key"
                 message = (
                     "primary key is repeated with conflicting row values"
                     if conflicting
@@ -788,12 +813,20 @@ def _ledger_frame(ledger: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
 
 def _row_scope(frame: pd.DataFrame, rows: list[int]) -> dict[str, Any]:
     if not rows:
-        return {"rows_with_issue": 0, "symbol_count": 0, "symbols": [], "date_min": None, "date_max": None}
+        return {
+            "rows_with_issue": 0,
+            "symbol_count": 0,
+            "symbols": [],
+            "date_min": None,
+            "date_max": None,
+        }
     selected = frame.loc[frame[_INTERNAL_ROW].isin(rows)]
     symbols: list[str] = []
     if "symbol" in selected:
         symbols = sorted(selected["symbol"].dropna().astype(str).unique().tolist())
-    date_column = "date" if "date" in selected else "period_end" if "period_end" in selected else None
+    date_column = (
+        "date" if "date" in selected else "period_end" if "period_end" in selected else None
+    )
     date_min = date_max = None
     if date_column is not None and selected[date_column].notna().any():
         date_min = pd.Timestamp(selected[date_column].min()).date().isoformat()
@@ -822,7 +855,9 @@ def _aggregate_issues(
         for item in group.head(MAX_ISSUE_SAMPLES).itertuples(index=False):
             row = None if pd.isna(item.row) else int(item.row)
             value = json.loads(item.value) if isinstance(item.value, str) else _jsonable(item.value)
-            samples.append({"row": row, "column": None if pd.isna(column) else str(column), "value": value})
+            samples.append(
+                {"row": row, "column": None if pd.isna(column) else str(column), "value": value}
+            )
         for value in group["row"].dropna().tolist():
             rows.append(int(value))
         first = samples[0]
@@ -874,10 +909,16 @@ def _report(frame: pd.DataFrame, ledger: list[dict[str, Any]]) -> dict[str, Any]
     }
 
 
-def _limits(contract: Mapping[str, Any], max_bytes: int | None, max_rows: int | None) -> tuple[int, int]:
+def _limits(
+    contract: Mapping[str, Any], max_bytes: int | None, max_rows: int | None
+) -> tuple[int, int]:
     contract_limits = contract.get("limits", {})
-    byte_limit = max_bytes if max_bytes is not None else contract_limits.get("max_bytes", DEFAULT_MAX_BYTES)
-    row_limit = max_rows if max_rows is not None else contract_limits.get("max_rows", DEFAULT_MAX_ROWS)
+    byte_limit = (
+        max_bytes if max_bytes is not None else contract_limits.get("max_bytes", DEFAULT_MAX_BYTES)
+    )
+    row_limit = (
+        max_rows if max_rows is not None else contract_limits.get("max_rows", DEFAULT_MAX_ROWS)
+    )
     if not isinstance(byte_limit, int) or byte_limit <= 0:
         raise ContractError("effective max_bytes must be a positive integer")
     if not isinstance(row_limit, int) or row_limit <= 0:
@@ -1164,7 +1205,10 @@ def verify_snapshot(directory: str | Path) -> dict[str, Any]:
         key: value for key, value in manifest.items() if key not in {"id", "identity_sha256"}
     }
     identity_hash = hashlib.sha256(_canonical_bytes(identity)).hexdigest()
-    if manifest.get("identity_sha256") != identity_hash or manifest.get("id") != f"sha256-{identity_hash}":
+    if (
+        manifest.get("identity_sha256") != identity_hash
+        or manifest.get("id") != f"sha256-{identity_hash}"
+    ):
         raise IntegrityError("version manifest identity mismatch")
     raw = manifest.get("raw")
     if not isinstance(raw, dict):
@@ -1206,7 +1250,9 @@ def verify_snapshot(directory: str | Path) -> dict[str, Any]:
         or set(normalized_parquet.schema_arrow.names) != expected_normalized_columns
     ):
         raise IntegrityError("normalized content does not match manifest row contract")
-    if sorted(contract["mapping"]) != manifest.get("columns") or contract["types"] != manifest.get("types"):
+    if sorted(contract["mapping"]) != manifest.get("columns") or contract["types"] != manifest.get(
+        "types"
+    ):
         raise IntegrityError("contract schema differs from manifest")
     issues_parquet = pq.ParquetFile(snapshot / expected_files["issues"]["path"])
     if set(issues_parquet.schema_arrow.names) != set(_ISSUE_COLUMNS):
@@ -1222,7 +1268,9 @@ def verify_snapshot(directory: str | Path) -> dict[str, Any]:
     }
 
 
-def _snapshot_payload(directory: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], pd.DataFrame, pd.DataFrame]:
+def _snapshot_payload(
+    directory: Path,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], pd.DataFrame, pd.DataFrame]:
     verified = verify_snapshot(directory)
     manifest = verified["version"]
     contract = verified["contract"]
@@ -1271,12 +1319,12 @@ def show_dataset(
 def _parse_boundary(value: str | None, field: str) -> pd.Timestamp | None:
     if value is None:
         return None
+    if not isinstance(value, str) or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value) is None:
+        raise ResearchIntakeError(f"{field} must be an ISO calendar date in YYYY-MM-DD form")
     try:
-        parsed = pd.Timestamp(value)
+        parsed = pd.Timestamp(date.fromisoformat(value))
     except ValueError as exc:
-        raise ResearchIntakeError(f"{field} must be an ISO calendar date") from exc
-    if parsed.tzinfo is not None or parsed != parsed.normalize():
-        raise ResearchIntakeError(f"{field} must be a timezone-naive ISO calendar date")
+        raise ResearchIntakeError(f"{field} must be a valid ISO calendar date") from exc
     return parsed
 
 
@@ -1308,11 +1356,11 @@ def _scope_masks(
     if parsed_start is not None:
         match = frame[date_column].ge(parsed_start)
         selected &= match.fillna(False)
-        potential &= match.fillna(True)
+        potential &= match.fillna(False) | frame[date_column].isna()
     if parsed_end is not None:
         match = frame[date_column].le(parsed_end)
         selected &= match.fillna(False)
-        potential &= match.fillna(True)
+        potential &= match.fillna(False) | frame[date_column].isna()
     return selected, potential, parsed_start, parsed_end, date_column
 
 
@@ -1688,7 +1736,9 @@ def diff_versions(
         }
         samples: list[dict[str, Any]] = []
     else:
-        unknown = sorted((set(selected_keys) - set(old_columns)) | (set(selected_keys) - set(new_columns)))
+        unknown = sorted(
+            (set(selected_keys) - set(old_columns)) | (set(selected_keys) - set(new_columns))
+        )
         if unknown:
             raise ResearchIntakeError(f"diff keys are missing from one version: {unknown}")
         if old_frame.duplicated(selected_keys).any() or new_frame.duplicated(selected_keys).any():
@@ -1731,7 +1781,9 @@ def diff_versions(
                 samples.append(
                     {
                         "change": change,
-                        "key": {field: value for field, value in zip(selected_keys, key, strict=True)},
+                        "key": {
+                            field: value for field, value in zip(selected_keys, key, strict=True)
+                        },
                     }
                 )
     schema = {
@@ -1801,7 +1853,9 @@ def _parser() -> argparse.ArgumentParser:
         action_parser.add_argument("--root", required=True)
         action_parser.add_argument("--name", required=True)
         action_parser.add_argument("--version")
-        action_parser.add_argument("--purpose", choices=sorted(SUPPORTED_PURPOSES), default="exploration")
+        action_parser.add_argument(
+            "--purpose", choices=sorted(SUPPORTED_PURPOSES), default="exploration"
+        )
         action_parser.add_argument("--columns", nargs="+")
         action_parser.add_argument("--symbols", nargs="+")
         action_parser.add_argument("--start")
@@ -1837,9 +1891,7 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _scope_arguments(
-    arguments: argparse.Namespace, *, include_version: bool
-) -> dict[str, Any]:
+def _scope_arguments(arguments: argparse.Namespace, *, include_version: bool) -> dict[str, Any]:
     scope = {
         "purpose": arguments.purpose,
         "columns": arguments.columns,

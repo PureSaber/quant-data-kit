@@ -241,9 +241,7 @@ def test_conflicts_invalid_values_scope_and_full_scan(tmp_path):
     assert issues["type_number"]["affected_count"] == 1
     assert issues["duplicate_primary_key_conflict"]["affected_count"] == 3
     assert len(issues["duplicate_primary_key_conflict"]["samples"]) <= intake.MAX_ISSUE_SAMPLES
-    normalized_path = (
-        root / "versions" / imported["version"]["id"] / "normalized.parquet"
-    )
+    normalized_path = root / "versions" / imported["version"]["id"] / "normalized.parquet"
     normalized = pd.read_parquet(normalized_path)
     assert len(normalized) == 4
     assert normalized["close"].isna().sum() == 1
@@ -268,6 +266,52 @@ def test_conflicts_invalid_values_scope_and_full_scan(tmp_path):
     assert scoped["scope"]["full_scan"] is False
     assert full["allowed"] is False
     assert full["scope"]["full_scan"] is True
+
+
+def test_unknown_date_cannot_be_hidden_by_scope_and_boundaries_are_strict(tmp_path):
+    source = tmp_path / "bars.csv"
+    rows = _rows()
+    rows[1]["trading_day"] = "not-a-date"
+    _write_csv(source, rows)
+    root = tmp_path / "catalog"
+    imported = intake.import_dataset(root, source, "bars", _bars_contract())
+
+    scoped = intake.check_dataset(
+        root,
+        "bars",
+        version=imported["version"]["id"],
+        purpose="daily_bars_research",
+        columns=["symbol", "close"],
+        symbols=["000002"],
+        start="2026-01-01",
+        end="2026-01-31",
+    )
+
+    assert scoped["allowed"] is False
+    assert any(issue["rule"] == "type_date" for issue in scoped["issues"])
+    with pytest.raises(intake.ResearchIntakeError, match="YYYY-MM-DD"):
+        intake.check_dataset(
+            root,
+            "bars",
+            version=imported["version"]["id"],
+            purpose="daily_bars_research",
+            start="01/02/2026",
+        )
+
+
+def test_parquet_date_with_time_is_blocked_instead_of_truncated(tmp_path):
+    source = tmp_path / "bars.parquet"
+    frame = pd.DataFrame(_rows())
+    frame["trading_day"] = pd.to_datetime(frame["trading_day"])
+    frame.loc[0, "trading_day"] = pd.Timestamp("2026-01-02 12:30:00")
+    frame.to_parquet(source, index=False)
+    contract = _bars_contract()
+    contract["input"] = {"format": "parquet"}
+
+    imported = intake.import_dataset(tmp_path / "catalog", source, "bars", contract)
+
+    assert imported["version"]["status"] == "blocked"
+    assert any(issue["rule"] == "date_has_time" for issue in imported["report"]["issues"])
 
 
 def test_history_without_available_at_never_passes_historical_factor_backtest(tmp_path):
@@ -301,11 +345,14 @@ def test_history_without_available_at_never_passes_historical_factor_backtest(tm
     root = tmp_path / "catalog"
     imported = intake.import_dataset(root, source, "fundamentals", contract)
 
-    assert intake.check_dataset(
-        root,
-        "fundamentals",
-        purpose="exploration",
-    )["allowed"] is True
+    assert (
+        intake.check_dataset(
+            root,
+            "fundamentals",
+            purpose="exploration",
+        )["allowed"]
+        is True
+    )
     strict = intake.check_dataset(
         root,
         "fundamentals",
@@ -361,9 +408,57 @@ def test_naive_history_datetime_without_timezone_is_not_guessed(tmp_path):
 
     assert imported["version"]["status"] == "blocked"
     assert any(
-        issue["rule"] == "explicit_datetime_timezone"
-        for issue in imported["report"]["issues"]
+        issue["rule"] == "explicit_datetime_timezone" for issue in imported["report"]["issues"]
     )
+
+
+def test_ambiguous_local_datetime_is_reported_instead_of_silently_lost(tmp_path):
+    source = tmp_path / "history.csv"
+    _write_csv(
+        source,
+        [
+            {
+                "ticker": "000001",
+                "period": "2025-12-31",
+                "published": "2026-11-01 01:30:00",
+                "roe": "0.12",
+            }
+        ],
+    )
+    contract = {
+        "schema_version": intake.CONTRACT_SCHEMA_VERSION,
+        "kind": "history",
+        "input": {"format": "csv", "encoding": "utf-8", "delimiter": ","},
+        "mapping": {
+            "symbol": "ticker",
+            "period_end": "period",
+            "available_at": "published",
+            "roe": "roe",
+        },
+        "types": {
+            "symbol": "string",
+            "period_end": "date",
+            "available_at": "datetime",
+            "roe": "number",
+        },
+        "formats": {
+            "period_end": "%Y-%m-%d",
+            "available_at": "%Y-%m-%d %H:%M:%S",
+        },
+        "primary_key": ["symbol", "period_end"],
+        "metadata": {
+            "source": "filings-export",
+            "provider": "test-vendor",
+            "units": {"roe": "ratio"},
+            "timezone": "America/New_York",
+            "availability": "point_in_time",
+        },
+    }
+
+    imported = intake.import_dataset(tmp_path / "catalog", source, "history", contract)
+
+    assert imported["version"]["status"] == "blocked"
+    assert any(issue["rule"] == "datetime_localization" for issue in imported["report"]["issues"])
 
 
 def test_tampered_raw_and_normalized_are_rejected(tmp_path):
