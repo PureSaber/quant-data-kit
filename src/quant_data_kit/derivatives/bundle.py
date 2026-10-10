@@ -84,6 +84,21 @@ class DerivativeBundle:
     quotes: tuple[Quote, ...]
     identity: str
 
+    @property
+    def allowed_modes(self):
+        source = self.manifest.get("source", {})
+        return (
+            source.get("allowed_modes", ["analysis", "replay"])
+            if isinstance(source, dict)
+            else ["analysis", "replay"]
+        )
+
+    def require_mode(self, mode):
+        if mode not in self.allowed_modes:
+            raise ValueError(
+                f"input permits {self.allowed_modes}; {mode} is blocked by source usage restrictions"
+            )
+
     def contract(self, instrument_id):
         try:
             return next(c for c in self.contracts if c.instrument_id == instrument_id)
@@ -123,6 +138,7 @@ class DerivativeBundle:
             "venues": sorted({c.venue for c in self.contracts}),
             "input_sha256": self.identity,
             "limits": self.manifest["limits"],
+            "allowed_modes": self.allowed_modes,
         }
 
 
@@ -144,6 +160,25 @@ def load_bundle(root):
         if not isinstance(manifest.get(name), str) or not manifest[name].strip():
             raise ValueError(f"{name} must be declared")
     utc(manifest["captured_at"])
+    source = manifest.get("source", {})
+    if manifest["provider"] in {"cboe-vix", "nse-fo", "deribit"}:
+        if (
+            not isinstance(source, dict)
+            or source.get("schema") != "qdk.free-derivatives/v1"
+            or "allowed_modes" not in source
+        ):
+            raise ValueError("public derivative input must declare its usage restrictions")
+        if manifest["provider"] == "deribit" and source["allowed_modes"] != ["analysis"]:
+            raise ValueError("Deribit USD projections are analysis-only")
+    if isinstance(source, dict) and "allowed_modes" in source:
+        modes = source["allowed_modes"]
+        if (
+            not isinstance(modes, list)
+            or not modes
+            or any(m not in {"analysis", "replay"} for m in modes)
+            or len(set(modes)) != len(modes)
+        ):
+            raise ValueError("invalid input usage restrictions")
     files = manifest.get("files", {})
     if set(files) != {"contracts.json", "quotes.csv"}:
         raise ValueError("unexpected bundle file set")
