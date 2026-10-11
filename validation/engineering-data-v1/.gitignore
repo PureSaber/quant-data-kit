@@ -1,0 +1,4 @@
+*.log
+*.xml
+coverage.json
+.coverage*
