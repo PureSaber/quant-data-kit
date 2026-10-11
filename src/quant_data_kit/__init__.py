@@ -10,6 +10,7 @@ from quant_data_kit.adapters_v2 import (
     ProviderAdapter,
     adapt_fixture_messages,
 )
+from quant_data_kit.artifacts import ArtifactRef, ArtifactStore
 from quant_data_kit.calendar import trading_days_between
 from quant_data_kit.capture_v2 import (
     M7_CAPABILITIES,
@@ -122,6 +123,7 @@ from quant_data_kit.schemas_v2 import (
     validate_event_stream,
     validate_json_record,
 )
+from quant_data_kit.shared_snapshots import SnapshotManifest, SnapshotStore
 from quant_data_kit.snapshots import DatasetSnapshot, create_snapshot, load_snapshot
 from quant_data_kit.storage import (
     DataManifest,
@@ -155,6 +157,8 @@ __all__ = [
     "AdapterInstrument",
     "AggressorSide",
     "ArchiveReceipt",
+    "ArtifactRef",
+    "ArtifactStore",
     "AssetClass",
     "BarEvent",
     "BinanceFixtureAdapter",
@@ -204,6 +208,8 @@ __all__ = [
     "RawObjectReference",
     "RawSegmentWriter",
     "SessionPhase",
+    "SnapshotManifest",
+    "SnapshotStore",
     "StatusEvent",
     "StoragePolicy",
     "StreamConfig",
