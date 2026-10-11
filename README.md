@@ -70,6 +70,7 @@ move or rebuild a release tag to repair a dependency resolution.
 |--------|---------|
 | `storage` | Parquet I/O, content/schema hashes, manifest tracking, cache helpers |
 | `snapshots` | Immutable content-addressed Parquet snapshots |
+| `artifacts` / `shared_snapshots` | Shared content-addressed artifacts, reference protection and bounded PIT queries ([guide](docs/SHARED_ARTIFACTS.md)) |
 | `temporal` | PIT joins, availability audits, listing/delisting lifecycle filters |
 | `validate` | OHLCV logic, missing, duplicate and trading-calendar coverage checks |
 | `calendar` | SSE trading calendar helpers |
