@@ -202,3 +202,9 @@ from quant_data_kit.providers.akshare import fetch_hs300_constituents
 缺少可核验发布时间的估值记录使用 `available_at=NaT`、`availability_basis=unknown`，
 严格 PIT 消费者应拒绝它们。历史指数成分回溯包含查询终点之后、当前快照之前的调整。
 升级后应重新抓取旧价格缓存；旧缓存的单位和时间语义不能仅靠升级包自动修复。
+
+## 机构研究扩展（2026-10-11）
+
+追加并购事件修订库与历史可见读取；数据契约见 [CORPORATE_EVENTS](docs/CORPORATE_EVENTS.md)。
+
+统一入口与合成输入用法见相邻仓库 [quant-workspace/profiles/institutional-research](../quant-workspace/profiles/institutional-research/README.md)。此增量提供离线合成验收、账户回放和独立 Studio 入口；真实市场数据与权限仍须明确提供。验收命令及边界见上述入口。
