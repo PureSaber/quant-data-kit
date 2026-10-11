@@ -12,6 +12,7 @@ import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from urllib.parse import quote
 
 SCHEMA = "qdk.corporate-events/1"
 FIELDS = {
@@ -95,7 +96,15 @@ def canonical(row):
 def _connect(path, *, readonly=False):
     path = Path(path).resolve()
     if readonly:
-        db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+        # pathlib encodes Windows \\?\ as URI authority %3F, which SQLite rejects.
+        # SQLite's Windows VFS handles extended filenames after URI decoding.
+        name = path.as_posix()
+        if name.startswith("//?/UNC/"):
+            name = "//" + name[8:]
+        elif name.startswith("//?/"):
+            name = name[4:]
+        uri = "file:" + ("//" if name.startswith("//") else "") + quote(name, safe="/:")
+        db = sqlite3.connect(uri + "?mode=ro", uri=True)
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
         db = sqlite3.connect(path)
