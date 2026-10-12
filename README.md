@@ -1,5 +1,8 @@
 # quant-data-kit
 
+Immutable downstream revision tracing and frozen paired result comparison are
+available through [Revision impact](docs/REVISION_IMPACT.md).
+
 On Windows, deep lake partitions can exceed `MAX_PATH`. If system long paths are
 disabled, supply an absolute extended-length lake root (for example
 `Path("//?/F:/lake")`). The pytest temporary-directory fixture uses this form
