@@ -1,5 +1,12 @@
 # quant-data-kit
 
+`point_in_time_join` rejects different facts with the same entity/availability timestamp;
+exact repeats are deduplicated. Resolve conflicting source revisions explicitly before joining.
+`fetch_earnings_forecasts(start_date, end_date)` filters the announcement window and queries
+all report quarters from the prior calendar year through the end year. Supply `report_periods`
+explicitly for older revisions. Its next-weekday effective date remains an approximation,
+not an exchange-calendar or full historical PIT certification.
+
 Immutable downstream revision tracing and frozen paired result comparison are
 available through [Revision impact](docs/REVISION_IMPACT.md).
 

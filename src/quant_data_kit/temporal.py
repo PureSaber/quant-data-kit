@@ -71,6 +71,12 @@ def point_in_time_join(
     if missing_facts:
         raise ValidationError(f"Missing fact columns: {missing_facts}")
 
+    # An availability timestamp is not a revision tie-breaker. Identical selected
+    # facts are harmless; conflicting values must never depend on input order.
+    right = right[[*by, availability_output, *selected]].drop_duplicates()
+    if right.duplicated([*by, availability_output], keep=False).any():
+        raise ValidationError("Conflicting facts for the same point-in-time key and availability")
+
     tolerance = pd.Timedelta(max_age) if max_age is not None else None
     parts: list[pd.DataFrame] = []
     group_key: str | list[str] = by[0] if len(by) == 1 else list(by)

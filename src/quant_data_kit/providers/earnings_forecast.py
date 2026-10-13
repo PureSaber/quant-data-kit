@@ -63,10 +63,34 @@ def fetch_earnings_forecasts(
     end_date: str,
     fetch_fn: Callable[[str], pd.DataFrame] | None = None,
     sleep_seconds: float = 0.2,
+    *,
+    report_periods: list[str] | None = None,
 ) -> pd.DataFrame:
-    """Fetch quarterly earnings forecasts; effective_date is next business day after announce."""
+    """Fetch announcements in the inclusive date window, querying report periods separately.
+
+    Default coverage is all quarters of the preceding calendar year through the
+    end year (including future quarter ends for early forecasts). Explicit
+    ``report_periods`` supports older restatements; this is not full PIT coverage.
+    ``effective_date`` retains the legacy weekday approximation, not an exchange calendar.
+    """
+    start, end = parse_date(start_date), parse_date(end_date)
+    if start > end:
+        raise ValueError("start_date must not be after end_date")
+    periods = (
+        report_periods
+        if report_periods is not None
+        else _quarter_end_dates(f"{start.year - 1}-01-01", f"{end.year}-12-31")
+    )
+    if any(
+        not isinstance(p, str)
+        or len(p) != 8
+        or not p.isdigit()
+        or not pd.Timestamp(p).is_quarter_end
+        for p in periods
+    ):
+        raise ValueError("report_periods must contain YYYYMMDD quarter ends")
     frames: list[pd.DataFrame] = []
-    for period in _quarter_end_dates(start_date, end_date):
+    for period in sorted(set(periods)):
         if fetch_fn is not None:
             raw = fetch_fn(period)
         else:
@@ -110,11 +134,16 @@ def fetch_earnings_forecasts(
         )
         out["forecast_score"] = out["forecast_type"].map(_score_forecast_type)
         out["effective_date"] = out["announce_date"] + pd.offsets.BDay(1)
+        out = out[out["announce_date"].between(start, end)]
         frames.append(out)
 
     if not frames:
         return pd.DataFrame(columns=EARNINGS_COLUMNS)
 
     result = pd.concat(frames, ignore_index=True)
-    result = result.sort_values(["symbol", "effective_date"]).reset_index(drop=True)
+    result = (
+        result.drop_duplicates()
+        .sort_values(["symbol", "effective_date", "report_period"])
+        .reset_index(drop=True)
+    )
     return result[EARNINGS_COLUMNS]
