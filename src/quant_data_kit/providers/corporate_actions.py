@@ -254,7 +254,9 @@ def normalize_etf_actions(
     return result.sort_values(["symbol", "ex_date"]).reset_index(drop=True)
 
 
-def fetch_etf_corporate_actions(symbols: list[str], captured_at: str) -> pd.DataFrame:
+def fetch_etf_corporate_actions(
+    symbols: list[str], captured_at: str, *, start=None, end=None
+) -> pd.DataFrame:
     """Fetch evidenced ETF cash dividends from two Eastmoney fund endpoints."""
     import akshare as ak
 
@@ -268,6 +270,18 @@ def fetch_etf_corporate_actions(symbols: list[str], captured_at: str) -> pd.Data
             sleep_seconds=0.5,
             error_message=f"Eastmoney ETF dividend feed unavailable for {code}",
         )
+        if not dividends.empty and (start is not None or end is not None):
+            # Validate dates before filtering: unknown dates could fall inside
+            # the required window and must never be silently discarded.
+            dates = pd.to_datetime(dividends["除息日"], errors="raise").dt.normalize()
+            if dates.isna().any():
+                raise ValueError("ETF dividend contains an unknown ex-date")
+            included = pd.Series(True, index=dividends.index)
+            if start is not None:
+                included &= dates >= pd.Timestamp(start)
+            if end is not None:
+                included &= dates <= pd.Timestamp(end)
+            dividends = dividends[included]
         if dividends.empty:
             frames.append(pd.DataFrame(columns=_ETF_ACTION_COLUMNS))
             continue

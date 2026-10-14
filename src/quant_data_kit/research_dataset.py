@@ -269,7 +269,9 @@ def _fetch_live_source(
         request["price_start"], request["end"], provider="akshare_sina"
     )
     calendar = pd.DataFrame({"date": load_sse_trade_dates(provider="akshare_sina")})
-    actions = fetch_etf_corporate_actions(symbols, captured_at.isoformat())
+    actions = fetch_etf_corporate_actions(
+        symbols, captured_at.isoformat(), start=dataset_start, end=end
+    )
     if not actions.empty:
         ex_dates = pd.to_datetime(actions["ex_date"]).dt.normalize()
         actions = actions[(ex_dates >= dataset_start) & (ex_dates <= end)].reset_index(drop=True)
