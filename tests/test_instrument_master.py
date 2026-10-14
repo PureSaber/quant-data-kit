@@ -215,6 +215,18 @@ def test_manifest_source_identity_change_is_rejected(tmp_path):
         load_instrument_master(bundle)
 
 
+def test_machine_assisted_assertions_do_not_claim_human_review(tmp_path):
+    source = _source(tmp_path / "source")
+    path = source / "declaration.json"
+    declaration = json.loads(path.read_text(encoding="utf-8"))
+    origin = "ai-assisted-restoration-of-prior-index-not-human-reviewed"
+    declaration["coverage"]["assertion_origin"] = origin
+    path.write_text(json.dumps(declaration), encoding="utf-8")
+    manifest = import_instrument_master(source, tmp_path / "bundle")
+    assert manifest["semantic_validation"]["assertion_origin"] == origin
+    assert load_instrument_master(tmp_path / "bundle")[0] == manifest
+
+
 def test_catalog_rejects_late_rule_and_unobserved_future_validity(tmp_path):
     with pytest.raises(ValueError, match="not available before"):
         import_instrument_master(

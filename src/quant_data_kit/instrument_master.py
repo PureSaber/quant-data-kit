@@ -1,7 +1,7 @@
 """Evidence-bound, point-in-time historical instrument-master imports.
 
 Catalog rows are rule versions rather than flattened symbol records. Every
-consumer field is bound to a human-extracted typed assertion with a locator and
+consumer field is bound to a declared typed assertion with a locator and
 short excerpt on a hash-verified official attachment, or is explicitly
 declared unavailable. Validation proves the attachment and declared assertion
 have not changed; it does not claim to parse or semantically certify the source
@@ -716,7 +716,9 @@ def import_instrument_master(source_root: Path, output: Path) -> dict[str, Any]:
             "rights_note": _nonempty(declaration.get("rights_note"), "rights_note"),
             "coverage": declaration.get("coverage", {}),
             "semantic_validation": {
-                "assertion_origin": "human-extracted-with-locator-and-short-excerpt",
+                "assertion_origin": declaration["coverage"].get(
+                    "assertion_origin", "human-extracted-with-locator-and-short-excerpt"
+                ),
                 "attachment_integrity": "sha256-verified",
                 "attachment_text_semantically_verified_by_code": False,
             },
@@ -769,6 +771,11 @@ def load_instrument_master(root: Path) -> tuple[dict[str, Any], pd.DataFrame]:
         (root / manifest["source"]["declaration_file"]).read_text(encoding="utf-8")
     )
     _validate_source_schema(source_declaration)
+    expected_origin = source_declaration["coverage"].get(
+        "assertion_origin", "human-extracted-with-locator-and-short-excerpt"
+    )
+    if manifest["semantic_validation"].get("assertion_origin") != expected_origin:
+        raise ValueError("Historical instrument-master assertion origin differs from source")
     if _timestamp(source_declaration.get("captured_at"), "source.captured_at") != captured_at:
         raise ValueError("Historical instrument-master source capture changed")
     if source_declaration.get("catalog_sha256") != manifest["source"]["catalog_sha256"]:
