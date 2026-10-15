@@ -627,4 +627,9 @@ def test_all_frozen_v2_golden_records_match_json_and_arrow_field_contracts() -> 
     assert set(records) == expected_schema_ids
     for schema_id, payload in records.items():
         validate_json_record(schema_id, payload)
-        assert list(payload) == get_arrow_schema(schema_id).names
+        names = get_arrow_schema(schema_id).names
+        if schema_id == CORPORATE_ACTION_EVENT_SCHEMA_ID:
+            # The optional entitlement extension preserves the original golden
+            # event payload. Its new non-null record is tested independently.
+            names = [name for name in names if name != "share_entitlement"]
+        assert list(payload) == names

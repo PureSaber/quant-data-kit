@@ -11,6 +11,7 @@ from typing import Any, ClassVar, TypeAlias
 from quant_data_kit.domain_v2 import fixed_point_payload
 from quant_data_kit.exceptions import ValidationError
 from quant_data_kit.fixed_point import FixedPoint
+from quant_data_kit.share_entitlements import ShareEntitlement
 from quant_data_kit.temporal_v2 import ensure_utc_datetime
 
 
@@ -281,14 +282,29 @@ class CorporateActionEvent(_MarketEventBase):
     ratio: FixedPoint | None = None
     cash_amount: FixedPoint | None = None
     currency: str | None = None
+    share_entitlement: ShareEntitlement | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
         object.__setattr__(self, "action_type", _required_text(self.action_type, "action_type"))
         if not isinstance(self.effective_date, date) or isinstance(self.effective_date, datetime):
             raise ValidationError("effective_date must be a date")
-        if self.ratio is None and self.cash_amount is None:
+        if self.ratio is None and self.cash_amount is None and self.share_entitlement is None:
             raise ValidationError("corporate action requires ratio or cash_amount")
+        if self.share_entitlement is not None:
+            terms = self.share_entitlement
+            if self.action_type not in {
+                "share_credit",
+                "cash_and_share_distribution",
+                "cash_dividend_entitlement",
+            }:
+                raise ValidationError("share entitlement is incompatible with this action type")
+            if not isinstance(terms, ShareEntitlement) or self.ratio is not None:
+                raise ValidationError("explicit share entitlement cannot also carry a split ratio")
+            if self.event_id != terms.entitlement_id + ":" + terms.account_id:
+                raise ValidationError("share event ID must bind entitlement and account")
+            if self.available_at < terms.credit_at or self.available_at < terms.known_at:
+                raise ValidationError("share credit is not available yet")
         if self.ratio is not None:
             _non_negative(self.ratio, "ratio")
         if self.cash_amount is not None:
@@ -406,6 +422,8 @@ def market_event_payload(event: MarketEvent) -> dict[str, Any]:
             cash_amount=(fixed_point_payload(event.cash_amount) if event.cash_amount else None),
             currency=event.currency,
         )
+        if event.share_entitlement is not None:
+            payload["share_entitlement"] = event.share_entitlement.payload()
     elif isinstance(event, StatusEvent):
         payload.update(status=event.status, reason=event.reason)
     else:
