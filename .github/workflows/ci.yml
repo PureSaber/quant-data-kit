@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   test:
-    name: test (${{ matrix.test-label || matrix.python-version }})
+    name: ${{ matrix.os == 'windows-latest' && format('test (Windows, {0})', matrix.python-version) || format('test ({0})', matrix.python-version) }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
