@@ -45,6 +45,24 @@ _BOOK_LEVEL = pa.struct(
     ]
 )
 _BOOK_LEVEL_LIST = pa.list_(pa.field("item", _BOOK_LEVEL, nullable=False))
+_SHARE_ENTITLEMENT = pa.struct(
+    [
+        pa.field("entitlement_id", pa.string()),
+        pa.field("account_id", pa.string()),
+        pa.field("record_date", pa.string()),
+        pa.field("eligible_quantity", _FIXED_POINT),
+        pa.field("ordinary_additional_ratio", _FIXED_POINT),
+        pa.field("known_at", pa.string()),
+        pa.field("credit_at", pa.string()),
+        pa.field("sellable_date", pa.string()),
+        pa.field("evidence_source", pa.string()),
+        pa.field("evidence_sha256", pa.string()),
+        pa.field("evidence_status", pa.string()),
+        pa.field("confirmed_quantity", _FIXED_POINT),
+        pa.field("fractional_rule", pa.string()),
+        pa.field("reference_price", _FIXED_POINT),
+    ]
+)
 
 
 def _field(name: str, data_type: pa.DataType, *, nullable: bool = False) -> pa.Field:
@@ -179,6 +197,7 @@ _ARROW_SCHEMAS: dict[str, pa.Schema] = {
             _field("ratio", _FIXED_POINT, nullable=True),
             _field("cash_amount", _FIXED_POINT, nullable=True),
             _field("currency", pa.string(), nullable=True),
+            _field("share_entitlement", _SHARE_ENTITLEMENT, nullable=True),
         ]
     ),
     STATUS_EVENT_SCHEMA_ID: pa.schema(
@@ -379,6 +398,33 @@ _JSON_SCHEMAS.update(
     }
 )
 
+_share_properties = {
+    name: {"type": "string"}
+    for name in (
+        "entitlement_id",
+        "account_id",
+        "record_date",
+        "known_at",
+        "credit_at",
+        "sellable_date",
+        "evidence_source",
+        "evidence_sha256",
+        "evidence_status",
+        "fractional_rule",
+    )
+}
+for _name in (
+    "eligible_quantity",
+    "ordinary_additional_ratio",
+    "confirmed_quantity",
+    "reference_price",
+):
+    _share_properties[_name] = {"oneOf": [_FIXED_POINT_JSON, {"type": "null"}]}
+_JSON_SCHEMAS[CORPORATE_ACTION_EVENT_SCHEMA_ID]["properties"]["share_entitlement"] = {
+    "oneOf": [_object_schema(_share_properties, list(_share_properties)), {"type": "null"}]
+}
+_JSON_SCHEMAS[CORPORATE_ACTION_EVENT_SCHEMA_ID]["required"].remove("share_entitlement")
+
 _EVENT_SCHEMA_BY_TYPE = {
     "quote": QUOTE_EVENT_SCHEMA_ID,
     "trade": TRADE_EVENT_SCHEMA_ID,
@@ -492,8 +538,25 @@ def _validate_event_semantics(schema_id: str, payload: Mapping[str, Any]) -> Non
     elif schema_id == CORPORATE_ACTION_EVENT_SCHEMA_ID:
         ratio = payload["ratio"]
         cash_amount = payload["cash_amount"]
-        if ratio is None and cash_amount is None:
+        if ratio is None and cash_amount is None and payload.get("share_entitlement") is None:
             raise ValidationError("corporate action requires ratio or cash_amount")
+        if payload.get("share_entitlement") is not None:
+            from quant_data_kit.share_entitlements import ShareEntitlement
+
+            terms = ShareEntitlement.from_payload(payload["share_entitlement"])
+            if payload["action_type"] not in {
+                "share_credit",
+                "cash_and_share_distribution",
+                "cash_dividend_entitlement",
+            }:
+                raise ValidationError("share entitlement is incompatible with this action type")
+            if (
+                ratio is not None
+                or payload["event_id"] != terms.entitlement_id + ":" + terms.account_id
+            ):
+                raise ValidationError("share entitlement event identity or ratio conflict")
+            if _timestamp(payload, "available_at") < max(terms.known_at, terms.credit_at):
+                raise ValidationError("share entitlement credit is not available yet")
         if ratio is not None and _fixed_value(payload, "ratio") < 0:
             raise ValidationError("ratio must be non-negative")
         if cash_amount is not None:
@@ -634,6 +697,11 @@ def validate_arrow_table(
     version: str = SCHEMA_VERSION_V2,
 ) -> None:
     expected = get_arrow_schema(schema_id, version)
+    if (
+        schema_id == CORPORATE_ACTION_EVENT_SCHEMA_ID
+        and "share_entitlement" not in table.column_names
+    ):
+        expected = expected.remove(expected.get_field_index("share_entitlement"))
     if table.schema != expected:
         raise ValidationError(
             f"Arrow schema mismatch for {schema_id}: expected={expected}, actual={table.schema}"

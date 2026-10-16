@@ -1,0 +1,42 @@
+{
+  "event_type": "corporate_action",
+  "event_id": "action:account",
+  "instrument_id": "600763",
+  "event_time": "2024-07-05T00:00:00Z",
+  "received_at": "2024-07-05T00:00:00Z",
+  "available_at": "2024-07-05T00:00:00Z",
+  "source": "fixture:verified-announcement",
+  "trading_day": "2024-07-05",
+  "session_id": "day",
+  "sequence": 0,
+  "action_type": "share_credit",
+  "effective_date": "2024-07-04",
+  "ratio": null,
+  "cash_amount": null,
+  "currency": null,
+  "share_entitlement": {
+    "entitlement_id": "action",
+    "account_id": "account",
+    "record_date": "2024-07-04",
+    "eligible_quantity": {
+      "units": 100,
+      "scale": 0
+    },
+    "ordinary_additional_ratio": {
+      "units": 400595,
+      "scale": 6
+    },
+    "known_at": "2024-07-01T00:00:00+00:00",
+    "credit_at": "2024-07-05T00:00:00+00:00",
+    "sellable_date": "2024-07-05",
+    "evidence_source": "fixture:verified-announcement",
+    "evidence_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "evidence_status": "confirmed",
+    "confirmed_quantity": {
+      "units": 41,
+      "scale": 0
+    },
+    "fractional_rule": "largest_fraction",
+    "reference_price": null
+  }
+}
