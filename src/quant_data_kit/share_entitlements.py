@@ -75,10 +75,25 @@ class ShareEntitlement:
             "confirmed",
             "sensitivity_floor",
             "sensitivity_ceil",
+            "rule_determined",
         }:
             raise ValidationError("unknown share evidence status")
-        if self.fractional_rule not in {"unknown", "exact_pro_rata", "floor", "largest_fraction"}:
+        if self.fractional_rule not in {
+            "unknown",
+            "exact_pro_rata",
+            "floor",
+            "ceil",
+            "largest_fraction",
+        }:
             raise ValidationError("unknown fractional allocation rule")
+        if self.evidence_status == "rule_determined" and self.fractional_rule not in {
+            "floor",
+            "ceil",
+            "exact_pro_rata",
+        }:
+            raise ValidationError(
+                "rule-determined entitlement requires a deterministic issuer rule"
+            )
         if (self.confirmed_quantity is not None) != (self.evidence_status == "confirmed"):
             raise ValidationError("only confirmed evidence may supply an exact credited quantity")
         if self.confirmed_quantity is not None and (
@@ -100,6 +115,10 @@ class ShareEntitlement:
         raw = self.eligible_quantity.to_decimal() * self.ordinary_additional_ratio.to_decimal()
         if raw == raw.to_integral_value():
             return raw
+        if self.evidence_status == "rule_determined" and self.fractional_rule in {"floor", "ceil"}:
+            return raw.to_integral_value(
+                rounding=ROUND_FLOOR if self.fractional_rule == "floor" else ROUND_CEILING
+            )
         if self.evidence_status == "sensitivity_floor":
             return raw.to_integral_value(rounding=ROUND_FLOOR)
         if self.evidence_status == "sensitivity_ceil":
