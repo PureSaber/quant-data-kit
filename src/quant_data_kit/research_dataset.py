@@ -332,7 +332,9 @@ def _normalize_frames(
         missing = set(ACTION_COLUMNS) - set(actions)
         if missing:
             raise ValueError(f"actions input lacks fields: {sorted(missing)}")
-        actions = actions[ACTION_COLUMNS].copy()
+        from quant_data_kit.etf_events import SPLIT_COLUMNS
+
+        actions = actions[ACTION_COLUMNS + [c for c in SPLIT_COLUMNS if c in actions]].copy()
         actions["symbol"] = actions["symbol"].map(normalize_symbol)
         for column in (
             "announced_date",
